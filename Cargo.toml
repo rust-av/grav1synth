@@ -1,0 +1,18 @@
+[package]
+name = "grav1synth"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.59.0"
+license = "MIT"
+repository = "https://gitlab.com/shssoichiro/grav1synth"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+av-format = "0.3.1"
+av-ivf = "0.2.3"
+nom = "7.1.0"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
