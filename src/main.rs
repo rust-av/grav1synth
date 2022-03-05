@@ -39,6 +39,13 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::missing_panics_doc)]
 
+mod cli;
 mod parser;
 
-pub use crate::parser::*;
+use clap::Parser;
+
+pub fn main() {
+    let args = cli::Args::parse();
+
+    cli::run(&args).unwrap();
+}
