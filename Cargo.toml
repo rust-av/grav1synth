@@ -13,6 +13,7 @@ categories = ["multimedia", "multimedia:video", "multimedia:encoding"]
 anyhow = "1.0.55"
 av-format = "0.3.1"
 av-ivf = "0.2.3"
+bitvec = { version = "1", default-features = false, features = ["alloc", "std"] }
 clap = { version = "3.1.5", features = ["derive"] }
 nom = "7.1.0"
 num_enum = "0.5.7"
