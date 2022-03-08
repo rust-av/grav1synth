@@ -47,11 +47,3 @@ impl BitstreamParser {
         }
     }
 }
-
-pub struct PacketData {
-    //
-}
-
-pub fn decode_packet(raw_packet: &[u8]) -> Result<PacketData> {
-    //
-}
