@@ -9,6 +9,7 @@
 #![allow(clippy::inconsistent_struct_constructor)]
 #![allow(clippy::inline_always)]
 #![allow(clippy::module_name_repetitions)]
+#![allow(clippy::redundant_closure_for_method_calls)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::struct_excessive_bools)]
 #![allow(clippy::use_self)]

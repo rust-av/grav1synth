@@ -3,7 +3,7 @@
 use nom::{bytes::complete::take, IResult};
 
 #[derive(Clone, Copy)]
-pub(super) struct ReadResult<T>
+pub(in crate::parser) struct ReadResult<T>
 where
     T: Copy,
 {
@@ -12,7 +12,7 @@ where
 }
 
 /// Unsigned integer represented by a variable number of little-endian bytes.
-pub(super) fn leb128(mut input: &[u8]) -> IResult<&[u8], ReadResult<u64>> {
+pub(in crate::parser) fn leb128(mut input: &[u8]) -> IResult<&[u8], ReadResult<u64>> {
     let mut value = 0u64;
     let mut leb128_bytes = 0;
     for i in 0..8u8 {
