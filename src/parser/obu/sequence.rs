@@ -100,35 +100,35 @@ impl ParserContext {
 
         self.operating_point = self.choose_operating_point();
         let cur_operating_point_idc = self.operating_point_idc[self.operating_point];
-        let (input, frame_width_bits_minus_1) = frame_width_bits_minus_1(input)?;
-        let (input, frame_height_bits_minus_1) = frame_height_bits_minus_1(input)?;
+        let (input, frame_width_bits_minus_1) = bit_parsers::take(4usize)(input)?;
+        let (input, frame_height_bits_minus_1) = bit_parsers::take(4usize)(input)?;
         let (input, max_frame_width_minus_1) =
-            max_frame_width_minus_1(input, frame_width_bits_minus_1 + 1)?;
+            bit_parsers::take(frame_width_bits_minus_1 + 1)(input)?;
         self.max_frame_width_minus_1 = max_frame_width_minus_1;
         let (mut input, max_frame_height_minus_1) =
-            max_frame_height_minus_1(input, frame_height_bits_minus_1 + 1)?;
+            bit_parsers::take(frame_height_bits_minus_1 + 1)(input)?;
         self.max_frame_height_minus_1 = max_frame_height_minus_1;
         self.frame_id_numbers_present_flag = if reduced_still_picture_header {
             false
         } else {
-            let (rem, result) = frame_id_numbers_present_flag(input)?;
+            let (rem, frame_id_numbers_present_flag) = take_bool_bit(input)?;
             input = rem;
-            result.1
+            frame_id_numbers_present_flag
         };
         if self.frame_id_numbers_present_flag {
-            let (rem, result) = delta_frame_id_length_minus_2(input)?;
+            let (rem, delta_frame_id_length_minus_2) = bit_parsers::take(4usize)(input)?;
             input = rem;
-            self.delta_frame_id_length_minus_2 = result.1;
-            let (rem, result) = additional_frame_id_length_minus_1(input)?;
+            self.delta_frame_id_length_minus_2 = delta_frame_id_length_minus_2;
+            let (rem, additional_frame_id_length_minus_1) = bit_parsers::take(3usize)(input)?;
             input = rem;
-            self.additional_frame_id_length_minus_1 = result.1;
+            self.additional_frame_id_length_minus_1 = additional_frame_id_length_minus_1;
         }
-        let (input, result) = use_128x128_superblock(input)?;
-        self.use_128x128_superblock = result;
-        let (input, result) = enable_filter_intra(input)?;
-        self.enable_filter_intra = result;
-        let (mut input, result) = enable_intra_edge_filter(input)?;
-        self.enable_intra_edge_filter = result;
+        let (input, use_128x128_superblock) = take_bool_bit(input)?;
+        self.use_128x128_superblock = use_128x128_superblock;
+        let (input, enable_filter_intra) = take_bool_bit(input)?;
+        self.enable_filter_intra = enable_filter_intra;
+        let (mut input, enable_intra_edge_filter) = take_bool_bit(input)?;
+        self.enable_intra_edge_filter = enable_intra_edge_filter;
 
         if reduced_still_picture_header {
             self.enable_interintra_compound = false;
@@ -142,29 +142,29 @@ impl ParserContext {
             self.seq_force_integer_mv = SelectIntegerMv;
             self.order_hint_bits = 0;
         } else {
-            let (rem, result) = enable_interintra_compound(input)?;
+            let (rem, enable_interintra_compound) = take_bool_bit(input)?;
             input = rem;
-            self.enable_interintra_compound = result.1;
-            let (rem, result) = enable_masked_compound(input)?;
+            self.enable_interintra_compound = enable_interintra_compound;
+            let (rem, enable_masked_compound) = take_bool_bit(input)?;
             input = rem;
-            self.enable_masked_compound = result.1;
-            let (rem, result) = enable_warped_motion(input)?;
+            self.enable_masked_compound = enable_masked_compound;
+            let (rem, enable_warped_motion) = take_bool_bit(input)?;
             input = rem;
-            self.enable_warped_motion = result.1;
-            let (rem, result) = enable_dual_filter(input)?;
+            self.enable_warped_motion = enable_warped_motion;
+            let (rem, enable_dual_filter) = take_bool_bit(input)?;
             input = rem;
-            self.enable_dual_filter = result.1;
-            let (rem, result) = enable_order_hint(input)?;
+            self.enable_dual_filter = enable_dual_filter;
+            let (rem, enable_order_hint) = take_bool_bit(input)?;
             input = rem;
-            self.enable_order_hint = result.1;
+            self.enable_order_hint = enable_order_hint;
 
             if self.enable_order_hint {
-                let (rem, result) = enable_jnt_comp(input)?;
+                let (rem, enable_jnt_comp) = take_bool_bit(input)?;
                 input = rem;
-                self.enable_jnt_comp = result.1;
-                let (rem, result) = enable_ref_frame_mvs(input)?;
+                self.enable_jnt_comp = enable_jnt_comp;
+                let (rem, enable_ref_frame_mvs) = take_bool_bit(input)?;
                 input = rem;
-                self.enable_ref_frame_mvs = result.1;
+                self.enable_ref_frame_mvs = enable_ref_frame_mvs;
             } else {
                 self.enable_jnt_comp = false;
                 self.enable_ref_frame_mvs = false;
