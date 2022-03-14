@@ -13,6 +13,11 @@ use av_ivf::demuxer::IvfDemuxer;
 use bitvec::vec::BitVec;
 use nom::IResult;
 
+use crate::parser::obu::{
+    color::ColorConfig,
+    sequence::{DecoderModelInfo, TimingInfo},
+};
+
 pub struct BitstreamParser {
     demuxer: DemuxerContext,
 }
@@ -55,21 +60,22 @@ pub struct ParserContext {
     timing_info: Option<TimingInfo>,
     decoder_model_info: Option<DecoderModelInfo>,
     initial_display_delay_present_flag: bool,
-    operating_points_cnt_minus_1: u32,
-    operating_point: u32,
+    operating_points_cnt_minus_1: u8,
+    operating_point: usize,
     operating_point_idc: Vec<BitVec>,
+    cur_operating_point_idc: BitVec,
     seq_level_idx: Vec<u8>,
     seq_tier: Vec<bool>,
     decoder_model_present_for_this_op: BitVec,
     initial_display_delay_present_for_this_op: BitVec,
-    initial_display_delay_minus_1: Vec<u32>,
+    initial_display_delay_minus_1: Vec<u8>,
     seq_profile: u8,
     still_picture: bool,
     max_frame_width_minus_1: u32,
     max_frame_height_minus_1: u32,
     frame_id_numbers_present_flag: bool,
-    delta_frame_id_length_minus_2: u32,
-    additional_frame_id_length_minus_1: u32,
+    delta_frame_id_length_minus_2: u8,
+    additional_frame_id_length_minus_1: u8,
     use_128x128_superblock: bool,
     enable_filter_intra: bool,
     enable_intra_edge_filter: bool,
@@ -80,9 +86,9 @@ pub struct ParserContext {
     enable_order_hint: bool,
     enable_jnt_comp: bool,
     enable_ref_frame_mvs: bool,
-    seq_force_screen_content_tools: bool,
-    seq_force_integer_mv: bool,
-    order_hint_bits: u32,
+    seq_force_screen_content_tools: u8,
+    seq_force_integer_mv: u8,
+    order_hint_bits: u8,
     enable_superres: bool,
     enable_cdef: bool,
     enable_restoration: bool,

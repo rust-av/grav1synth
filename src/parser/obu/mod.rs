@@ -1,4 +1,5 @@
-mod sequence;
+pub(in crate::parser) mod color;
+pub(in crate::parser) mod sequence;
 
 use nom::{
     bits::complete as bit_parsers,
@@ -29,13 +30,12 @@ impl ParserContext {
             (input, size - 1 - obu_extension_flag.is_some() as usize)
         };
 
-        let cur_operating_point_idc = &self.operating_point_idc[self.operating_point];
         if ![ObuType::SequenceHeader, ObuType::TemporalDelimiter].contains(&obu_type)
-            && cur_operating_point_idc.any()
+            && self.cur_operating_point_idc.any()
         {
             if let Some(ext) = obu_extension_flag {
-                let in_temporal_layer = cur_operating_point_idc[ext.temporal_id as usize];
-                let in_spatial_layer = cur_operating_point_idc[ext.spatial_id as usize + 8];
+                let in_temporal_layer = self.cur_operating_point_idc[ext.temporal_id as usize];
+                let in_spatial_layer = self.cur_operating_point_idc[ext.spatial_id as usize + 8];
                 if !in_temporal_layer || !in_spatial_layer {
                     return drop_obu(input, obu_size);
                 }

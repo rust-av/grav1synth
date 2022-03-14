@@ -1,10 +1,14 @@
 use nom::{bits::complete as bit_parsers, sequence::tuple, IResult};
 
 use crate::parser::{
+    obu::color::color_config,
     spec::uvlc,
     util::{take_bit_vec, take_bool_bit},
     ParserContext,
 };
+
+const SELECT_SCREEN_CONTENT_TOOLS: u8 = 2;
+const SELECT_INTEGER_MV: u8 = 2;
 
 impl ParserContext {
     pub(in crate::parser) fn sequence_header_obu(
@@ -103,7 +107,7 @@ impl ParserContext {
         }
 
         self.operating_point = self.choose_operating_point();
-        let cur_operating_point_idc = self.operating_point_idc[self.operating_point];
+        self.cur_operating_point_idc = self.operating_point_idc[self.operating_point].clone();
         let (input, frame_width_bits_minus_1) = bit_parsers::take(4usize)(input)?;
         let (input, frame_height_bits_minus_1) = bit_parsers::take(4usize)(input)?;
         let (input, max_frame_width_minus_1) =
@@ -181,10 +185,10 @@ impl ParserContext {
             } else {
                 let (rem, seq_force_screen_content_tools) = take_bool_bit(input)?;
                 input = rem;
-                seq_force_screen_content_tools
+                seq_force_screen_content_tools as u8
             };
 
-            if self.seq_force_screen_content_tools {
+            if self.seq_force_screen_content_tools > 0 {
                 let (rem, seq_choose_integer_mv) = take_bool_bit(input)?;
                 input = rem;
                 if seq_choose_integer_mv {
@@ -192,7 +196,7 @@ impl ParserContext {
                 } else {
                     let (rem, seq_force_integer_mv) = take_bool_bit(input)?;
                     input = rem;
-                    self.seq_force_integer_mv = seq_force_integer_mv;
+                    self.seq_force_integer_mv = seq_force_integer_mv as u8;
                 }
             } else {
                 self.seq_force_integer_mv = SELECT_INTEGER_MV;
@@ -213,7 +217,7 @@ impl ParserContext {
         self.enable_cdef = enable_cdef;
         let (input, enable_restoration) = take_bool_bit(input)?;
         self.enable_restoration = enable_restoration;
-        let (input, color_config) = color_config(input)?;
+        let (input, color_config) = color_config(input, self.seq_profile)?;
         self.color_config = color_config;
         let (input, film_grain_params_present) = take_bool_bit(input)?;
         self.film_grain_params_present = film_grain_params_present;
@@ -223,7 +227,7 @@ impl ParserContext {
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct TimingInfo {
+pub(in crate::parser) struct TimingInfo {
     num_units_in_display_tick: u32,
     time_scale: u32,
     equal_picture_interval: bool,
@@ -249,4 +253,40 @@ pub(in crate::parser) fn timing_info(input: (&[u8], usize)) -> IResult<(&[u8], u
         info.num_ticks_per_picture_minus_1 = num_ticks_per_picture_minus_1;
     }
     Ok((input, info))
+}
+
+#[derive(Clone, Copy, Default)]
+pub(in crate::parser) struct DecoderModelInfo {
+    buffer_delay_length_minus_1: u8,
+    num_units_in_decoding_tick: u32,
+    buffer_removal_time_length_minus_1: u8,
+    frame_presentation_time_length_minus_1: u8,
+}
+
+pub(in crate::parser) fn decoder_model_info(
+    input: (&[u8], usize),
+) -> IResult<(&[u8], usize), DecoderModelInfo> {
+    let (
+        input,
+        (
+            buffer_delay_length_minus_1,
+            num_units_in_decoding_tick,
+            buffer_removal_time_length_minus_1,
+            frame_presentation_time_length_minus_1,
+        ),
+    ) = tuple((
+        bit_parsers::take(5usize),
+        bit_parsers::take(32usize),
+        bit_parsers::take(5usize),
+        bit_parsers::take(5usize),
+    ))(input)?;
+    Ok((
+        input,
+        DecoderModelInfo {
+            buffer_delay_length_minus_1,
+            num_units_in_decoding_tick,
+            buffer_removal_time_length_minus_1,
+            frame_presentation_time_length_minus_1,
+        },
+    ))
 }
