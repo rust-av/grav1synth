@@ -1,3 +1,4 @@
+use bitvec::vec::BitVec;
 use nom::{bits::complete as bit_parsers, combinator::map, IResult};
 
 use crate::parser::ParserContext;
@@ -21,6 +22,13 @@ pub(in crate::parser) fn take_zero_bits(
     bits: usize,
 ) -> IResult<(&[u8], usize), ()> {
     map(bit_parsers::tag(0u8, bits), |_| ())(input)
+}
+
+pub(in crate::parser) fn take_bit_vec(
+    input: (&[u8], usize),
+    bits: usize,
+) -> IResult<(&[u8], usize), BitVec> {
+    todo!()
 }
 
 pub(in crate::parser) fn trailing_bits(

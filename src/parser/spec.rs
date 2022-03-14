@@ -1,6 +1,8 @@
 //! Generic methods used in the AV1 spec in various places
 
-use nom::{bytes::complete::take, IResult};
+use nom::{bits::complete as bit_parsers, bytes::complete::take, IResult};
+
+use crate::parser::util::take_bool_bit;
 
 #[derive(Clone, Copy)]
 pub(in crate::parser) struct ReadResult<T>
@@ -35,4 +37,23 @@ pub(in crate::parser) fn leb128(mut input: &[u8]) -> IResult<&[u8], ReadResult<u
             bytes_read: leb128_bytes,
         },
     ))
+}
+
+/// Variable length unsigned n-bit number appearing directly in the bitstream.
+pub(in crate::parser) fn uvlc(mut input: (&[u8], usize)) -> IResult<(&[u8], usize), u32> {
+    let mut leading_zeros = 0usize;
+    loop {
+        let (rem, done) = take_bool_bit(input)?;
+        input = rem;
+        if done {
+            break;
+        }
+        leading_zeros += 1;
+    }
+
+    if leading_zeros >= 32 {
+        return Ok((input, u32::MAX));
+    }
+    let (input, value): (_, u32) = bit_parsers::take(leading_zeros)(input)?;
+    Ok((input, value + (1 << leading_zeros) - 1))
 }

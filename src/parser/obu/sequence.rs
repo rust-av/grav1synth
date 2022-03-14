@@ -1,6 +1,10 @@
 use nom::{bits::complete as bit_parsers, sequence::tuple, IResult};
 
-use crate::parser::{util::take_bool_bit, ParserContext};
+use crate::parser::{
+    spec::uvlc,
+    util::{take_bit_vec, take_bool_bit},
+    ParserContext,
+};
 
 impl ParserContext {
     pub(in crate::parser) fn sequence_header_obu(
@@ -55,7 +59,7 @@ impl ParserContext {
             input = rem;
             self.operating_points_cnt_minus_1 = operating_points_cnt_minus_1;
             for i in 0..=self.operating_points_cnt_minus_1 {
-                let (rem, operating_point_idc) = bit_parsers::take(12usize)(input)?;
+                let (rem, operating_point_idc) = take_bit_vec(input, 12)?;
                 input = rem;
                 self.operating_point_idc[i] = operating_point_idc;
 
@@ -138,8 +142,8 @@ impl ParserContext {
             self.enable_order_hint = false;
             self.enable_jnt_comp = false;
             self.enable_ref_frame_mvs = false;
-            self.seq_for_screen_content_tools = SelectScreenContentTools;
-            self.seq_force_integer_mv = SelectIntegerMv;
+            self.seq_force_screen_content_tools = SELECT_SCREEN_CONTENT_TOOLS;
+            self.seq_force_integer_mv = SELECT_INTEGER_MV;
             self.order_hint_bits = 0;
         } else {
             let (rem, enable_interintra_compound) = take_bool_bit(input)?;
@@ -169,11 +173,80 @@ impl ParserContext {
                 self.enable_jnt_comp = false;
                 self.enable_ref_frame_mvs = false;
             }
-            todo!();
-            self.seq_for_screen_content_tools = SelectScreenContentTools;
-            self.seq_force_integer_mv = SelectIntegerMv;
-            self.order_hint_bits = 0;
+
+            let (rem, seq_choose_screen_content_tools) = take_bool_bit(input)?;
+            input = rem;
+            self.seq_force_screen_content_tools = if seq_choose_screen_content_tools {
+                SELECT_SCREEN_CONTENT_TOOLS
+            } else {
+                let (rem, seq_force_screen_content_tools) = take_bool_bit(input)?;
+                input = rem;
+                seq_force_screen_content_tools
+            };
+
+            if self.seq_force_screen_content_tools {
+                let (rem, seq_choose_integer_mv) = take_bool_bit(input)?;
+                input = rem;
+                if seq_choose_integer_mv {
+                    self.seq_force_integer_mv = SELECT_INTEGER_MV;
+                } else {
+                    let (rem, seq_force_integer_mv) = take_bool_bit(input)?;
+                    input = rem;
+                    self.seq_force_integer_mv = seq_force_integer_mv;
+                }
+            } else {
+                self.seq_force_integer_mv = SELECT_INTEGER_MV;
+            }
+
+            if self.enable_order_hint {
+                let (rem, order_hint_bits_minus_1) = bit_parsers::take(3usize)(input)?;
+                input = rem;
+                self.order_hint_bits = order_hint_bits_minus_1 + 1;
+            } else {
+                self.order_hint_bits = 0;
+            }
         }
-        todo!("the stuff after the big if/else")
+
+        let (input, enable_superres) = take_bool_bit(input)?;
+        self.enable_superres = enable_superres;
+        let (input, enable_cdef) = take_bool_bit(input)?;
+        self.enable_cdef = enable_cdef;
+        let (input, enable_restoration) = take_bool_bit(input)?;
+        self.enable_restoration = enable_restoration;
+        let (input, color_config) = color_config(input)?;
+        self.color_config = color_config;
+        let (input, film_grain_params_present) = take_bool_bit(input)?;
+        self.film_grain_params_present = film_grain_params_present;
+
+        Ok((input, ()))
     }
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct TimingInfo {
+    num_units_in_display_tick: u32,
+    time_scale: u32,
+    equal_picture_interval: bool,
+    num_ticks_per_picture_minus_1: u32,
+}
+
+pub(in crate::parser) fn timing_info(input: (&[u8], usize)) -> IResult<(&[u8], usize), TimingInfo> {
+    let (mut input, (num_units_in_display_tick, time_scale, equal_picture_interval)) =
+        tuple((
+            bit_parsers::take(32usize),
+            bit_parsers::take(32usize),
+            take_bool_bit,
+        ))(input)?;
+    let mut info = TimingInfo {
+        num_units_in_display_tick,
+        time_scale,
+        equal_picture_interval,
+        ..Default::default()
+    };
+    if equal_picture_interval {
+        let (rem, num_ticks_per_picture_minus_1) = uvlc(input)?;
+        input = rem;
+        info.num_ticks_per_picture_minus_1 = num_ticks_per_picture_minus_1;
+    }
+    Ok((input, info))
 }

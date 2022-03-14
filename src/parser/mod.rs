@@ -10,7 +10,7 @@ use av_format::{
     demuxer::{Context as DemuxerContext, Event},
 };
 use av_ivf::demuxer::IvfDemuxer;
-use bitvec::{vec::BitVec, BitArr};
+use bitvec::vec::BitVec;
 use nom::IResult;
 
 pub struct BitstreamParser {
@@ -50,35 +50,52 @@ impl BitstreamParser {
     }
 }
 
+#[derive(Default)]
 pub struct ParserContext {
     timing_info: Option<TimingInfo>,
     decoder_model_info: Option<DecoderModelInfo>,
     initial_display_delay_present_flag: bool,
-    operating_points_cnt_minus_1: usize,
-    operating_point: usize,
-    operating_point_idc: Vec<BitArr!(for 12)>,
+    operating_points_cnt_minus_1: u32,
+    operating_point: u32,
+    operating_point_idc: Vec<BitVec>,
     seq_level_idx: Vec<u8>,
     seq_tier: Vec<bool>,
     decoder_model_present_for_this_op: BitVec,
     initial_display_delay_present_for_this_op: BitVec,
-    initial_display_delay_minus_1: Vec<usize>,
+    initial_display_delay_minus_1: Vec<u32>,
+    seq_profile: u8,
+    still_picture: bool,
+    max_frame_width_minus_1: u32,
+    max_frame_height_minus_1: u32,
+    frame_id_numbers_present_flag: bool,
+    delta_frame_id_length_minus_2: u32,
+    additional_frame_id_length_minus_1: u32,
+    use_128x128_superblock: bool,
+    enable_filter_intra: bool,
+    enable_intra_edge_filter: bool,
+    enable_interintra_compound: bool,
+    enable_masked_compound: bool,
+    enable_warped_motion: bool,
+    enable_dual_filter: bool,
+    enable_order_hint: bool,
+    enable_jnt_comp: bool,
+    enable_ref_frame_mvs: bool,
+    seq_force_screen_content_tools: bool,
+    seq_force_integer_mv: bool,
+    order_hint_bits: u32,
+    enable_superres: bool,
+    enable_cdef: bool,
+    enable_restoration: bool,
+    color_config: ColorConfig,
+    film_grain_params_present: bool,
 }
 
 impl ParserContext {
     /// We should make a new one of these for each keyframe
     pub fn new() -> Self {
         Self {
-            timing_info: None,
-            decoder_model_info: None,
-            initial_display_delay_present_flag: false,
-            operating_points_cnt_minus_1: 0,
-            operating_point: 0,
-            operating_point_idc: Vec::new(),
-            seq_level_idx: Vec::new(),
-            seq_tier: Vec::new(),
-            decoder_model_present_for_this_op: BitVec::new(),
-            initial_display_delay_present_for_this_op: BitVec::new(),
-            initial_display_delay_minus_1: Vec::new(),
+            operating_point_idc: vec![BitVec::repeat(false, 12)],
+            ..Default::default()
         }
     }
 

@@ -29,7 +29,7 @@ impl ParserContext {
             (input, size - 1 - obu_extension_flag.is_some() as usize)
         };
 
-        let cur_operating_point_idc = self.operating_point_idc[self.operating_point];
+        let cur_operating_point_idc = &self.operating_point_idc[self.operating_point];
         if ![ObuType::SequenceHeader, ObuType::TemporalDelimiter].contains(&obu_type)
             && cur_operating_point_idc.any()
         {
