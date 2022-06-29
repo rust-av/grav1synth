@@ -1,5 +1,4 @@
 #![deny(clippy::all)]
-#![warn(clippy::cargo)]
 #![warn(clippy::nursery)]
 #![warn(clippy::pedantic)]
 #![allow(clippy::cast_possible_truncation)]
@@ -42,13 +41,91 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::missing_panics_doc)]
 
-mod cli;
-mod parser;
+pub mod parser {
+    pub mod frame;
+    pub mod grain;
+    pub mod obu;
+    pub mod sequence;
+    pub mod util;
+}
 
-use clap::Parser;
+use std::path::PathBuf;
 
-pub fn main() {
-    let args = cli::Args::parse();
+use anyhow::Result;
+use clap::{Parser, Subcommand};
 
-    cli::run(&args).unwrap();
+use crate::parser::grain::{get_grain_header, FilmGrainParser};
+
+pub fn main() -> Result<()> {
+    let args = Args::parse();
+
+    match args.command {
+        Commands::Inspect { input, output } => {
+            assert!(
+                input.extension().unwrap().to_ascii_lowercase() == "ivf",
+                "Currently, only .ivf input is supported"
+            );
+            assert!(
+                output.extension().unwrap().to_ascii_lowercase() == "ivf",
+                "Currently, only .ivf output is supported"
+            );
+
+            let mut parser = FilmGrainParser::open(&input)?;
+            let mut grain_headers = Vec::new();
+            while let Some(packet) = parser.read_packet()? {
+                grain_headers.push(get_grain_header(&packet)?);
+            }
+        }
+        Commands::Apply {
+            input,
+            output,
+            grain,
+        } => todo!(),
+        Commands::Remove { input, output } => todo!(),
+    }
+
+    Ok(())
+}
+
+#[derive(Parser, Debug)]
+pub struct Args {
+    #[clap(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Commands {
+    /// Outputs a film grain table corresponding to a given AV1 video,
+    /// or reports if there is no film grain information.
+    Inspect {
+        /// The AV1 file to inspect.
+        #[clap(value_parser)]
+        input: PathBuf,
+        /// The path to the output film grain table.
+        #[clap(long, short, value_parser)]
+        output: PathBuf,
+    },
+    /// Applies film grain from a table file to a given AV1 video,
+    /// and outputs it at a given `output` path.
+    Apply {
+        /// The AV1 file to apply grain to.
+        #[clap(value_parser)]
+        input: PathBuf,
+        /// The path to write the grain-synthed AV1 file to.
+        #[clap(long, short, value_parser)]
+        output: PathBuf,
+        /// The path to the input film grain table.
+        #[clap(long, short, value_parser)]
+        grain: PathBuf,
+    },
+    /// Removes all film grain from a given AV1 video,
+    /// and outputs it at a given `output` path.
+    Remove {
+        /// The AV1 file to remove grain from.
+        #[clap(value_parser)]
+        input: PathBuf,
+        /// The path to write the non-grain-synthed AV1 file to.
+        #[clap(long, short, value_parser)]
+        output: PathBuf,
+    },
 }
