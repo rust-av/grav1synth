@@ -5,6 +5,7 @@ use arrayvec::ArrayVec;
 use av_format::{
     buffer::AccReader,
     demuxer::{Context as DemuxerContext, Event},
+    stream::Stream,
 };
 use av_ivf::demuxer::IvfDemuxer;
 
@@ -22,6 +23,11 @@ impl FilmGrainParser {
         demuxer.read_headers()?;
 
         Ok(Self { demuxer })
+    }
+
+    #[must_use]
+    pub fn get_headers(&self) -> &Stream {
+        &self.demuxer.info.streams[0]
     }
 
     pub fn read_packet(&mut self) -> Result<Option<Vec<u8>>> {
@@ -56,7 +62,7 @@ pub const GS_NUM_Y_COEFFS: usize = 24;
 /// The max number of coefficients per chroma plane for grain synthesis
 pub const GS_NUM_UV_COEFFS: usize = 25;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilmGrainHeader {
     Disable,
     CopyRefFrame(usize),
@@ -65,7 +71,7 @@ pub enum FilmGrainHeader {
 
 /// Specifies parameters for enabling decoder-side grain synthesis for
 /// a segment of video from `start_time` to `end_time`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilmGrainParams {
     /// Random seed used for generating grain
     pub grain_seed: u16,

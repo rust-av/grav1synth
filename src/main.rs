@@ -49,7 +49,7 @@ pub mod parser {
     pub mod util;
 }
 
-use std::path::PathBuf;
+use std::{env, path::PathBuf};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -57,6 +57,11 @@ use clap::{Parser, Subcommand};
 use crate::parser::grain::{get_grain_header, FilmGrainParser};
 
 pub fn main() -> Result<()> {
+    if env::var("RUST_LOG").is_err() {
+        env::set_var("RUST_LOG", "error,grav1synth=info");
+    }
+    pretty_env_logger::init();
+
     let args = Args::parse();
 
     match args.command {
@@ -71,10 +76,13 @@ pub fn main() -> Result<()> {
             );
 
             let mut parser = FilmGrainParser::open(&input)?;
+            let video_headers = parser.get_headers();
             let mut grain_headers = Vec::new();
             while let Some(packet) = parser.read_packet()? {
                 grain_headers.push(get_grain_header(&packet)?);
             }
+
+            todo!("Aggregate the grain info and convert them to table format")
         }
         Commands::Apply {
             input,

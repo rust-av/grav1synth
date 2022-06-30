@@ -8,7 +8,7 @@ use num_enum::TryFromPrimitive;
 use super::{
     frame::{parse_frame_header, FrameHeader},
     sequence::{parse_sequence_header, SequenceHeader},
-    util::{leb128, take_bool_bit, take_zero_bit, trailing_bits},
+    util::{leb128, take_bool_bit, take_zero_bit, trailing_bits, BitInput},
 };
 
 pub fn parse_obu(input: &[u8], size: Option<usize>) -> IResult<&[u8], Option<Obu>> {
@@ -27,11 +27,11 @@ pub fn parse_obu(input: &[u8], size: Option<usize>) -> IResult<&[u8], Option<Obu
 
     match obu_header.obu_type {
         ObuType::SequenceHeader => {
-            let (input, header) = parse_sequence_header(input, obu_size)?;
+            let (input, header) = parse_sequence_header(input)?;
             Ok((input, Some(Obu::SequenceHeader(header))))
         }
         ObuType::FrameHeader => {
-            let (input, header) = parse_frame_header(input, obu_size)?;
+            let (input, header) = parse_frame_header(input)?;
             Ok((input, Some(Obu::FrameHeader(header))))
         }
         _ => Ok((&input[obu_size..], None)),
@@ -97,7 +97,7 @@ pub enum ObuType {
     Padding = 15,
 }
 
-fn obu_type(input: (&[u8], usize)) -> IResult<(&[u8], usize), ObuType> {
+fn obu_type(input: BitInput) -> IResult<BitInput, ObuType> {
     map_res(bit_parsers::take(4usize), |output: u8| {
         ObuType::try_from(output)
     })(input)

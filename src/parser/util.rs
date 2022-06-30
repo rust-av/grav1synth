@@ -2,19 +2,21 @@ use std::fmt::Debug;
 
 use nom::{bits::complete as bit_parsers, bytes::complete::take, combinator::map, IResult};
 
-pub fn take_bool_bit(input: (&[u8], usize)) -> IResult<(&[u8], usize), bool> {
+pub type BitInput<'a> = (&'a [u8], usize);
+
+pub fn take_bool_bit(input: BitInput) -> IResult<BitInput, bool> {
     map(bit_parsers::take(1usize), |output: u8| output > 0)(input)
 }
 
-pub fn take_zero_bit(input: (&[u8], usize)) -> IResult<(&[u8], usize), ()> {
+pub fn take_zero_bit(input: BitInput) -> IResult<BitInput, ()> {
     take_zero_bits(input, 1)
 }
 
-pub fn take_zero_bits(input: (&[u8], usize), bits: usize) -> IResult<(&[u8], usize), ()> {
+pub fn take_zero_bits(input: BitInput, bits: usize) -> IResult<BitInput, ()> {
     map(bit_parsers::tag(0u8, bits), |_| ())(input)
 }
 
-pub fn trailing_bits(input: (&[u8], usize), bits: usize) -> IResult<(&[u8], usize), ()> {
+pub fn trailing_bits(input: BitInput, bits: usize) -> IResult<BitInput, ()> {
     let (input, _): (_, u64) = bit_parsers::take(bits)(input)?;
     Ok((input, ()))
 }
@@ -47,4 +49,23 @@ pub fn leb128(mut input: &[u8]) -> IResult<&[u8], ReadResult<u64>> {
         value,
         bytes_read: leb128_bytes,
     }))
+}
+
+/// Variable length unsigned n-bit number appearing directly in the bitstream.
+pub fn uvlc(mut input: BitInput) -> IResult<BitInput, u32> {
+    let mut leading_zeros = 0usize;
+    loop {
+        let (rem, done) = take_bool_bit(input)?;
+        input = rem;
+        if done {
+            break;
+        }
+        leading_zeros += 1;
+    }
+
+    if leading_zeros >= 32 {
+        return Ok((input, u32::MAX));
+    }
+    let (input, value): (_, u32) = bit_parsers::take(leading_zeros)(input)?;
+    Ok((input, value + (1 << leading_zeros) - 1))
 }
