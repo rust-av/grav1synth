@@ -51,10 +51,11 @@ pub mod parser {
 
 use std::{env, path::PathBuf};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
+use parser::grain::FilmGrainHeader;
 
-use crate::parser::grain::{get_grain_header, FilmGrainParser};
+use crate::parser::{grain::FilmGrainParser, obu::parse_obu};
 
 pub fn main() -> Result<()> {
     if env::var("RUST_LOG").is_err() {
@@ -93,6 +94,17 @@ pub fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn get_grain_header(input: &[u8]) -> Result<FilmGrainHeader> {
+    let mut size = None;
+    let mut seen_frame_header = false;
+    loop {
+        let (input, _) = parse_obu(input, size, &mut seen_frame_header)
+            .map_err(|e| anyhow!("{}", e.to_string()))?;
+    }
+
+    todo!();
 }
 
 #[derive(Parser, Debug)]

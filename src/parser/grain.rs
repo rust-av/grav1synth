@@ -8,7 +8,9 @@ use av_format::{
     stream::Stream,
 };
 use av_ivf::demuxer::IvfDemuxer;
+use nom::IResult;
 
+use super::util::BitInput;
 use crate::parser::obu::parse_obu;
 
 pub struct FilmGrainParser {
@@ -134,11 +136,6 @@ pub struct FilmGrainParams {
     pub clip_to_restricted_range: bool,
 }
 
-pub fn get_grain_header(input: &[u8]) -> Result<FilmGrainHeader> {
-    let mut size = None;
-    loop {
-        let (input, _) = parse_obu(input, size).map_err(|e| anyhow!("{}", e.to_string()))?;
-    }
-
-    todo!();
+pub fn film_grain_params(input: BitInput) -> IResult<&[u8], Option<FilmGrainParams>> {
+    todo!()
 }

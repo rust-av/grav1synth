@@ -11,7 +11,11 @@ use super::{
     util::{leb128, take_bool_bit, take_zero_bit, trailing_bits, BitInput},
 };
 
-pub fn parse_obu(input: &[u8], size: Option<usize>) -> IResult<&[u8], Option<Obu>> {
+pub fn parse_obu<'a>(
+    input: &'a [u8],
+    size: Option<usize>,
+    seen_frame_header: &'a mut bool,
+) -> IResult<&'a [u8], Option<Obu>> {
     let (input, obu_header) = parse_obu_header(input)?;
     let (input, obu_size) = if obu_header.has_size_field {
         let (input, result) = leb128(input)?;
@@ -31,8 +35,15 @@ pub fn parse_obu(input: &[u8], size: Option<usize>) -> IResult<&[u8], Option<Obu
             Ok((input, Some(Obu::SequenceHeader(header))))
         }
         ObuType::FrameHeader => {
-            let (input, header) = parse_frame_header(input)?;
-            Ok((input, Some(Obu::FrameHeader(header))))
+            let (input, header) = parse_frame_header(input, seen_frame_header)?;
+            Ok((input, header.map(Obu::FrameHeader)))
+        }
+        ObuType::TileGroup => {
+            todo!("Find if we need to flip the seen_frame_header flag");
+        }
+        ObuType::TemporalDelimiter => {
+            *seen_frame_header = false;
+            Ok((&input[obu_size..], None))
         }
         _ => Ok((&input[obu_size..], None)),
     }
