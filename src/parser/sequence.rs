@@ -11,17 +11,19 @@ pub const SELECT_INTEGER_MV: u8 = 2;
 pub struct SequenceHeader {
     pub reduced_still_picture_header: bool,
     pub frame_id_numbers_present: bool,
-    pub film_grain_params_present: bool,
     pub additional_frame_id_len_minus_1: usize,
     pub delta_frame_id_len_minus_2: usize,
+    pub film_grain_params_present: bool,
     pub force_screen_content_tools: u8,
     pub force_integer_mv: u8,
     pub order_hint_bits: usize,
     pub decoder_model_info: Option<DecoderModelInfo>,
-    pub timing_info: Option<TimingInfo>,
-    pub operating_points_cnt_minus_1: usize,
     pub decoder_model_present_for_op: ArrayVec<bool, { 1 << 5 }>,
+    pub operating_points_cnt_minus_1: usize,
     pub operating_point_idc: ArrayVec<u16, { 1 << 5 }>,
+    pub timing_info: Option<TimingInfo>,
+    pub enable_ref_frame_mvs: bool,
+    pub enable_warped_motion: bool,
 }
 
 impl SequenceHeader {
@@ -150,55 +152,69 @@ pub fn parse_sequence_header(input: &[u8]) -> IResult<&[u8], SequenceHeader> {
         let (input, _use_128x128_superblock) = take_bool_bit(input)?;
         let (input, _enable_filter_intra) = take_bool_bit(input)?;
         let (input, _enable_intra_edge_filter) = take_bool_bit(input)?;
-        let (input, seq_force_screen_content_tools, seq_force_integer_mv, order_hint_bits) =
-            if reduced_still_picture_header {
-                (input, SELECT_SCREEN_CONTENT_TOOLS, SELECT_INTEGER_MV, 0)
+        let (
+            input,
+            force_screen_content_tools,
+            force_integer_mv,
+            order_hint_bits,
+            enable_ref_frame_mvs,
+            enable_warped_motion,
+        ) = if reduced_still_picture_header {
+            (
+                input,
+                SELECT_SCREEN_CONTENT_TOOLS,
+                SELECT_INTEGER_MV,
+                0,
+                false,
+                false,
+            )
+        } else {
+            let (input, _enable_interintra_compound) = take_bool_bit(input)?;
+            let (input, _enable_masked_compound) = take_bool_bit(input)?;
+            let (input, enable_warped_motion) = take_bool_bit(input)?;
+            let (input, _enable_dual_filter) = take_bool_bit(input)?;
+            let (input, enable_order_hint) = take_bool_bit(input)?;
+            let (input, enable_ref_frame_mvs) = if enable_order_hint {
+                let (input, _enable_jnt_comp) = take_bool_bit(input)?;
+                let (input, enable_ref_frame_mvs) = take_bool_bit(input)?;
+                (input, enable_ref_frame_mvs)
             } else {
-                let (input, _enable_interintra_compound) = take_bool_bit(input)?;
-                let (input, _enable_masked_compound) = take_bool_bit(input)?;
-                let (input, _enable_warped_motion) = take_bool_bit(input)?;
-                let (input, _enable_dual_filter) = take_bool_bit(input)?;
-                let (input, enable_order_hint) = take_bool_bit(input)?;
-                let input = if enable_order_hint {
-                    let (input, _enable_jnt_comp) = take_bool_bit(input)?;
-                    let (input, _enable_ref_frame_mvs) = take_bool_bit(input)?;
-                    input
-                } else {
-                    input
-                };
-                let (input, seq_choose_screen_content_tools) = take_bool_bit(input)?;
-                let (input, seq_force_screen_content_tools): (_, u8) =
-                    if seq_choose_screen_content_tools {
-                        (input, SELECT_SCREEN_CONTENT_TOOLS)
-                    } else {
-                        bit_parsers::take(1usize)(input)?
-                    };
-
-                let (input, seq_force_integer_mv) = if seq_force_screen_content_tools > 0 {
-                    let (input, seq_choose_integer_mv) = take_bool_bit(input)?;
-                    if seq_choose_integer_mv {
-                        (input, SELECT_INTEGER_MV)
-                    } else {
-                        bit_parsers::take(1usize)(input)?
-                    }
-                } else {
-                    (input, SELECT_INTEGER_MV)
-                };
-                let (input, order_hint_bits) = if enable_order_hint {
-                    let (input, order_hint_bits_minus_1): (_, u8) =
-                        bit_parsers::take(3usize)(input)?;
-                    (input, order_hint_bits_minus_1 as usize + 1)
-                } else {
-                    (input, 0)
-                };
-
-                (
-                    input,
-                    seq_force_screen_content_tools,
-                    seq_force_integer_mv,
-                    order_hint_bits,
-                )
+                (input, false)
             };
+            let (input, seq_choose_screen_content_tools) = take_bool_bit(input)?;
+            let (input, seq_force_screen_content_tools): (_, u8) =
+                if seq_choose_screen_content_tools {
+                    (input, SELECT_SCREEN_CONTENT_TOOLS)
+                } else {
+                    bit_parsers::take(1usize)(input)?
+                };
+
+            let (input, seq_force_integer_mv) = if seq_force_screen_content_tools > 0 {
+                let (input, seq_choose_integer_mv) = take_bool_bit(input)?;
+                if seq_choose_integer_mv {
+                    (input, SELECT_INTEGER_MV)
+                } else {
+                    bit_parsers::take(1usize)(input)?
+                }
+            } else {
+                (input, SELECT_INTEGER_MV)
+            };
+            let (input, order_hint_bits) = if enable_order_hint {
+                let (input, order_hint_bits_minus_1): (_, u8) = bit_parsers::take(3usize)(input)?;
+                (input, order_hint_bits_minus_1 as usize + 1)
+            } else {
+                (input, 0)
+            };
+
+            (
+                input,
+                seq_force_screen_content_tools,
+                seq_force_integer_mv,
+                order_hint_bits,
+                enable_ref_frame_mvs,
+                enable_warped_motion,
+            )
+        };
 
         let (input, _enable_superres) = take_bool_bit(input)?;
         let (input, _enable_cdef) = take_bool_bit(input)?;
@@ -209,17 +225,19 @@ pub fn parse_sequence_header(input: &[u8]) -> IResult<&[u8], SequenceHeader> {
         Ok((input, SequenceHeader {
             reduced_still_picture_header,
             frame_id_numbers_present,
-            film_grain_params_present,
             additional_frame_id_len_minus_1,
             delta_frame_id_len_minus_2,
-            force_screen_content_tools: seq_force_screen_content_tools,
-            force_integer_mv: seq_force_integer_mv,
+            film_grain_params_present,
+            force_screen_content_tools,
+            force_integer_mv,
             order_hint_bits,
             decoder_model_info,
-            timing_info,
-            operating_points_cnt_minus_1,
             decoder_model_present_for_op,
+            operating_points_cnt_minus_1,
             operating_point_idc,
+            timing_info,
+            enable_ref_frame_mvs,
+            enable_warped_motion,
         }))
     })(input)
 }

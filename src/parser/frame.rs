@@ -1,3 +1,4 @@
+use arrayvec::ArrayVec;
 use nom::{
     bits::{bits, complete as bit_parsers},
     IResult,
@@ -14,6 +15,7 @@ use super::{
 const REFS_PER_FRAME: usize = 7;
 const NUM_REF_FRAMES: usize = 8;
 const REFRESH_ALL_FRAMES: u8 = 0b1111_1111;
+const PRIMARY_REF_NONE: u8 = 7;
 
 #[derive(Debug, Clone)]
 pub struct FrameHeader {
@@ -64,53 +66,59 @@ fn uncompressed_header<'a>(
         None
     };
 
-    let (input, frame_type, show_frame, error_resilient_mode) = if sequence_headers
-        .reduced_still_picture_header
-    {
-        (input, FrameType::Inter, true, false)
-    } else {
-        let (input, show_existing_frame) = take_bool_bit(input)?;
-        if show_existing_frame {
-            let (input, _frame_to_show_map_idx): (_, u8) = bit_parsers::take(3usize)(input)?;
-            let input = if let Some(id_len) = id_len {
-                let (input, display_frame_id) = bit_parsers::take(id_len)(input)?;
-                input
+    let (input, frame_type, show_frame, show_existing_frame, error_resilient_mode) =
+        if sequence_headers.reduced_still_picture_header {
+            (input, FrameType::Inter, true, false, false)
+        } else {
+            let (input, show_existing_frame) = take_bool_bit(input)?;
+            if show_existing_frame {
+                let (input, _frame_to_show_map_idx): (_, u8) = bit_parsers::take(3usize)(input)?;
+                let input = if let Some(id_len) = id_len {
+                    let (input, display_frame_id) = bit_parsers::take(id_len)(input)?;
+                    input
+                } else {
+                    input
+                };
+                return Ok((input, FrameHeader {
+                    show_existing_frame,
+                    film_grain_params: FilmGrainHeader::Disable,
+                }));
+            };
+            let (input, frame_type): (_, u8) = bit_parsers::take(2usize)(input)?;
+            let frame_type = FrameType::try_from(frame_type).unwrap();
+            let (input, show_frame) = take_bool_bit(input)?;
+            let input = if show_frame
+                && sequence_headers.decoder_model_info.is_some()
+                && !sequence_headers
+                    .timing_info
+                    .map(|ti| ti.equal_picture_interval)
+                    .unwrap_or(false)
+            {
+                temporal_point_info(input)?.0
             } else {
                 input
             };
-            return Ok((input, FrameHeader {
-                show_existing_frame,
-                film_grain_params: FilmGrainHeader::Disable,
-            }));
-        };
-        let (input, frame_type): (_, u8) = bit_parsers::take(2usize)(input)?;
-        let frame_type = FrameType::try_from(frame_type).unwrap();
-        let (input, show_frame) = take_bool_bit(input)?;
-        let input = if show_frame
-            && sequence_headers.decoder_model_info.is_some()
-            && !sequence_headers
-                .timing_info
-                .map(|ti| ti.equal_picture_interval)
-                .unwrap_or(false)
-        {
-            temporal_point_info(input)?.0
-        } else {
-            input
-        };
-        let input = if show_frame {
-            input
-        } else {
-            let (input, _showable_frame) = take_bool_bit(input)?;
-            input
-        };
-        let (input, error_resilient_mode) =
-            if frame_type == FrameType::Switch || (frame_type == FrameType::Key && show_frame) {
+            let input = if show_frame {
+                input
+            } else {
+                let (input, _showable_frame) = take_bool_bit(input)?;
+                input
+            };
+            let (input, error_resilient_mode) = if frame_type == FrameType::Switch
+                || (frame_type == FrameType::Key && show_frame)
+            {
                 (input, true)
             } else {
                 take_bool_bit(input)?
             };
-        (input, frame_type, show_frame, error_resilient_mode)
-    };
+            (
+                input,
+                frame_type,
+                show_frame,
+                show_existing_frame,
+                error_resilient_mode,
+            )
+        };
 
     let (input, disable_cdf_update) = take_bool_bit(input)?;
     let (input, allow_screen_content_tools) =
@@ -140,11 +148,10 @@ fn uncompressed_header<'a>(
     };
     let (input, _order_hint): (_, u64) =
         bit_parsers::take(sequence_headers.order_hint_bits)(input)?;
-    let input = if frame_type.is_intra() || error_resilient_mode {
-        input
+    let (input, primary_ref_frame) = if frame_type.is_intra() || error_resilient_mode {
+        (input, PRIMARY_REF_NONE)
     } else {
-        let (input, primary_ref_frame): (_, u8) = bit_parsers::take(3usize)(input)?;
-        input
+        bit_parsers::take(3usize)(input)?
     };
 
     let mut input = input;
@@ -190,15 +197,19 @@ fn uncompressed_header<'a>(
             input = inner_input;
         }
     }
-    let input = if frame_type.is_intra() {
+    let (input, use_ref_frame_mvs, ref_frame_idx) = if frame_type.is_intra() {
         let (input, frame_size) = frame_size(input)?;
         let (input, render_size) = render_size(input)?;
-        if allow_screen_content_tools && render_size.upscaled_width == frame_size.frame_width {
-            let (input, allow_intrabc) = take_bool_bit(input)?;
-            input
-        } else {
-            input
-        }
+        (
+            if allow_screen_content_tools && render_size.upscaled_width == frame_size.frame_width {
+                let (input, allow_intrabc) = take_bool_bit(input)?;
+                input
+            } else {
+                input
+            },
+            false,
+            ArrayVec::new(),
+        )
     } else {
         let (mut input, frame_refs_short_signaling) = if !sequence_headers.enable_order_hint() {
             (input, false)
@@ -213,16 +224,20 @@ fn uncompressed_header<'a>(
                 (input, frame_refs_short_signaling)
             }
         };
+        let mut ref_frame_idx: ArrayVec<u8, REFS_PER_FRAME> = ArrayVec::new();
         for _ in 0..REFS_PER_FRAME {
             if !frame_refs_short_signaling {
-                let (inner_input, ref_frame_idx) = bit_parsers::take(3usize)(input)?;
+                let (inner_input, this_ref_frame_idx) = bit_parsers::take(3usize)(input)?;
                 input = inner_input;
+                ref_frame_idx.push(this_ref_frame_idx);
                 if sequence_headers.frame_id_numbers_present {
                     let n = sequence_headers.delta_frame_id_len_minus_2 + 2;
                     let (inner_input, _delta_frame_id_minus_1): (_, u64) =
                         bit_parsers::take(n)(input)?;
                     input = inner_input;
                 }
+            } else {
+                ref_frame_idx.push(0);
             }
         }
         let input = if frame_size_override_flag && !error_resilient_mode {
@@ -246,7 +261,7 @@ fn uncompressed_header<'a>(
             } else {
                 take_bool_bit(input)?
             };
-        input
+        (input, use_ref_frame_mvs, ref_frame_idx)
     };
 
     let (input, disable_frame_end_update_cdf) =
@@ -255,15 +270,15 @@ fn uncompressed_header<'a>(
         } else {
             take_bool_bit(input)?
         };
-    let input = if sequence_headers.primary_ref_frame == PRIMARY_REF_NONE {
+    let input = if primary_ref_frame == PRIMARY_REF_NONE {
         let (input, _) = init_non_coeff_cdfs(input)?;
         let (input, _) = setup_past_independence(input)?;
         input
     } else {
-        let (input, _) = load_cdfs(input, sequence_headers.ref_frame_idx[primary_ref_frame])?;
+        let (input, _) = load_cdfs(input, ref_frame_idx[primary_ref_frame])?;
         let (input, _) = load_previous(input)?;
     };
-    let input = if sequence_headers.use_ref_frame_mvs {
+    let input = if use_ref_frame_mvs {
         motion_field_estimation(input)?.0
     } else {
         input
@@ -273,7 +288,7 @@ fn uncompressed_header<'a>(
     let (input, _) = segmentation_params(input)?;
     let (input, _) = delta_q_params(input)?;
     let (input, _) = delta_lf_params(input)?;
-    let input = if sequence_headers.primary_ref_frame == PRIMARY_REF_NONE {
+    let input = if primary_ref_frame == PRIMARY_REF_NONE {
         init_coeff_cdfs(input)?.0
     } else {
         load_previous_segment_ids(input)?.0
@@ -303,10 +318,6 @@ fn uncompressed_header<'a>(
     }))
 }
 
-fn decode_frame_wrapup(input: BitInput) -> IResult<BitInput, ()> {
-    todo!()
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
 #[repr(u8)]
 pub enum FrameType {
@@ -320,4 +331,110 @@ impl FrameType {
     pub fn is_intra(self) -> bool {
         self == FrameType::Key || self == FrameType::IntraOnly
     }
+}
+
+fn decode_frame_wrapup(input: BitInput) -> IResult<BitInput, ()> {
+    // I don't believe this actually parses anything
+    // or does anything relevant to us...
+    Ok((input, ()))
+}
+
+fn temporal_point_info(input: BitInput) -> IResult<BitInput, ()> {
+    todo!()
+}
+
+fn frame_size(input: BitInput) -> IResult<BitInput, ()> {
+    todo!()
+}
+
+fn render_size(input: BitInput) -> IResult<BitInput, ()> {
+    todo!()
+}
+
+fn set_frame_refs(input: BitInput) -> IResult<BitInput, ()> {
+    todo!()
+}
+
+fn frame_size_with_refs(input: BitInput) -> IResult<BitInput, ()> {
+    todo!()
+}
+
+fn read_interpolation_filter(input: BitInput) -> IResult<BitInput, ()> {
+    todo!()
+}
+
+fn init_non_coeff_cdfs(input: BitInput) -> IResult<BitInput, ()> {
+    todo!()
+}
+
+fn setup_past_independence(input: BitInput) -> IResult<BitInput, ()> {
+    todo!()
+}
+
+fn load_cdfs(input: BitInput) -> IResult<BitInput, ()> {
+    todo!()
+}
+
+fn load_previous(input: BitInput) -> IResult<BitInput, ()> {
+    todo!()
+}
+
+fn motion_field_estimation(input: BitInput) -> IResult<BitInput, ()> {
+    todo!()
+}
+
+fn tile_info(input: BitInput) -> IResult<BitInput, ()> {
+    todo!()
+}
+
+fn quantization_params(input: BitInput) -> IResult<BitInput, ()> {
+    todo!()
+}
+
+fn segmentation_params(input: BitInput) -> IResult<BitInput, ()> {
+    todo!()
+}
+
+fn delta_q_params(input: BitInput) -> IResult<BitInput, ()> {
+    todo!()
+}
+
+fn delta_lf_params(input: BitInput) -> IResult<BitInput, ()> {
+    todo!()
+}
+
+fn init_coeff_cdfs(input: BitInput) -> IResult<BitInput, ()> {
+    todo!()
+}
+
+fn load_previous_segment_ids(input: BitInput) -> IResult<BitInput, ()> {
+    todo!()
+}
+
+fn loop_filter_params(input: BitInput) -> IResult<BitInput, ()> {
+    todo!()
+}
+
+fn cdef_params(input: BitInput) -> IResult<BitInput, ()> {
+    todo!()
+}
+
+fn lr_params(input: BitInput) -> IResult<BitInput, ()> {
+    todo!()
+}
+
+fn read_tx_mode(input: BitInput) -> IResult<BitInput, ()> {
+    todo!()
+}
+
+fn frame_reference_mode(input: BitInput) -> IResult<BitInput, ()> {
+    todo!()
+}
+
+fn skip_mode_params(input: BitInput) -> IResult<BitInput, ()> {
+    todo!()
+}
+
+fn global_motion_params(input: BitInput) -> IResult<BitInput, ()> {
+    todo!()
 }
