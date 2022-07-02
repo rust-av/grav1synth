@@ -136,6 +136,6 @@ pub struct FilmGrainParams {
     pub clip_to_restricted_range: bool,
 }
 
-pub fn film_grain_params(input: BitInput) -> IResult<&[u8], Option<FilmGrainParams>> {
+pub fn film_grain_params(input: BitInput) -> IResult<BitInput, FilmGrainHeader> {
     todo!()
 }

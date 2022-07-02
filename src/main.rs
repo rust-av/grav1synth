@@ -55,7 +55,10 @@ use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use parser::grain::FilmGrainHeader;
 
-use crate::parser::{grain::FilmGrainParser, obu::parse_obu};
+use crate::parser::{
+    grain::FilmGrainParser,
+    obu::{parse_obu, Obu, ObuType},
+};
 
 pub fn main() -> Result<()> {
     if env::var("RUST_LOG").is_err() {
@@ -80,7 +83,7 @@ pub fn main() -> Result<()> {
             let video_headers = parser.get_headers();
             let mut grain_headers = Vec::new();
             while let Some(packet) = parser.read_packet()? {
-                grain_headers.push(get_grain_header(&packet)?);
+                grain_headers.push(get_grain_headers(&packet)?);
             }
 
             todo!("Aggregate the grain info and convert them to table format")
@@ -96,12 +99,23 @@ pub fn main() -> Result<()> {
     Ok(())
 }
 
-fn get_grain_header(input: &[u8]) -> Result<FilmGrainHeader> {
+fn get_grain_headers(input: &[u8]) -> Result<FilmGrainHeader> {
     let mut size = None;
     let mut seen_frame_header = false;
+    let mut sequence_header = None;
     loop {
-        let (input, _) = parse_obu(input, size, &mut seen_frame_header)
-            .map_err(|e| anyhow!("{}", e.to_string()))?;
+        let (input, obu) = parse_obu(
+            input,
+            size,
+            &mut seen_frame_header,
+            sequence_header.as_ref(),
+        )
+        .map_err(|e| anyhow!("{}", e.to_string()))?;
+        match obu {
+            Some(Obu::SequenceHeader(obu)) => {
+                sequence_header = Some(obu);
+            }
+        };
     }
 
     todo!();

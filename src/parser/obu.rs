@@ -8,13 +8,14 @@ use num_enum::TryFromPrimitive;
 use super::{
     frame::{parse_frame_header, FrameHeader},
     sequence::{parse_sequence_header, SequenceHeader},
-    util::{leb128, take_bool_bit, take_zero_bit, trailing_bits, BitInput},
+    util::{leb128, take_bool_bit, take_zero_bit, BitInput},
 };
 
 pub fn parse_obu<'a>(
     input: &'a [u8],
     size: Option<usize>,
     seen_frame_header: &'a mut bool,
+    sequence_header: Option<&'a SequenceHeader>,
 ) -> IResult<&'a [u8], Option<Obu>> {
     let (input, obu_header) = parse_obu_header(input)?;
     let (input, obu_size) = if obu_header.has_size_field {
@@ -25,7 +26,7 @@ pub fn parse_obu<'a>(
             input,
             size.expect("OBU requires size but no size provided")
                 - 1
-                - if obu_header.extension_flag { 1 } else { 0 },
+                - if obu_header.extension.is_some() { 1 } else { 0 },
         )
     };
 
@@ -35,7 +36,12 @@ pub fn parse_obu<'a>(
             Ok((input, Some(Obu::SequenceHeader(header))))
         }
         ObuType::FrameHeader => {
-            let (input, header) = parse_frame_header(input, seen_frame_header)?;
+            let (input, header) = parse_frame_header(
+                input,
+                seen_frame_header,
+                sequence_header.unwrap(),
+                &obu_header,
+            )?;
             Ok((input, header.map(Obu::FrameHeader)))
         }
         ObuType::TileGroup => {
@@ -59,7 +65,13 @@ pub enum Obu {
 pub struct ObuHeader {
     pub obu_type: ObuType,
     pub has_size_field: bool,
-    pub extension_flag: bool,
+    pub extension: Option<ObuExtension>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ObuExtension {
+    pub temporal_id: u8,
+    pub spatial_id: u8,
 }
 
 pub fn parse_obu_header(input: &[u8]) -> IResult<&[u8], ObuHeader> {
@@ -70,21 +82,31 @@ pub fn parse_obu_header(input: &[u8]) -> IResult<&[u8], ObuHeader> {
         let (input, has_size_field) = take_bool_bit(input)?;
         let (input, _reserved_1bit) = take_zero_bit(input)?;
 
-        let (input, _) = if extension_flag {
-            // Extension flag is 8 bits, it's useless for us, seek forward
-            trailing_bits(input, 8)?
+        let (input, extension) = if extension_flag {
+            let (input, extension) = obu_extension(input)?;
+            (input, Some(extension))
         } else {
-            (input, ())
+            (input, None)
         };
 
         Ok((input, ObuHeader {
             obu_type,
             has_size_field,
-            extension_flag,
+            extension,
         }))
     })(input)?;
 
     Ok((input, obu_header))
+}
+
+fn obu_extension(input: BitInput) -> IResult<BitInput, ObuExtension> {
+    let (input, temporal_id) = bit_parsers::take(3usize)(input)?;
+    let (input, spatial_id) = bit_parsers::take(2usize)(input)?;
+    let (input, _reserved): (_, u8) = bit_parsers::take(3usize)(input)?;
+    Ok((input, ObuExtension {
+        temporal_id,
+        spatial_id,
+    }))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]

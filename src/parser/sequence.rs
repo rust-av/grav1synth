@@ -1,13 +1,33 @@
+use arrayvec::ArrayVec;
 use nom::{bits, bits::complete as bit_parsers, IResult};
 use num_enum::TryFromPrimitive;
 
 use super::util::{take_bool_bit, uvlc, BitInput};
 
-const SELECT_SCREEN_CONTENT_TOOLS: u8 = 2;
+pub const SELECT_SCREEN_CONTENT_TOOLS: u8 = 2;
+pub const SELECT_INTEGER_MV: u8 = 2;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct SequenceHeader {
+    pub reduced_still_picture_header: bool,
+    pub frame_id_numbers_present: bool,
     pub film_grain_params_present: bool,
+    pub additional_frame_id_len_minus_1: usize,
+    pub delta_frame_id_len_minus_2: usize,
+    pub force_screen_content_tools: u8,
+    pub force_integer_mv: u8,
+    pub order_hint_bits: usize,
+    pub decoder_model_info: Option<DecoderModelInfo>,
+    pub timing_info: Option<TimingInfo>,
+    pub operating_points_cnt_minus_1: usize,
+    pub decoder_model_present_for_op: ArrayVec<bool, { 1 << 5 }>,
+    pub operating_point_idc: ArrayVec<u16, { 1 << 5 }>,
+}
+
+impl SequenceHeader {
+    pub fn enable_order_hint(&self) -> bool {
+        self.order_hint_bits > 0
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -16,45 +36,58 @@ pub fn parse_sequence_header(input: &[u8]) -> IResult<&[u8], SequenceHeader> {
         let (input, seq_profile): (_, u8) = bit_parsers::take(3usize)(input)?;
         let (input, _still_picture) = take_bool_bit(input)?;
         let (input, reduced_still_picture_header) = take_bool_bit(input)?;
-        let input = if reduced_still_picture_header {
+        let (
+            input,
+            decoder_model_info,
+            operating_points_cnt_minus_1,
+            decoder_model_present_for_op,
+            operating_point_idc,
+            timing_info,
+        ) = if reduced_still_picture_header {
             let (input, _seq_level_idx): (_, u8) = bit_parsers::take(5usize)(input)?;
-            input
+            (input, None, 0, ArrayVec::new(), ArrayVec::new(), None)
         } else {
-            let mut buffer_delay_length = 0;
             let (input, timing_info_present_flag) = take_bool_bit(input)?;
-            let (input, decoder_model_info_present_flag) = if timing_info_present_flag {
-                let input = timing_info(input)?.0;
+            let (input, decoder_model_info, timing_info) = if timing_info_present_flag {
+                let (input, timing_info) = timing_info(input)?;
                 let (input, flag) = take_bool_bit(input)?;
-                let input = if flag {
+                let (input, decoder_model, timing_info) = if flag {
                     let (input, decoder_model) = decoder_model_info(input)?;
-                    buffer_delay_length = decoder_model.buffer_delay_length_minus_1 as usize + 1;
-                    input
+                    (input, Some(decoder_model), timing_info)
                 } else {
-                    input
+                    (input, None, timing_info)
                 };
-                (input, flag)
+                (input, decoder_model, Some(timing_info))
             } else {
-                (input, false)
+                (input, None, None)
             };
             let (input, initial_display_delay_present_flag) = take_bool_bit(input)?;
-            let (mut input, operating_points_cnt_minus_1): (_, u8) =
+
+            let mut decoder_model_present_for_op = ArrayVec::new();
+            let mut operating_point_idc = ArrayVec::new();
+            let (mut input, operating_points_cnt_minus_1): (_, usize) =
                 bit_parsers::take(5usize)(input)?;
             for _ in 0..=operating_points_cnt_minus_1 {
                 let inner_input = input;
-                let (inner_input, _operating_point_idc): (_, u16) =
+                let (inner_input, cur_operating_point_idc): (_, u16) =
                     bit_parsers::take(12usize)(inner_input)?;
+                operating_point_idc.push(cur_operating_point_idc);
                 let (inner_input, seq_level_idx): (_, u8) = bit_parsers::take(5usize)(inner_input)?;
                 let (inner_input, _seq_tier) = if seq_level_idx > 7 {
                     take_bool_bit(inner_input)?
                 } else {
                     (inner_input, false)
                 };
-                let (inner_input, _decoder_model_present_for_op) =
-                    if decoder_model_info_present_flag {
+                let (inner_input, cur_decoder_model_present_for_op) =
+                    if let Some(decoder_model_info) = decoder_model_info {
                         let (inner_input, flag) = take_bool_bit(inner_input)?;
                         if flag {
                             (
-                                operating_parameters_info(inner_input, buffer_delay_length)?.0,
+                                operating_parameters_info(
+                                    inner_input,
+                                    decoder_model_info.buffer_delay_length_minus_1 + 1,
+                                )?
+                                .0,
                                 flag,
                             )
                         } else {
@@ -63,6 +96,7 @@ pub fn parse_sequence_header(input: &[u8]) -> IResult<&[u8], SequenceHeader> {
                     } else {
                         (inner_input, false)
                     };
+                decoder_model_present_for_op.push(cur_decoder_model_present_for_op);
                 let (inner_input, _initial_display_delay_present_for_op) =
                     if initial_display_delay_present_flag {
                         let (inner_input, flag) = take_bool_bit(inner_input)?;
@@ -78,7 +112,14 @@ pub fn parse_sequence_header(input: &[u8]) -> IResult<&[u8], SequenceHeader> {
                     };
                 input = inner_input;
             }
-            input
+            (
+                input,
+                decoder_model_info,
+                operating_points_cnt_minus_1,
+                decoder_model_present_for_op,
+                operating_point_idc,
+                timing_info,
+            )
         };
 
         let (input, frame_width_bits_minus_1): (_, u8) = bit_parsers::take(4usize)(input)?;
@@ -92,60 +133,72 @@ pub fn parse_sequence_header(input: &[u8]) -> IResult<&[u8], SequenceHeader> {
         } else {
             take_bool_bit(input)?
         };
-        let input = if frame_id_numbers_present {
-            let (input, _delta_frame_id_len_minus_2): (_, u8) = bit_parsers::take(4usize)(input)?;
-            let (input, _additional_frame_id_len_minus_1): (_, u8) =
-                bit_parsers::take(3usize)(input)?;
-            input
-        } else {
-            input
-        };
+        let (input, delta_frame_id_len_minus_2, additional_frame_id_len_minus_1) =
+            if frame_id_numbers_present {
+                let (input, delta_frame_id_len_minus_2): (_, u8) =
+                    bit_parsers::take(4usize)(input)?;
+                let (input, additional_frame_id_len_minus_1): (_, u8) =
+                    bit_parsers::take(3usize)(input)?;
+                (
+                    input,
+                    delta_frame_id_len_minus_2 as usize,
+                    additional_frame_id_len_minus_1 as usize,
+                )
+            } else {
+                (input, 0, 0)
+            };
         let (input, _use_128x128_superblock) = take_bool_bit(input)?;
         let (input, _enable_filter_intra) = take_bool_bit(input)?;
         let (input, _enable_intra_edge_filter) = take_bool_bit(input)?;
-        let input = if reduced_still_picture_header {
-            input
-        } else {
-            let (input, _enable_interintra_compound) = take_bool_bit(input)?;
-            let (input, _enable_masked_compound) = take_bool_bit(input)?;
-            let (input, _enable_warped_motion) = take_bool_bit(input)?;
-            let (input, _enable_dual_filter) = take_bool_bit(input)?;
-            let (input, enable_order_hint) = take_bool_bit(input)?;
-            let input = if enable_order_hint {
-                let (input, _enable_jnt_comp) = take_bool_bit(input)?;
-                let (input, _enable_ref_frame_mvs) = take_bool_bit(input)?;
-                input
+        let (input, seq_force_screen_content_tools, seq_force_integer_mv, order_hint_bits) =
+            if reduced_still_picture_header {
+                (input, SELECT_SCREEN_CONTENT_TOOLS, SELECT_INTEGER_MV, 0)
             } else {
-                input
-            };
-            let (input, seq_choose_screen_content_tools) = take_bool_bit(input)?;
-            let (input, seq_force_screen_content_tools): (_, u8) =
-                if seq_choose_screen_content_tools {
-                    (input, SELECT_SCREEN_CONTENT_TOOLS)
+                let (input, _enable_interintra_compound) = take_bool_bit(input)?;
+                let (input, _enable_masked_compound) = take_bool_bit(input)?;
+                let (input, _enable_warped_motion) = take_bool_bit(input)?;
+                let (input, _enable_dual_filter) = take_bool_bit(input)?;
+                let (input, enable_order_hint) = take_bool_bit(input)?;
+                let input = if enable_order_hint {
+                    let (input, _enable_jnt_comp) = take_bool_bit(input)?;
+                    let (input, _enable_ref_frame_mvs) = take_bool_bit(input)?;
+                    input
                 } else {
-                    bit_parsers::take(1usize)(input)?
+                    input
+                };
+                let (input, seq_choose_screen_content_tools) = take_bool_bit(input)?;
+                let (input, seq_force_screen_content_tools): (_, u8) =
+                    if seq_choose_screen_content_tools {
+                        (input, SELECT_SCREEN_CONTENT_TOOLS)
+                    } else {
+                        bit_parsers::take(1usize)(input)?
+                    };
+
+                let (input, seq_force_integer_mv) = if seq_force_screen_content_tools > 0 {
+                    let (input, seq_choose_integer_mv) = take_bool_bit(input)?;
+                    if seq_choose_integer_mv {
+                        (input, SELECT_INTEGER_MV)
+                    } else {
+                        bit_parsers::take(1usize)(input)?
+                    }
+                } else {
+                    (input, SELECT_INTEGER_MV)
+                };
+                let (input, order_hint_bits) = if enable_order_hint {
+                    let (input, order_hint_bits_minus_1): (_, u8) =
+                        bit_parsers::take(3usize)(input)?;
+                    (input, order_hint_bits_minus_1 as usize + 1)
+                } else {
+                    (input, 0)
                 };
 
-            let input = if seq_force_screen_content_tools > 0 {
-                let (input, seq_choose_integer_mv) = take_bool_bit(input)?;
-                if seq_choose_integer_mv {
-                    input
-                } else {
-                    let (input, _seq_force_screen_content_tools): (_, u8) =
-                        bit_parsers::take(1usize)(input)?;
-                    input
-                }
-            } else {
-                input
+                (
+                    input,
+                    seq_force_screen_content_tools,
+                    seq_force_integer_mv,
+                    order_hint_bits,
+                )
             };
-            let (input, _order_hint_bits_minus_1) = if enable_order_hint {
-                bit_parsers::take(3usize)(input)?
-            } else {
-                (input, 0u8)
-            };
-
-            input
-        };
 
         let (input, _enable_superres) = take_bool_bit(input)?;
         let (input, _enable_cdef) = take_bool_bit(input)?;
@@ -154,37 +207,59 @@ pub fn parse_sequence_header(input: &[u8]) -> IResult<&[u8], SequenceHeader> {
         let (input, film_grain_params_present) = take_bool_bit(input)?;
 
         Ok((input, SequenceHeader {
+            reduced_still_picture_header,
+            frame_id_numbers_present,
             film_grain_params_present,
+            additional_frame_id_len_minus_1,
+            delta_frame_id_len_minus_2,
+            force_screen_content_tools: seq_force_screen_content_tools,
+            force_integer_mv: seq_force_integer_mv,
+            order_hint_bits,
+            decoder_model_info,
+            timing_info,
+            operating_points_cnt_minus_1,
+            decoder_model_present_for_op,
+            operating_point_idc,
         }))
     })(input)
 }
 
-fn timing_info(input: BitInput) -> IResult<BitInput, ()> {
+fn timing_info(input: BitInput) -> IResult<BitInput, TimingInfo> {
     let (input, _num_units_in_display_tick): (_, u32) = bit_parsers::take(32usize)(input)?;
     let (input, _time_scale): (_, u32) = bit_parsers::take(32usize)(input)?;
     let (input, equal_picture_interval) = take_bool_bit(input)?;
-    if equal_picture_interval {
+    let input = if equal_picture_interval {
         let (input, _num_ticks_per_picture_minus_1) = uvlc(input)?;
-        Ok((input, ()))
+        input
     } else {
-        Ok((input, ()))
-    }
-}
-
-fn decoder_model_info(input: BitInput) -> IResult<BitInput, DecoderModelInfo> {
-    let (input, buffer_delay_length_minus_1): (_, u8) = bit_parsers::take(5usize)(input)?;
-    let (input, _num_units_in_decoding_tick): (_, u32) = bit_parsers::take(32usize)(input)?;
-    let (input, _buffer_removal_time_length_minus_1): (_, u8) = bit_parsers::take(5usize)(input)?;
-    let (input, _frame_presentation_time_length_minus_1): (_, u8) =
-        bit_parsers::take(5usize)(input)?;
-    Ok((input, DecoderModelInfo {
-        buffer_delay_length_minus_1,
+        input
+    };
+    Ok((input, TimingInfo {
+        equal_picture_interval,
     }))
 }
 
 #[derive(Debug, Clone, Copy)]
-struct DecoderModelInfo {
-    buffer_delay_length_minus_1: u8,
+pub struct TimingInfo {
+    pub equal_picture_interval: bool,
+}
+
+fn decoder_model_info(input: BitInput) -> IResult<BitInput, DecoderModelInfo> {
+    let (input, buffer_delay_length_minus_1): (_, usize) = bit_parsers::take(5usize)(input)?;
+    let (input, _num_units_in_decoding_tick): (_, u32) = bit_parsers::take(32usize)(input)?;
+    let (input, buffer_removal_time_length_minus_1): (_, usize) = bit_parsers::take(5usize)(input)?;
+    let (input, _frame_presentation_time_length_minus_1): (_, u8) =
+        bit_parsers::take(5usize)(input)?;
+    Ok((input, DecoderModelInfo {
+        buffer_delay_length_minus_1,
+        buffer_removal_time_length_minus_1,
+    }))
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DecoderModelInfo {
+    pub buffer_delay_length_minus_1: usize,
+    pub buffer_removal_time_length_minus_1: usize,
 }
 
 fn operating_parameters_info(input: BitInput, buffer_delay_length: usize) -> IResult<BitInput, ()> {

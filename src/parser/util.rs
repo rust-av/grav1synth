@@ -16,11 +16,6 @@ pub fn take_zero_bits(input: BitInput, bits: usize) -> IResult<BitInput, ()> {
     map(bit_parsers::tag(0u8, bits), |_| ())(input)
 }
 
-pub fn trailing_bits(input: BitInput, bits: usize) -> IResult<BitInput, ()> {
-    let (input, _): (_, u64) = bit_parsers::take(bits)(input)?;
-    Ok((input, ()))
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct ReadResult<T>
 where
