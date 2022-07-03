@@ -94,7 +94,15 @@ fn uncompressed_header<'a>(
                     .map(|ti| ti.equal_picture_interval)
                     .unwrap_or(false)
             {
-                temporal_point_info(input)?.0
+                temporal_point_info(
+                    input,
+                    sequence_headers
+                        .decoder_model_info
+                        .unwrap()
+                        .frame_presentation_time_length_minus_1 as usize
+                        + 1,
+                )?
+                .0
             } else {
                 input
             };
@@ -198,10 +206,17 @@ fn uncompressed_header<'a>(
         }
     }
     let (input, use_ref_frame_mvs, ref_frame_idx) = if frame_type.is_intra() {
-        let (input, frame_size) = frame_size(input)?;
+        let (input, frame_size) = frame_size(
+            input,
+            frame_size_override_flag,
+            sequence_headers.frame_width_bits_minus_1 + 1,
+            sequence_headers.frame_height_bits_minus_1 + 1,
+            sequence_headers.max_frame_width_minus_1 + 1,
+            sequence_headers.max_frame_height_minus_1 + 1,
+        )?;
         let (input, render_size) = render_size(input)?;
         (
-            if allow_screen_content_tools && render_size.upscaled_width == frame_size.frame_width {
+            if allow_screen_content_tools && upscaled_size.width == frame_size.width {
                 let (input, allow_intrabc) = take_bool_bit(input)?;
                 input
             } else {
@@ -275,7 +290,7 @@ fn uncompressed_header<'a>(
         let (input, _) = setup_past_independence(input)?;
         input
     } else {
-        let (input, _) = load_cdfs(input, ref_frame_idx[primary_ref_frame])?;
+        let (input, _) = load_cdfs(input, &ref_frame_idx[primary_ref_frame])?;
         let (input, _) = load_previous(input)?;
     };
     let input = if use_ref_frame_mvs {
@@ -339,23 +354,102 @@ fn decode_frame_wrapup(input: BitInput) -> IResult<BitInput, ()> {
     Ok((input, ()))
 }
 
-fn temporal_point_info(input: BitInput) -> IResult<BitInput, ()> {
-    todo!()
+fn temporal_point_info(
+    input: BitInput,
+    frame_presentation_time_length: usize,
+) -> IResult<BitInput, ()> {
+    let (input, _frame_presentation_time): (_, u64) =
+        bit_parsers::take(frame_presentation_time_length)(input)?;
+    Ok((input, ()))
 }
 
-fn frame_size(input: BitInput) -> IResult<BitInput, ()> {
-    todo!()
+#[derive(Debug, Clone, Copy)]
+pub struct Dimensions {
+    pub width: u32,
+    pub height: u32,
 }
 
-fn render_size(input: BitInput) -> IResult<BitInput, ()> {
-    todo!()
+fn frame_size(
+    input: BitInput,
+    frame_size_override: bool,
+    frame_width_bits: usize,
+    frame_height_bits: usize,
+    max_frame_size: Dimensions,
+) -> IResult<BitInput, Dimensions> {
+    let (input, width, height) = if frame_size_override {
+        let (input, width_minus_1) = bit_parsers::take(frame_width_bits)(input)?;
+        let (input, height_minus_1) = bit_parsers::take(frame_height_bits)(input)?;
+        (input, width_minus_1 + 1, height_minus_1 + 1)
+    } else {
+        (input, max_frame_size.width, max_frame_size.height)
+    };
+    let (input, _) = superres_params(input)?;
+    let (input, _) = compute_image_size(input)?;
+    Ok((input, Dimensions { width, height }))
+}
+
+fn render_size(
+    input: BitInput,
+    frame_size: Dimensions,
+    upscaled_size: Dimensions,
+) -> IResult<BitInput, Dimensions> {
+    let (input, render_and_frame_size_different) = take_bool_bit(input)?;
+    let (input, width, height) = if render_and_frame_size_different {
+        let (input, render_width_minus_1): (_, u32) = bit_parsers::take(16usize)(input)?;
+        let (input, render_height_minus_1): (_, u32) = bit_parsers::take(16usize)(input)?;
+        (input, render_width_minus_1 + 1, render_height_minus_1 + 1)
+    } else {
+        (input, upscaled_size.width, frame_size.height)
+    };
+    Ok((input, Dimensions { width, height }))
 }
 
 fn set_frame_refs(input: BitInput) -> IResult<BitInput, ()> {
+    // Does nothing that we care about
+    Ok((input, ()))
+}
+
+fn frame_size_with_refs<'a>(
+    input: BitInput,
+    frame_size_override: bool,
+    frame_width_bits: usize,
+    frame_height_bits: usize,
+    max_frame_size: Dimensions,
+    upscaled_size: &'a mut Dimensions,
+) -> IResult<BitInput<'a>, ()> {
+    let mut found_ref = false;
+    for _ in 0..REFS_PER_FRAME {
+        let (input, found_this_ref) = take_bool_bit(input)?;
+        if found_this_ref {
+            found_ref = true;
+            // We don't actually care about the changes to frame size. But if we did, we'd
+            // have to do things here.
+            break;
+        }
+    }
+    let input = if !found_ref {
+        let (input, frame_size) = frame_size(
+            input,
+            frame_size_override,
+            frame_width_bits,
+            frame_height_bits,
+            max_frame_size,
+        )?;
+        let (input, _) = render_size(input, frame_size, *upscaled_size)?;
+        input
+    } else {
+        let (input, _) = superres_params(input)?;
+        let (input, _) = compute_image_size(input)?;
+        input
+    };
+    Ok((input, ()))
+}
+
+fn superres_params(input: BitInput) -> IResult<BitInput, ()> {
     todo!()
 }
 
-fn frame_size_with_refs(input: BitInput) -> IResult<BitInput, ()> {
+fn compute_image_size(input: BitInput) -> IResult<BitInput, ()> {
     todo!()
 }
 

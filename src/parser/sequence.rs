@@ -17,6 +17,10 @@ pub struct SequenceHeader {
     pub force_screen_content_tools: u8,
     pub force_integer_mv: u8,
     pub order_hint_bits: usize,
+    pub frame_width_bits_minus_1: usize,
+    pub frame_height_bits_minus_1: usize,
+    pub max_frame_width_minus_1: u32,
+    pub max_frame_height_minus_1: u32,
     pub decoder_model_info: Option<DecoderModelInfo>,
     pub decoder_model_present_for_op: ArrayVec<bool, { 1 << 5 }>,
     pub operating_points_cnt_minus_1: usize,
@@ -87,7 +91,7 @@ pub fn parse_sequence_header(input: &[u8]) -> IResult<&[u8], SequenceHeader> {
                             (
                                 operating_parameters_info(
                                     inner_input,
-                                    decoder_model_info.buffer_delay_length_minus_1 + 1,
+                                    decoder_model_info.buffer_delay_length_minus_1 as usize + 1,
                                 )?
                                 .0,
                                 flag,
@@ -124,11 +128,11 @@ pub fn parse_sequence_header(input: &[u8]) -> IResult<&[u8], SequenceHeader> {
             )
         };
 
-        let (input, frame_width_bits_minus_1): (_, u8) = bit_parsers::take(4usize)(input)?;
-        let (input, frame_height_bits_minus_1): (_, u8) = bit_parsers::take(4usize)(input)?;
-        let (input, _max_frame_width_minus_1): (_, u64) =
+        let (input, frame_width_bits_minus_1) = bit_parsers::take(4usize)(input)?;
+        let (input, frame_height_bits_minus_1) = bit_parsers::take(4usize)(input)?;
+        let (input, max_frame_width_minus_1) =
             bit_parsers::take(frame_width_bits_minus_1 + 1)(input)?;
-        let (input, _max_frame_height_minus_1): (_, u64) =
+        let (input, max_frame_height_minus_1) =
             bit_parsers::take(frame_height_bits_minus_1 + 1)(input)?;
         let (input, frame_id_numbers_present) = if reduced_still_picture_header {
             (input, false)
@@ -137,14 +141,12 @@ pub fn parse_sequence_header(input: &[u8]) -> IResult<&[u8], SequenceHeader> {
         };
         let (input, delta_frame_id_len_minus_2, additional_frame_id_len_minus_1) =
             if frame_id_numbers_present {
-                let (input, delta_frame_id_len_minus_2): (_, u8) =
-                    bit_parsers::take(4usize)(input)?;
-                let (input, additional_frame_id_len_minus_1): (_, u8) =
-                    bit_parsers::take(3usize)(input)?;
+                let (input, delta_frame_id_len_minus_2) = bit_parsers::take(4usize)(input)?;
+                let (input, additional_frame_id_len_minus_1) = bit_parsers::take(3usize)(input)?;
                 (
                     input,
-                    delta_frame_id_len_minus_2 as usize,
-                    additional_frame_id_len_minus_1 as usize,
+                    delta_frame_id_len_minus_2,
+                    additional_frame_id_len_minus_1,
                 )
             } else {
                 (input, 0, 0)
@@ -200,8 +202,9 @@ pub fn parse_sequence_header(input: &[u8]) -> IResult<&[u8], SequenceHeader> {
                 (input, SELECT_INTEGER_MV)
             };
             let (input, order_hint_bits) = if enable_order_hint {
-                let (input, order_hint_bits_minus_1): (_, u8) = bit_parsers::take(3usize)(input)?;
-                (input, order_hint_bits_minus_1 as usize + 1)
+                let (input, order_hint_bits_minus_1): (_, usize) =
+                    bit_parsers::take(3usize)(input)?;
+                (input, order_hint_bits_minus_1 + 1)
             } else {
                 (input, 0)
             };
@@ -231,6 +234,10 @@ pub fn parse_sequence_header(input: &[u8]) -> IResult<&[u8], SequenceHeader> {
             force_screen_content_tools,
             force_integer_mv,
             order_hint_bits,
+            frame_width_bits_minus_1,
+            frame_height_bits_minus_1,
+            max_frame_width_minus_1,
+            max_frame_height_minus_1,
             decoder_model_info,
             decoder_model_present_for_op,
             operating_points_cnt_minus_1,
@@ -263,21 +270,22 @@ pub struct TimingInfo {
 }
 
 fn decoder_model_info(input: BitInput) -> IResult<BitInput, DecoderModelInfo> {
-    let (input, buffer_delay_length_minus_1): (_, usize) = bit_parsers::take(5usize)(input)?;
+    let (input, buffer_delay_length_minus_1) = bit_parsers::take(5usize)(input)?;
     let (input, _num_units_in_decoding_tick): (_, u32) = bit_parsers::take(32usize)(input)?;
-    let (input, buffer_removal_time_length_minus_1): (_, usize) = bit_parsers::take(5usize)(input)?;
-    let (input, _frame_presentation_time_length_minus_1): (_, u8) =
-        bit_parsers::take(5usize)(input)?;
+    let (input, buffer_removal_time_length_minus_1) = bit_parsers::take(5usize)(input)?;
+    let (input, frame_presentation_time_length_minus_1) = bit_parsers::take(5usize)(input)?;
     Ok((input, DecoderModelInfo {
         buffer_delay_length_minus_1,
         buffer_removal_time_length_minus_1,
+        frame_presentation_time_length_minus_1,
     }))
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct DecoderModelInfo {
-    pub buffer_delay_length_minus_1: usize,
-    pub buffer_removal_time_length_minus_1: usize,
+    pub buffer_delay_length_minus_1: u8,
+    pub buffer_removal_time_length_minus_1: u8,
+    pub frame_presentation_time_length_minus_1: u8,
 }
 
 fn operating_parameters_info(input: BitInput, buffer_delay_length: usize) -> IResult<BitInput, ()> {
