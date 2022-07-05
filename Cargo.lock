@@ -189,6 +189,7 @@ dependencies = [
  "clap",
  "log",
  "nom",
+ "num-traits",
  "num_enum",
  "pretty_env_logger",
 ]

@@ -355,6 +355,7 @@ fn color_config(input: BitInput, seq_profile: u8) -> IResult<BitInput, ColorConf
             matrix_coefficients,
             color_range: ColorRange::try_from(color_range).unwrap(),
             num_planes,
+            separate_uv_delta_q: false,
         }));
     } else if color_primaries == ColorPrimaries::Bt709
         && transfer_characteristics == TransferCharacteristics::Srgb
@@ -386,13 +387,14 @@ fn color_config(input: BitInput, seq_profile: u8) -> IResult<BitInput, ColorConf
         };
         (input, ColorRange::try_from(color_range).unwrap())
     };
-    let (input, _separate_uv_delta_q) = take_bool_bit(input)?;
+    let (input, separate_uv_delta_q) = take_bool_bit(input)?;
     Ok((input, ColorConfig {
         color_primaries,
         transfer_characteristics,
         matrix_coefficients,
         color_range,
         num_planes,
+        separate_uv_delta_q,
     }))
 }
 
@@ -403,6 +405,7 @@ pub struct ColorConfig {
     pub matrix_coefficients: MatrixCoefficients,
     pub color_range: ColorRange,
     pub num_planes: u8,
+    pub separate_uv_delta_q: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]

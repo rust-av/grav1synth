@@ -6,6 +6,7 @@ use nom::{
     IResult,
 };
 use num_enum::TryFromPrimitive;
+use num_traits::PrimInt;
 
 use super::{
     grain::{film_grain_params, FilmGrainHeader},
@@ -26,6 +27,8 @@ const SUPERRES_NUM: u32 = 8;
 
 const MAX_TILE_WIDTH: u32 = 4096;
 const MAX_TILE_COLS: u32 = 64;
+const MAX_TILE_ROWS: u32 = 64;
+const MAX_TILE_AREA: u32 = 4096 * 2304;
 
 const MAX_SEGMENTS: usize = 8;
 const SEG_LVL_MAX: usize = 8;
@@ -231,73 +234,8 @@ fn uncompressed_header<'a>(
         width: sequence_headers.max_frame_width_minus_1 + 1,
         height: sequence_headers.max_frame_height_minus_1 + 1,
     };
-    let (input, use_ref_frame_mvs, ref_frame_idx) = if frame_type.is_intra() {
-        let (input, frame_size) = frame_size(
-            input,
-            frame_size_override_flag,
-            sequence_headers.enable_superres,
-            sequence_headers.frame_width_bits_minus_1 + 1,
-            sequence_headers.frame_height_bits_minus_1 + 1,
-            max_frame_size,
-        )?;
-        let mut upscaled_size = frame_size;
-        let (input, render_size) = render_size(input, frame_size, &mut upscaled_size)?;
-        (
-            if allow_screen_content_tools && upscaled_size.width == frame_size.width {
-                let (input, allow_intrabc_inner) = take_bool_bit(input)?;
-                allow_intrabc = allow_intrabc_inner;
-                input
-            } else {
-                input
-            },
-            false,
-            ArrayVec::new(),
-        )
-    } else {
-        let (mut input, frame_refs_short_signaling) = if !sequence_headers.enable_order_hint() {
-            (input, false)
-        } else {
-            let (input, frame_refs_short_signaling) = take_bool_bit(input)?;
-            if frame_refs_short_signaling {
-                let (input, last_frame_idx) = bit_parsers::take(3usize)(input)?;
-                let (input, gold_frame_idx) = bit_parsers::take(3usize)(input)?;
-                let (input, _) = set_frame_refs(input)?;
-                (input, frame_refs_short_signaling)
-            } else {
-                (input, frame_refs_short_signaling)
-            }
-        };
-        let mut ref_frame_idx: ArrayVec<u8, REFS_PER_FRAME> = ArrayVec::new();
-        for _ in 0..REFS_PER_FRAME {
-            if !frame_refs_short_signaling {
-                let (inner_input, this_ref_frame_idx) = bit_parsers::take(3usize)(input)?;
-                input = inner_input;
-                ref_frame_idx.push(this_ref_frame_idx);
-                if sequence_headers.frame_id_numbers_present {
-                    let n = sequence_headers.delta_frame_id_len_minus_2 + 2;
-                    let (inner_input, _delta_frame_id_minus_1): (_, u64) =
-                        bit_parsers::take(n)(input)?;
-                    input = inner_input;
-                }
-            } else {
-                ref_frame_idx.push(0);
-            }
-        }
-        let input = if frame_size_override_flag && !error_resilient_mode {
-            let frame_size = max_frame_size;
-            let mut upscaled_size = frame_size;
-            let (input, _) = frame_size_with_refs(
-                input,
-                sequence_headers.enable_superres,
-                frame_size_override_flag,
-                sequence_headers.frame_width_bits_minus_1 + 1,
-                sequence_headers.frame_height_bits_minus_1 + 1,
-                max_frame_size,
-                &mut frame_size,
-                &mut upscaled_size,
-            )?;
-            input
-        } else {
+    let (input, use_ref_frame_mvs, ref_frame_idx, frame_size, upscaled_size) =
+        if frame_type.is_intra() {
             let (input, frame_size) = frame_size(
                 input,
                 frame_size_override_flag,
@@ -308,23 +246,99 @@ fn uncompressed_header<'a>(
             )?;
             let mut upscaled_size = frame_size;
             let (input, render_size) = render_size(input, frame_size, &mut upscaled_size)?;
-            input
-        };
-        let (input, allow_high_precision_mv) = if sequence_headers.force_integer_mv == 1 {
-            (input, false)
+            (
+                if allow_screen_content_tools && upscaled_size.width == frame_size.width {
+                    let (input, allow_intrabc_inner) = take_bool_bit(input)?;
+                    allow_intrabc = allow_intrabc_inner;
+                    input
+                } else {
+                    input
+                },
+                false,
+                ArrayVec::new(),
+                frame_size,
+                upscaled_size,
+            )
         } else {
-            take_bool_bit(input)?
-        };
-        let (input, _) = read_interpolation_filter(input)?;
-        let (input, is_motion_mode_switchable) = take_bool_bit(input)?;
-        let (input, use_ref_frame_mvs) =
-            if error_resilient_mode || !sequence_headers.enable_ref_frame_mvs {
+            let (mut input, frame_refs_short_signaling) = if !sequence_headers.enable_order_hint() {
+                (input, false)
+            } else {
+                let (input, frame_refs_short_signaling) = take_bool_bit(input)?;
+                if frame_refs_short_signaling {
+                    let (input, last_frame_idx) = bit_parsers::take(3usize)(input)?;
+                    let (input, gold_frame_idx) = bit_parsers::take(3usize)(input)?;
+                    let (input, _) = set_frame_refs(input)?;
+                    (input, frame_refs_short_signaling)
+                } else {
+                    (input, frame_refs_short_signaling)
+                }
+            };
+            let mut ref_frame_idx: ArrayVec<u8, REFS_PER_FRAME> = ArrayVec::new();
+            for _ in 0..REFS_PER_FRAME {
+                if !frame_refs_short_signaling {
+                    let (inner_input, this_ref_frame_idx) = bit_parsers::take(3usize)(input)?;
+                    input = inner_input;
+                    ref_frame_idx.push(this_ref_frame_idx);
+                    if sequence_headers.frame_id_numbers_present {
+                        let n = sequence_headers.delta_frame_id_len_minus_2 + 2;
+                        let (inner_input, _delta_frame_id_minus_1): (_, u64) =
+                            bit_parsers::take(n)(input)?;
+                        input = inner_input;
+                    }
+                } else {
+                    ref_frame_idx.push(0);
+                }
+            }
+            let (input, frame_size, upscaled_size) =
+                if frame_size_override_flag && !error_resilient_mode {
+                    let frame_size = max_frame_size;
+                    let mut upscaled_size = frame_size;
+                    let (input, frame_size) = frame_size_with_refs(
+                        input,
+                        sequence_headers.enable_superres,
+                        frame_size_override_flag,
+                        sequence_headers.frame_width_bits_minus_1 + 1,
+                        sequence_headers.frame_height_bits_minus_1 + 1,
+                        max_frame_size,
+                        &mut frame_size,
+                        &mut upscaled_size,
+                    )?;
+                    (input, frame_size, upscaled_size)
+                } else {
+                    let (input, frame_size) = frame_size(
+                        input,
+                        frame_size_override_flag,
+                        sequence_headers.enable_superres,
+                        sequence_headers.frame_width_bits_minus_1 + 1,
+                        sequence_headers.frame_height_bits_minus_1 + 1,
+                        max_frame_size,
+                    )?;
+                    let mut upscaled_size = frame_size;
+                    let (input, render_size) = render_size(input, frame_size, &mut upscaled_size)?;
+                    (input, frame_size, upscaled_size)
+                };
+            let (input, allow_high_precision_mv) = if sequence_headers.force_integer_mv == 1 {
                 (input, false)
             } else {
                 take_bool_bit(input)?
             };
-        (input, use_ref_frame_mvs, ref_frame_idx)
-    };
+            let (input, _) = read_interpolation_filter(input)?;
+            let (input, is_motion_mode_switchable) = take_bool_bit(input)?;
+            let (input, use_ref_frame_mvs) =
+                if error_resilient_mode || !sequence_headers.enable_ref_frame_mvs {
+                    (input, false)
+                } else {
+                    take_bool_bit(input)?
+                };
+            (
+                input,
+                use_ref_frame_mvs,
+                ref_frame_idx,
+                frame_size,
+                upscaled_size,
+            )
+        };
+    let (mi_cols, mi_rows) = compute_image_size(frame_size);
 
     let (input, disable_frame_end_update_cdf) =
         if sequence_headers.reduced_still_picture_header || disable_cdf_update {
@@ -355,7 +369,7 @@ fn uncompressed_header<'a>(
     let (input, q_params) = quantization_params(
         input,
         sequence_headers.color_config.num_planes,
-        separate_uv_delta_q,
+        sequence_headers.color_config.separate_uv_delta_q,
     )?;
     let (input, _) = segmentation_params(input, primary_ref_frame)?;
     let (input, delta_q_present) = delta_q_params(input, q_params.base_q_idx)?;
@@ -366,6 +380,21 @@ fn uncompressed_header<'a>(
         load_previous_segment_ids(input)?.0
     };
 
+    let mut coded_lossless = true;
+    for segment_id in 0..MAX_SEGMENTS {
+        let qindex = get_qindex(1, segment_id);
+        let lossless = qindex == 0
+            && q_params.deltaq_y_dc == 0
+            && q_params.deltaq_u_ac == 0
+            && q_params.deltaq_u_dc == 0
+            && q_params.deltaq_v_ac == 0
+            && q_params.deltaq_v_dc == 0;
+        if !lossless {
+            coded_lossless = false;
+            break;
+        }
+    }
+    let all_losslesss = coded_lossless && frame_size.width == upscaled_size.width;
     let (input, _) = loop_filter_params(
         input,
         coded_lossless,
@@ -386,6 +415,8 @@ fn uncompressed_header<'a>(
         sequence_headers.enable_restoration,
         sequence_headers.use_128x128_superblock,
         sequence_headers.color_config.num_planes,
+        remap_lr_type,
+        subsampling,
     )?;
     let (input, _) = read_tx_mode(input, coded_lossless)?;
     let (input, reference_select) = frame_reference_mode(input, frame_type.is_intra())?;
@@ -394,6 +425,11 @@ fn uncompressed_header<'a>(
         frame_type.is_intra(),
         reference_select,
         sequence_headers.enable_order_hint(),
+        ref_order_hint,
+        ref_frame_idx,
+        forward_hint,
+        backward_hint,
+        second_forward_hint,
     )?;
     let (input, allow_warped_motion) = if frame_type.is_intra()
         || error_resilient_mode
@@ -412,6 +448,7 @@ fn uncompressed_header<'a>(
         showable_frame,
         frame_type,
         sequence_headers.color_config.num_planes > 1,
+        subsampling,
     )?;
 
     Ok((input, FrameHeader {
@@ -465,8 +502,8 @@ fn frame_size(
     max_frame_size: Dimensions,
 ) -> IResult<BitInput, Dimensions> {
     let (input, width, height) = if frame_size_override {
-        let (input, width_minus_1) = bit_parsers::take(frame_width_bits)(input)?;
-        let (input, height_minus_1) = bit_parsers::take(frame_height_bits)(input)?;
+        let (input, width_minus_1): (_, u32) = bit_parsers::take(frame_width_bits)(input)?;
+        let (input, height_minus_1): (_, u32) = bit_parsers::take(frame_height_bits)(input)?;
         (input, width_minus_1 + 1, height_minus_1 + 1)
     } else {
         (input, max_frame_size.width, max_frame_size.height)
@@ -474,7 +511,6 @@ fn frame_size(
     let mut frame_size = Dimensions { width, height };
     let mut upscaled_size = frame_size;
     let (input, _) = superres_params(input, enable_superres, &mut frame_size, &mut upscaled_size)?;
-    let (input, _) = compute_image_size(input)?;
     Ok((input, frame_size))
 }
 
@@ -508,7 +544,7 @@ fn frame_size_with_refs<'a>(
     max_frame_size: Dimensions,
     ref_frame_size: &'a mut Dimensions,
     ref_upscaled_size: &'a mut Dimensions,
-) -> IResult<BitInput<'a>, ()> {
+) -> IResult<BitInput<'a>, Dimensions> {
     let mut found_ref = false;
     for _ in 0..REFS_PER_FRAME {
         let (input, found_this_ref) = take_bool_bit(input)?;
@@ -519,7 +555,7 @@ fn frame_size_with_refs<'a>(
             break;
         }
     }
-    let input = if !found_ref {
+    let (input, frame_size) = if !found_ref {
         let (input, frame_size) = frame_size(
             input,
             frame_size_override,
@@ -529,14 +565,13 @@ fn frame_size_with_refs<'a>(
             max_frame_size,
         )?;
         let (input, _) = render_size(input, frame_size, ref_upscaled_size)?;
-        input
+        (input, frame_size)
     } else {
         let (input, _) =
             superres_params(input, enable_superres, ref_frame_size, ref_upscaled_size)?;
-        let (input, _) = compute_image_size(input)?;
-        input
+        (input, *ref_frame_size)
     };
-    Ok((input, ()))
+    Ok((input, frame_size))
 }
 
 fn superres_params<'a>(
@@ -561,9 +596,10 @@ fn superres_params<'a>(
     Ok((input, ()))
 }
 
-fn compute_image_size(input: BitInput) -> IResult<BitInput, ()> {
-    // We don't care about this
-    Ok((input, ()))
+fn compute_image_size(frame_size: Dimensions) -> (u32, u32) {
+    let mi_cols = 2 * ((frame_size.width + 7) >> 3);
+    let mi_rows = 2 * ((frame_size.height + 7) >> 3);
+    (mi_cols, mi_rows)
 }
 
 fn read_interpolation_filter(input: BitInput) -> IResult<BitInput, ()> {
@@ -666,7 +702,7 @@ fn tile_info(
         let mut i = 0;
         while start_sb < sb_cols {
             let max_width = min(sb_cols - start_sb, max_tile_width_sb);
-            let (inner_input, width_in_sbs_minus_1) = ns(input, max_width)?;
+            let (inner_input, width_in_sbs_minus_1) = ns(input, max_width as usize)?;
             input = inner_input;
             let size_sb = width_in_sbs_minus_1 + 1;
             start_sb += size_sb as u32;
@@ -676,8 +712,10 @@ fn tile_info(
 
         let mut start_sb = 0;
         let mut i = 0;
+        let max_tile_height_sb = max(max_tile_area_sb / widest_tile_sb, 1);
         while start_sb < sb_rows {
-            let (inner_input, height_in_sbs_minus_1) = ns(input, max_height)?;
+            let max_height = min(sb_rows - start_sb, max_tile_height_sb);
+            let (inner_input, height_in_sbs_minus_1) = ns(input, max_height as usize)?;
             input = inner_input;
             let size_sb = height_in_sbs_minus_1 + 1;
             start_sb += size_sb as u32;
@@ -705,7 +743,7 @@ fn tile_info(
 ///
 /// There's probably a branchless way to do this,
 /// but I copied what is in the spec.
-fn tile_log2(blk_size: u32, target: u32) -> u32 {
+fn tile_log2<T: PrimInt>(blk_size: T, target: T) -> T {
     let mut k = 0;
     while (blk_size << k) < target {
         k += 1;
@@ -719,24 +757,24 @@ fn quantization_params(
     separate_uv_delta_q: bool,
 ) -> IResult<BitInput, QuantizationParams> {
     let (input, base_q_idx) = bit_parsers::take(8usize)(input)?;
-    let (input, _deltaq_y_dc) = read_delta_q(input)?;
-    let input = if num_planes > 1 {
+    let (input, deltaq_y_dc) = read_delta_q(input)?;
+    let (input, deltaq_u_dc, deltaq_u_ac, deltaq_v_dc, deltaq_v_ac) = if num_planes > 1 {
         let (input, diff_uv_delta) = if separate_uv_delta_q {
             take_bool_bit(input)?
         } else {
             (input, false)
         };
-        let (input, _deltaq_u_dc) = read_delta_q(input)?;
-        let (input, _deltaq_u_ac) = read_delta_q(input)?;
-        let input = if diff_uv_delta {
-            let (input, _deltaq_v_dc) = read_delta_q(input)?;
-            let (input, _deltaq_v_ac) = read_delta_q(input)?;
-            input
+        let (input, deltaq_u_dc) = read_delta_q(input)?;
+        let (input, deltaq_u_ac) = read_delta_q(input)?;
+        let (input, deltaq_v_dc, deltaq_v_ac) = if diff_uv_delta {
+            let (input, deltaq_v_dc) = read_delta_q(input)?;
+            let (input, deltaq_v_ac) = read_delta_q(input)?;
+            (input, deltaq_v_dc, deltaq_v_ac)
         } else {
-            input
+            (input, deltaq_u_dc, deltaq_u_ac)
         };
     } else {
-        input
+        (input, 0, 0, 0, 0)
     };
     let (input, using_qmatrix) = take_bool_bit(input)?;
     let input = if using_qmatrix {
@@ -752,12 +790,33 @@ fn quantization_params(
         input
     };
 
-    Ok((input, QuantizationParams { base_q_idx }))
+    Ok((input, QuantizationParams {
+        base_q_idx,
+        deltaq_y_dc,
+        deltaq_u_ac,
+        deltaq_u_dc,
+        deltaq_v_ac,
+        deltaq_v_dc,
+    }))
+}
+
+fn read_delta_q(input: BitInput) -> IResult<BitInput, i64> {
+    let (input, delta_coded) = take_bool_bit(input)?;
+    if delta_coded {
+        su(input, 1 + 6)
+    } else {
+        Ok((input, 0))
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct QuantizationParams {
     pub base_q_idx: u8,
+    pub deltaq_y_dc: i64,
+    pub deltaq_u_dc: i64,
+    pub deltaq_u_ac: i64,
+    pub deltaq_v_dc: i64,
+    pub deltaq_v_ac: i64,
 }
 
 fn segmentation_params(input: BitInput, primary_ref_frame: u8) -> IResult<BitInput, ()> {
@@ -1007,32 +1066,35 @@ fn frame_reference_mode(input: BitInput, frame_is_intra: bool) -> IResult<BitInp
     })
 }
 
-fn skip_mode_params(
-    input: BitInput,
+fn skip_mode_params<'a>(
+    input: BitInput<'a>,
     frame_is_intra: bool,
     reference_select: bool,
-    enable_order_hint: bool,
-    ref_order_hint: &[u8],
-    ref_frame_idx: &[usize],
+    order_hint_bits: usize,
+    ref_order_hint: &'a [u8],
+    ref_frame_idx: &'a [usize],
     mut forward_hint: u8,
     mut backward_hint: u8,
     mut second_forward_hint: u8,
-) -> IResult<BitInput, ()> {
+) -> IResult<BitInput<'a>, ()> {
     let mut skip_mode_allowed = false;
-    if frame_is_intra || !reference_select || !enable_order_hint {
+    if frame_is_intra || !reference_select || order_hint_bits == 0 {
         skip_mode_allowed = false;
     } else {
         let mut forward_idx = -1;
         let mut backward_idx = -1;
         for i in 0..(REFS_PER_FRAME as isize) {
             let ref_hint = ref_order_hint[ref_frame_idx[i as usize]];
-            if get_relative_dist(ref_hint, order_hint) < 0 {
-                if forward_idx < 0 || get_relative_dist(ref_hint, forward_hint) > 0 {
+            if get_relative_dist(ref_hint, order_hint, order_hint_bits) < 0 {
+                if forward_idx < 0 || get_relative_dist(ref_hint, forward_hint, order_hint_bits) > 0
+                {
                     forward_idx = i;
                     forward_hint = ref_hint;
                 }
             } else if get_relative_dist(ref_hint, order_hint) > 0 {
-                if backward_idx < 0 || get_relative_dist(ref_hint, backward_hint) < 0 {
+                if backward_idx < 0
+                    || get_relative_dist(ref_hint, backward_hint, order_hint_bits) < 0
+                {
                     backward_idx = i;
                     backward_hint = ref_hint;
                 }
@@ -1047,9 +1109,9 @@ fn skip_mode_params(
             let mut second_forward_idx = -1;
             for i in 0..(REFS_PER_FRAME as isize) {
                 let ref_hint = ref_order_hint[ref_frame_idx[i as usize]];
-                if get_relative_dist(ref_hint, forward_hint) < 0 {
+                if get_relative_dist(ref_hint, forward_hint, order_hint_bits) < 0 {
                     if second_forward_idx < 0
-                        || get_relative_dist(ref_hint, second_forward_hint) > 0
+                        || get_relative_dist(ref_hint, second_forward_hint, order_hint_bits) > 0
                     {
                         second_forward_idx = i;
                         second_forward_hint = ref_hint;
@@ -1072,6 +1134,16 @@ fn skip_mode_params(
     };
 
     Ok((input, ()))
+}
+
+fn get_relative_dist(a: i32, b: i32, order_hint_bits: usize) -> i32 {
+    if order_hint_bits == 0 {
+        return 0;
+    }
+
+    let diff = a - b;
+    let m = 1 << (order_hint_bits - 1);
+    (diff & (m - 1)) - (diff & m)
 }
 
 fn global_motion_params(input: BitInput, frame_is_intra: bool) -> IResult<BitInput, ()> {

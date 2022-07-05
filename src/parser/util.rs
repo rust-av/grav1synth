@@ -1,6 +1,7 @@
 use std::fmt::Debug;
 
 use nom::{bits::complete as bit_parsers, bytes::complete::take, combinator::map, IResult};
+use num_traits::PrimInt;
 
 pub type BitInput<'a> = (&'a [u8], usize);
 
@@ -88,4 +89,13 @@ pub fn su(input: BitInput, n: usize) -> IResult<BitInput, i64> {
         value = value - 2 * sign_mask;
     }
     Ok((input, value))
+}
+
+pub fn floor_log2<T: PrimInt>(mut x: T) -> T {
+    let mut s = 0;
+    while x != 0 {
+        x >>= 1;
+        s += 1;
+    }
+    s - 1
 }
