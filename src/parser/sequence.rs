@@ -29,6 +29,10 @@ pub struct SequenceHeader {
     pub enable_ref_frame_mvs: bool,
     pub enable_warped_motion: bool,
     pub enable_superres: bool,
+    pub enable_cdef: bool,
+    pub enable_restoration: bool,
+    pub use_128x128_superblock: bool,
+    pub color_config: ColorConfig,
 }
 
 impl SequenceHeader {
@@ -152,7 +156,7 @@ pub fn parse_sequence_header(input: &[u8]) -> IResult<&[u8], SequenceHeader> {
             } else {
                 (input, 0, 0)
             };
-        let (input, _use_128x128_superblock) = take_bool_bit(input)?;
+        let (input, use_128x128_superblock) = take_bool_bit(input)?;
         let (input, _enable_filter_intra) = take_bool_bit(input)?;
         let (input, _enable_intra_edge_filter) = take_bool_bit(input)?;
         let (
@@ -217,13 +221,14 @@ pub fn parse_sequence_header(input: &[u8]) -> IResult<&[u8], SequenceHeader> {
                 order_hint_bits,
                 enable_ref_frame_mvs,
                 enable_warped_motion,
+                use_128x128_superblock,
             )
         };
 
         let (input, enable_superres) = take_bool_bit(input)?;
-        let (input, _enable_cdef) = take_bool_bit(input)?;
-        let (input, _enable_restoration) = take_bool_bit(input)?;
-        let input = color_config(input, seq_profile)?.0;
+        let (input, enable_cdef) = take_bool_bit(input)?;
+        let (input, enable_restoration) = take_bool_bit(input)?;
+        let (input, color_config) = color_config(input, seq_profile)?;
         let (input, film_grain_params_present) = take_bool_bit(input)?;
 
         Ok((input, SequenceHeader {
@@ -247,6 +252,10 @@ pub fn parse_sequence_header(input: &[u8]) -> IResult<&[u8], SequenceHeader> {
             enable_ref_frame_mvs,
             enable_warped_motion,
             enable_superres,
+            enable_cdef,
+            enable_restoration,
+            use_128x128_superblock,
+            color_config,
         }))
     })(input)
 }
@@ -313,6 +322,7 @@ fn color_config(input: BitInput, seq_profile: u8) -> IResult<BitInput, ColorConf
     } else {
         take_bool_bit(input)?
     };
+    let num_planes = if monochrome { 1 } else { 3 };
     let (input, color_description_present_flag) = take_bool_bit(input)?;
     let (input, (color_primaries, transfer_characteristics, matrix_coefficients)) =
         if color_description_present_flag {
@@ -344,6 +354,7 @@ fn color_config(input: BitInput, seq_profile: u8) -> IResult<BitInput, ColorConf
             transfer_characteristics,
             matrix_coefficients,
             color_range: ColorRange::try_from(color_range).unwrap(),
+            num_planes,
         }));
     } else if color_primaries == ColorPrimaries::Bt709
         && transfer_characteristics == TransferCharacteristics::Srgb
@@ -381,6 +392,7 @@ fn color_config(input: BitInput, seq_profile: u8) -> IResult<BitInput, ColorConf
         transfer_characteristics,
         matrix_coefficients,
         color_range,
+        num_planes,
     }))
 }
 
@@ -390,6 +402,7 @@ pub struct ColorConfig {
     pub transfer_characteristics: TransferCharacteristics,
     pub matrix_coefficients: MatrixCoefficients,
     pub color_range: ColorRange,
+    pub num_planes: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]

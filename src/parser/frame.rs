@@ -41,6 +41,11 @@ pub struct FrameHeader {
 /// This will return `None` for a show-existing frame. We don't need to apply
 /// film grain params to those packets, because they are inherited from the ref
 /// frame.
+///
+/// I wish we didn't have to parse the whole frame header,
+/// but the film grain params are of course the very last item,
+/// and we don't know how many bits precede it, so we have to parse
+/// THE WHOLE THING before we get the film grain params.
 pub fn parse_frame_header<'a>(
     input: &'a [u8],
     seen_frame_header: &'a mut bool,
@@ -202,6 +207,7 @@ fn uncompressed_header<'a>(
         }
     }
 
+    let mut allow_intrabc = false;
     let (input, refresh_frame_flags): (_, u8) =
         if frame_type == FrameType::Switch || (frame_type == FrameType::Key && show_frame) {
             (input, REFRESH_ALL_FRAMES)
@@ -220,6 +226,11 @@ fn uncompressed_header<'a>(
             input = inner_input;
         }
     }
+
+    let max_frame_size = Dimensions {
+        width: sequence_headers.max_frame_width_minus_1 + 1,
+        height: sequence_headers.max_frame_height_minus_1 + 1,
+    };
     let (input, use_ref_frame_mvs, ref_frame_idx) = if frame_type.is_intra() {
         let (input, frame_size) = frame_size(
             input,
@@ -227,15 +238,14 @@ fn uncompressed_header<'a>(
             sequence_headers.enable_superres,
             sequence_headers.frame_width_bits_minus_1 + 1,
             sequence_headers.frame_height_bits_minus_1 + 1,
-            Dimensions {
-                width: sequence_headers.max_frame_width_minus_1 + 1,
-                height: sequence_headers.max_frame_height_minus_1 + 1,
-            },
+            max_frame_size,
         )?;
-        let (input, render_size) = render_size(input, frame_size, upscaled_size)?;
+        let mut upscaled_size = frame_size;
+        let (input, render_size) = render_size(input, frame_size, &mut upscaled_size)?;
         (
             if allow_screen_content_tools && upscaled_size.width == frame_size.width {
-                let (input, allow_intrabc) = take_bool_bit(input)?;
+                let (input, allow_intrabc_inner) = take_bool_bit(input)?;
+                allow_intrabc = allow_intrabc_inner;
                 input
             } else {
                 input
@@ -251,7 +261,7 @@ fn uncompressed_header<'a>(
             if frame_refs_short_signaling {
                 let (input, last_frame_idx) = bit_parsers::take(3usize)(input)?;
                 let (input, gold_frame_idx) = bit_parsers::take(3usize)(input)?;
-                let (input, _) = set_frame_refs(input, last_frame_idx, gold_frame_idx)?;
+                let (input, _) = set_frame_refs(input)?;
                 (input, frame_refs_short_signaling)
             } else {
                 (input, frame_refs_short_signaling)
@@ -274,12 +284,14 @@ fn uncompressed_header<'a>(
             }
         }
         let input = if frame_size_override_flag && !error_resilient_mode {
+            let frame_size = max_frame_size;
+            let mut upscaled_size = frame_size;
             let (input, _) = frame_size_with_refs(
                 input,
                 sequence_headers.enable_superres,
                 frame_size_override_flag,
-                frame_width_bits,
-                frame_height_bits,
+                sequence_headers.frame_width_bits_minus_1 + 1,
+                sequence_headers.frame_height_bits_minus_1 + 1,
                 max_frame_size,
                 &mut frame_size,
                 &mut upscaled_size,
@@ -290,8 +302,12 @@ fn uncompressed_header<'a>(
                 input,
                 frame_size_override_flag,
                 sequence_headers.enable_superres,
+                sequence_headers.frame_width_bits_minus_1 + 1,
+                sequence_headers.frame_height_bits_minus_1 + 1,
+                max_frame_size,
             )?;
-            let (input, render_size) = render_size(input)?;
+            let mut upscaled_size = frame_size;
+            let (input, render_size) = render_size(input, frame_size, &mut upscaled_size)?;
             input
         };
         let (input, allow_high_precision_mv) = if sequence_headers.force_integer_mv == 1 {
@@ -330,9 +346,18 @@ fn uncompressed_header<'a>(
     } else {
         input
     };
-    let (input, _) = tile_info(input, use_128x128_superblock, mi_cols, mi_rows)?;
-    let (input, q_params) = quantization_params(input)?;
-    let (input, _) = segmentation_params(input)?;
+    let (input, _) = tile_info(
+        input,
+        sequence_headers.use_128x128_superblock,
+        mi_cols,
+        mi_rows,
+    )?;
+    let (input, q_params) = quantization_params(
+        input,
+        sequence_headers.color_config.num_planes,
+        separate_uv_delta_q,
+    )?;
+    let (input, _) = segmentation_params(input, primary_ref_frame)?;
     let (input, delta_q_present) = delta_q_params(input, q_params.base_q_idx)?;
     let (input, _) = delta_lf_params(input, delta_q_present, allow_intrabc)?;
     let input = if primary_ref_frame == PRIMARY_REF_NONE {
@@ -341,12 +366,35 @@ fn uncompressed_header<'a>(
         load_previous_segment_ids(input)?.0
     };
 
-    let (input, _) = loop_filter_params(input)?;
-    let (input, _) = cdef_params(input)?;
-    let (input, _) = lr_params(input)?;
-    let (input, _) = read_tx_mode(input)?;
-    let (input, reference_select) = frame_reference_mode(input)?;
-    let (input, _) = skip_mode_params(input)?;
+    let (input, _) = loop_filter_params(
+        input,
+        coded_lossless,
+        allow_intrabc,
+        sequence_headers.color_config.num_planes,
+    )?;
+    let (input, _) = cdef_params(
+        input,
+        coded_lossless,
+        allow_intrabc,
+        sequence_headers.enable_cdef,
+        sequence_headers.color_config.num_planes,
+    )?;
+    let (input, _) = lr_params(
+        input,
+        all_losslesss,
+        allow_intrabc,
+        sequence_headers.enable_restoration,
+        sequence_headers.use_128x128_superblock,
+        sequence_headers.color_config.num_planes,
+    )?;
+    let (input, _) = read_tx_mode(input, coded_lossless)?;
+    let (input, reference_select) = frame_reference_mode(input, frame_type.is_intra())?;
+    let (input, _) = skip_mode_params(
+        input,
+        frame_type.is_intra(),
+        reference_select,
+        sequence_headers.enable_order_hint(),
+    )?;
     let (input, allow_warped_motion) = if frame_type.is_intra()
         || error_resilient_mode
         || !sequence_headers.enable_warped_motion
@@ -356,8 +404,15 @@ fn uncompressed_header<'a>(
         take_bool_bit(input)?
     };
     let (input, reduced_tx_set) = take_bool_bit(input)?;
-    let (input, _) = global_motion_params(input)?;
-    let (input, film_grain_params) = film_grain_params(input)?;
+    let (input, _) = global_motion_params(input, frame_type.is_intra())?;
+    let (input, film_grain_params) = film_grain_params(
+        input,
+        sequence_headers.film_grain_params_present,
+        show_frame,
+        showable_frame,
+        frame_type,
+        sequence_headers.color_config.num_planes > 1,
+    )?;
 
     Ok((input, FrameHeader {
         show_existing_frame,
@@ -417,16 +472,17 @@ fn frame_size(
         (input, max_frame_size.width, max_frame_size.height)
     };
     let mut frame_size = Dimensions { width, height };
+    let mut upscaled_size = frame_size;
     let (input, _) = superres_params(input, enable_superres, &mut frame_size, &mut upscaled_size)?;
     let (input, _) = compute_image_size(input)?;
     Ok((input, frame_size))
 }
 
-fn render_size(
-    input: BitInput,
+fn render_size<'a>(
+    input: BitInput<'a>,
     frame_size: Dimensions,
-    upscaled_size: Dimensions,
-) -> IResult<BitInput, Dimensions> {
+    upscaled_size: &'a mut Dimensions,
+) -> IResult<BitInput<'a>, Dimensions> {
     let (input, render_and_frame_size_different) = take_bool_bit(input)?;
     let (input, width, height) = if render_and_frame_size_different {
         let (input, render_width_minus_1): (_, u32) = bit_parsers::take(16usize)(input)?;
@@ -444,14 +500,14 @@ fn set_frame_refs(input: BitInput) -> IResult<BitInput, ()> {
 }
 
 fn frame_size_with_refs<'a>(
-    input: BitInput,
+    input: BitInput<'a>,
     enable_superres: bool,
     frame_size_override: bool,
     frame_width_bits: usize,
     frame_height_bits: usize,
     max_frame_size: Dimensions,
-    frame_size_in: &'a mut Dimensions,
-    upscaled_size_in: &'a mut Dimensions,
+    ref_frame_size: &'a mut Dimensions,
+    ref_upscaled_size: &'a mut Dimensions,
 ) -> IResult<BitInput<'a>, ()> {
     let mut found_ref = false;
     for _ in 0..REFS_PER_FRAME {
@@ -472,10 +528,11 @@ fn frame_size_with_refs<'a>(
             frame_height_bits,
             max_frame_size,
         )?;
-        let (input, _) = render_size(input, frame_size, *upscaled_size_in)?;
+        let (input, _) = render_size(input, frame_size, ref_upscaled_size)?;
         input
     } else {
-        let (input, _) = superres_params(input, enable_superres, frame_size_in, upscaled_size_in)?;
+        let (input, _) =
+            superres_params(input, enable_superres, ref_frame_size, ref_upscaled_size)?;
         let (input, _) = compute_image_size(input)?;
         input
     };
