@@ -1,3 +1,5 @@
+use std::cmp::{max, min};
+
 use arrayvec::ArrayVec;
 use nom::{
     bits::{bits, complete as bit_parsers},
@@ -9,13 +11,26 @@ use super::{
     grain::{film_grain_params, FilmGrainHeader},
     obu::ObuHeader,
     sequence::{SequenceHeader, SELECT_INTEGER_MV, SELECT_SCREEN_CONTENT_TOOLS},
-    util::{take_bool_bit, BitInput},
+    util::{ns, su, take_bool_bit, BitInput},
 };
 
 const REFS_PER_FRAME: usize = 7;
+const TOTAL_REFS_PER_FRAME: usize = 8;
 const NUM_REF_FRAMES: usize = 8;
 const REFRESH_ALL_FRAMES: u8 = 0b1111_1111;
 const PRIMARY_REF_NONE: u8 = 7;
+
+const SUPERRES_DENOM_BITS: usize = 3;
+const SUPERRES_DENOM_MIN: u32 = 9;
+const SUPERRES_NUM: u32 = 8;
+
+const MAX_TILE_WIDTH: u32 = 4096;
+const MAX_TILE_COLS: u32 = 64;
+
+const MAX_SEGMENTS: usize = 8;
+const SEG_LVL_MAX: usize = 8;
+
+const RESTORE_NONE: u8 = 0;
 
 #[derive(Debug, Clone)]
 pub struct FrameHeader {
@@ -209,12 +224,15 @@ fn uncompressed_header<'a>(
         let (input, frame_size) = frame_size(
             input,
             frame_size_override_flag,
+            sequence_headers.enable_superres,
             sequence_headers.frame_width_bits_minus_1 + 1,
             sequence_headers.frame_height_bits_minus_1 + 1,
-            sequence_headers.max_frame_width_minus_1 + 1,
-            sequence_headers.max_frame_height_minus_1 + 1,
+            Dimensions {
+                width: sequence_headers.max_frame_width_minus_1 + 1,
+                height: sequence_headers.max_frame_height_minus_1 + 1,
+            },
         )?;
-        let (input, render_size) = render_size(input)?;
+        let (input, render_size) = render_size(input, frame_size, upscaled_size)?;
         (
             if allow_screen_content_tools && upscaled_size.width == frame_size.width {
                 let (input, allow_intrabc) = take_bool_bit(input)?;
@@ -256,10 +274,23 @@ fn uncompressed_header<'a>(
             }
         }
         let input = if frame_size_override_flag && !error_resilient_mode {
-            let (input, _) = frame_size_with_refs(input)?;
+            let (input, _) = frame_size_with_refs(
+                input,
+                sequence_headers.enable_superres,
+                frame_size_override_flag,
+                frame_width_bits,
+                frame_height_bits,
+                max_frame_size,
+                &mut frame_size,
+                &mut upscaled_size,
+            )?;
             input
         } else {
-            let (input, frame_size) = frame_size(input)?;
+            let (input, frame_size) = frame_size(
+                input,
+                frame_size_override_flag,
+                sequence_headers.enable_superres,
+            )?;
             let (input, render_size) = render_size(input)?;
             input
         };
@@ -290,19 +321,20 @@ fn uncompressed_header<'a>(
         let (input, _) = setup_past_independence(input)?;
         input
     } else {
-        let (input, _) = load_cdfs(input, &ref_frame_idx[primary_ref_frame])?;
+        let (input, _) = load_cdfs(input)?;
         let (input, _) = load_previous(input)?;
+        input
     };
     let input = if use_ref_frame_mvs {
         motion_field_estimation(input)?.0
     } else {
         input
     };
-    let (input, _) = tile_info(input)?;
-    let (input, _) = quantization_params(input)?;
+    let (input, _) = tile_info(input, use_128x128_superblock, mi_cols, mi_rows)?;
+    let (input, q_params) = quantization_params(input)?;
     let (input, _) = segmentation_params(input)?;
-    let (input, _) = delta_q_params(input)?;
-    let (input, _) = delta_lf_params(input)?;
+    let (input, delta_q_present) = delta_q_params(input, q_params.base_q_idx)?;
+    let (input, _) = delta_lf_params(input, delta_q_present, allow_intrabc)?;
     let input = if primary_ref_frame == PRIMARY_REF_NONE {
         init_coeff_cdfs(input)?.0
     } else {
@@ -313,7 +345,7 @@ fn uncompressed_header<'a>(
     let (input, _) = cdef_params(input)?;
     let (input, _) = lr_params(input)?;
     let (input, _) = read_tx_mode(input)?;
-    let (input, _) = frame_reference_mode(input)?;
+    let (input, reference_select) = frame_reference_mode(input)?;
     let (input, _) = skip_mode_params(input)?;
     let (input, allow_warped_motion) = if frame_type.is_intra()
         || error_resilient_mode
@@ -372,6 +404,7 @@ pub struct Dimensions {
 fn frame_size(
     input: BitInput,
     frame_size_override: bool,
+    enable_superres: bool,
     frame_width_bits: usize,
     frame_height_bits: usize,
     max_frame_size: Dimensions,
@@ -383,9 +416,10 @@ fn frame_size(
     } else {
         (input, max_frame_size.width, max_frame_size.height)
     };
-    let (input, _) = superres_params(input)?;
+    let mut frame_size = Dimensions { width, height };
+    let (input, _) = superres_params(input, enable_superres, &mut frame_size, &mut upscaled_size)?;
     let (input, _) = compute_image_size(input)?;
-    Ok((input, Dimensions { width, height }))
+    Ok((input, frame_size))
 }
 
 fn render_size(
@@ -411,11 +445,13 @@ fn set_frame_refs(input: BitInput) -> IResult<BitInput, ()> {
 
 fn frame_size_with_refs<'a>(
     input: BitInput,
+    enable_superres: bool,
     frame_size_override: bool,
     frame_width_bits: usize,
     frame_height_bits: usize,
     max_frame_size: Dimensions,
-    upscaled_size: &'a mut Dimensions,
+    frame_size_in: &'a mut Dimensions,
+    upscaled_size_in: &'a mut Dimensions,
 ) -> IResult<BitInput<'a>, ()> {
     let mut found_ref = false;
     for _ in 0..REFS_PER_FRAME {
@@ -431,104 +467,590 @@ fn frame_size_with_refs<'a>(
         let (input, frame_size) = frame_size(
             input,
             frame_size_override,
+            enable_superres,
             frame_width_bits,
             frame_height_bits,
             max_frame_size,
         )?;
-        let (input, _) = render_size(input, frame_size, *upscaled_size)?;
+        let (input, _) = render_size(input, frame_size, *upscaled_size_in)?;
         input
     } else {
-        let (input, _) = superres_params(input)?;
+        let (input, _) = superres_params(input, enable_superres, frame_size_in, upscaled_size_in)?;
         let (input, _) = compute_image_size(input)?;
         input
     };
     Ok((input, ()))
 }
 
-fn superres_params(input: BitInput) -> IResult<BitInput, ()> {
-    todo!()
+fn superres_params<'a>(
+    input: BitInput,
+    enable_superres: bool,
+    frame_size: &'a mut Dimensions,
+    upscaled_size: &'a mut Dimensions,
+) -> IResult<BitInput<'a>, ()> {
+    let (input, use_superres) = if enable_superres {
+        take_bool_bit(input)?
+    } else {
+        (input, false)
+    };
+    let (input, superres_denom) = if use_superres {
+        let (input, coded_denom): (_, u32) = bit_parsers::take(SUPERRES_DENOM_BITS)(input)?;
+        (input, coded_denom + SUPERRES_DENOM_MIN)
+    } else {
+        (input, SUPERRES_NUM)
+    };
+    upscaled_size.width = frame_size.width;
+    frame_size.width = (upscaled_size.width * SUPERRES_NUM + (superres_denom / 2)) / superres_denom;
+    Ok((input, ()))
 }
 
 fn compute_image_size(input: BitInput) -> IResult<BitInput, ()> {
-    todo!()
+    // We don't care about this
+    Ok((input, ()))
 }
 
 fn read_interpolation_filter(input: BitInput) -> IResult<BitInput, ()> {
-    todo!()
+    let (input, _is_filter_switchable) = take_bool_bit(input)?;
+    Ok((input, ()))
 }
 
 fn init_non_coeff_cdfs(input: BitInput) -> IResult<BitInput, ()> {
-    todo!()
+    // We don't care about this
+    Ok((input, ()))
 }
 
 fn setup_past_independence(input: BitInput) -> IResult<BitInput, ()> {
-    todo!()
+    // We don't care about this
+    Ok((input, ()))
 }
 
 fn load_cdfs(input: BitInput) -> IResult<BitInput, ()> {
-    todo!()
+    // We don't care about this
+    Ok((input, ()))
 }
 
 fn load_previous(input: BitInput) -> IResult<BitInput, ()> {
-    todo!()
+    // We don't care about this
+    Ok((input, ()))
 }
 
 fn motion_field_estimation(input: BitInput) -> IResult<BitInput, ()> {
-    todo!()
+    // We don't care about this
+    Ok((input, ()))
 }
 
-fn tile_info(input: BitInput) -> IResult<BitInput, ()> {
-    todo!()
+fn tile_info(
+    input: BitInput,
+    use_128x128_superblock: bool,
+    mi_cols: u32,
+    mi_rows: u32,
+) -> IResult<BitInput, ()> {
+    let sb_cols = if use_128x128_superblock {
+        (mi_cols + 31) >> 5
+    } else {
+        (mi_cols + 15) >> 4
+    };
+    let sb_rows = if use_128x128_superblock {
+        (mi_rows + 31) >> 5
+    } else {
+        (mi_rows + 15) >> 4
+    };
+    let sb_shift = if use_128x128_superblock { 5 } else { 4 };
+    let sb_size = sb_shift + 2;
+    let max_tile_width_sb = MAX_TILE_WIDTH >> sb_size;
+    let max_tile_area_sb = MAX_TILE_AREA >> (2 * sb_size);
+    let min_log2_tile_cols = tile_log2(max_tile_width_sb, sb_cols);
+    let max_log2_tile_cols = tile_log2(1, min(sb_cols, MAX_TILE_COLS));
+    let max_log2_tile_rows = tile_log2(1, min(sb_rows, MAX_TILE_ROWS));
+    let min_log2_tiles = max(
+        min_log2_tile_cols,
+        tile_log2(max_tile_area_sb, sb_rows * sb_cols),
+    );
+    let mut tile_rows = 0;
+    let mut tile_cols = 0;
+
+    let (mut input, uniform_tile_spacing_flag) = take_bool_bit(input)?;
+    if uniform_tile_spacing_flag {
+        let mut tile_cols_log2 = min_log2_tile_cols;
+        while tile_cols_log2 < max_log2_tile_cols {
+            let (inner_input, increment_tile_cols_log2) = take_bool_bit(input)?;
+            input = inner_input;
+            if increment_tile_cols_log2 {
+                tile_cols_log2 += 2;
+            } else {
+                break;
+            }
+        }
+        let tile_width_sb = (sb_cols + (1 << tile_cols_log2) - 1) >> tile_cols_log2;
+        for i in (0..sb_cols).step_by(tile_width_sb) {
+            // don't care about MiRowStarts
+            tile_cols = i;
+        }
+
+        let mut min_log2_tile_rows = max(min_log2_tiles - tile_cols_log2, 0);
+        let tile_rows_log2 = min_log2_tile_rows;
+        while tile_rows_log2 < min_log2_tile_rows {
+            let (inner_input, increment_tile_rows_log2) = take_bool_bit(input)?;
+            input = inner_input;
+            if increment_tile_rows_log2 {
+                tile_rows_log2 += 2;
+            } else {
+                break;
+            }
+        }
+        let tile_height_sb = (sb_rows + (1 << tile_rows_log2) - 1) >> tile_rows_log2;
+        for i in (0..sb_rows).step_by(tile_height_sb as usize) {
+            // don't care about MiRowStarts
+            tile_rows = i;
+        }
+    } else {
+        let mut widest_tile_sb = 0;
+        let mut start_sb = 0;
+        let mut i = 0;
+        while start_sb < sb_cols {
+            let max_width = min(sb_cols - start_sb, max_tile_width_sb);
+            let (inner_input, width_in_sbs_minus_1) = ns(input, max_width)?;
+            input = inner_input;
+            let size_sb = width_in_sbs_minus_1 + 1;
+            start_sb += size_sb as u32;
+            i += 1;
+        }
+        tile_cols = i;
+
+        let mut start_sb = 0;
+        let mut i = 0;
+        while start_sb < sb_rows {
+            let (inner_input, height_in_sbs_minus_1) = ns(input, max_height)?;
+            input = inner_input;
+            let size_sb = height_in_sbs_minus_1 + 1;
+            start_sb += size_sb as u32;
+            i += 1;
+        }
+        tile_rows = i;
+    }
+
+    let tile_cols_log2 = tile_log2(1, tile_cols);
+    let tile_rows_log2 = tile_log2(1, tile_rows);
+    let input = if tile_cols_log2 > 0 || tile_rows_log2 > 0 {
+        let (input, context_update_tile_id) =
+            bit_parsers::take(tile_rows_log2 + tile_cols_log2)(input)?;
+        let (input, tile_size_bytes_minus_1): (_, u8) = bit_parsers::take(2)(input)?;
+        input
+    } else {
+        input
+    };
+
+    Ok((input, ()))
 }
 
-fn quantization_params(input: BitInput) -> IResult<BitInput, ()> {
-    todo!()
+/// Returns the smallest value for `k` such that `blk_size << k` is greater than
+/// or equal to target.
+///
+/// There's probably a branchless way to do this,
+/// but I copied what is in the spec.
+fn tile_log2(blk_size: u32, target: u32) -> u32 {
+    let mut k = 0;
+    while (blk_size << k) < target {
+        k += 1;
+    }
+    k
 }
 
-fn segmentation_params(input: BitInput) -> IResult<BitInput, ()> {
-    todo!()
+fn quantization_params(
+    input: BitInput,
+    num_planes: u8,
+    separate_uv_delta_q: bool,
+) -> IResult<BitInput, QuantizationParams> {
+    let (input, base_q_idx) = bit_parsers::take(8usize)(input)?;
+    let (input, _deltaq_y_dc) = read_delta_q(input)?;
+    let input = if num_planes > 1 {
+        let (input, diff_uv_delta) = if separate_uv_delta_q {
+            take_bool_bit(input)?
+        } else {
+            (input, false)
+        };
+        let (input, _deltaq_u_dc) = read_delta_q(input)?;
+        let (input, _deltaq_u_ac) = read_delta_q(input)?;
+        let input = if diff_uv_delta {
+            let (input, _deltaq_v_dc) = read_delta_q(input)?;
+            let (input, _deltaq_v_ac) = read_delta_q(input)?;
+            input
+        } else {
+            input
+        };
+    } else {
+        input
+    };
+    let (input, using_qmatrix) = take_bool_bit(input)?;
+    let input = if using_qmatrix {
+        let (input, _qm_y): (_, u8) = bit_parsers::take(4usize)(input)?;
+        let (input, _qm_u): (_, u8) = bit_parsers::take(4usize)(input)?;
+        let (input, _qm_v): (_, u8) = if separate_uv_delta_q {
+            bit_parsers::take(4usize)(input)?
+        } else {
+            (input, _qm_u)
+        };
+        input
+    } else {
+        input
+    };
+
+    Ok((input, QuantizationParams { base_q_idx }))
 }
 
-fn delta_q_params(input: BitInput) -> IResult<BitInput, ()> {
-    todo!()
+#[derive(Debug, Clone, Copy)]
+pub struct QuantizationParams {
+    pub base_q_idx: u8,
 }
 
-fn delta_lf_params(input: BitInput) -> IResult<BitInput, ()> {
-    todo!()
+fn segmentation_params(input: BitInput, primary_ref_frame: u8) -> IResult<BitInput, ()> {
+    let (input, segmentation_enabled) = take_bool_bit(input)?;
+    let input = if segmentation_enabled {
+        let (input, segmentation_update_data) = if primary_ref_frame == PRIMARY_REF_NONE {
+            (input, true)
+        } else {
+            let (input, segmentation_update_map) = take_bool_bit(input)?;
+            let input = if segmentation_update_map {
+                let (input, _segmentation_temporal_update) = take_bool_bit(input)?;
+                input
+            } else {
+                input
+            };
+            take_bool_bit(input)?
+        };
+        if segmentation_update_data {
+            let mut input = input;
+            for i in 0..MAX_SEGMENTS {
+                for j in 0..SEG_LVL_MAX {
+                    let (inner_input, feature_enabled) = take_bool_bit(input)?;
+                    input = if feature_enabled {
+                        let bits_to_read = segmentation_feature_bits[j];
+                        let (inner_input, _feature_value) = if segmentation_feature_signed[j] {
+                            su(inner_input, 1 + bits_to_read)?
+                        } else {
+                            bit_parsers::take(bits_to_read)(inner_input)?
+                        };
+                        inner_input
+                    } else {
+                        inner_input
+                    };
+                }
+            }
+            input
+        } else {
+            input
+        }
+    } else {
+        input
+    };
+
+    // The rest of the stuff in this method doesn't read any input, so return
+    Ok((input, ()))
+}
+
+fn delta_q_params(input: BitInput, base_q_idx: u8) -> IResult<BitInput, bool> {
+    let (input, delta_q_present) = if base_q_idx > 0 {
+        take_bool_bit(input)?
+    } else {
+        (input, false)
+    };
+    let (input, _delta_q_res): (_, u8) = if delta_q_present {
+        bit_parsers::take(2usize)(input)?
+    } else {
+        (input, 0)
+    };
+    Ok((input, delta_q_present))
+}
+
+fn delta_lf_params(
+    input: BitInput,
+    delta_q_present: bool,
+    allow_intrabc: bool,
+) -> IResult<BitInput, ()> {
+    let input = if delta_q_present {
+        let (input, delta_lf_present) = if !allow_intrabc {
+            take_bool_bit(input)?
+        } else {
+            (input, false)
+        };
+        if delta_lf_present {
+            let (input, delta_lf_res): (_, u8) = bit_parsers::take(2usize)(input)?;
+            let (input, delta_lf_multi) = take_bool_bit(input)?;
+            input
+        } else {
+            input
+        }
+    } else {
+        input
+    };
+    Ok((input, ()))
 }
 
 fn init_coeff_cdfs(input: BitInput) -> IResult<BitInput, ()> {
-    todo!()
+    // We don't care about this
+    Ok((input, ()))
 }
 
 fn load_previous_segment_ids(input: BitInput) -> IResult<BitInput, ()> {
-    todo!()
+    // We don't care about this
+    Ok((input, ()))
 }
 
-fn loop_filter_params(input: BitInput) -> IResult<BitInput, ()> {
-    todo!()
+fn loop_filter_params(
+    input: BitInput,
+    coded_lossless: bool,
+    allow_intrabc: bool,
+    num_planes: u8,
+) -> IResult<BitInput, ()> {
+    if coded_lossless || allow_intrabc {
+        return Ok((input, ()));
+    }
+
+    let (input, loop_filter_l0): (_, u8) = bit_parsers::take(6usize)(input)?;
+    let (input, loop_filter_l1): (_, u8) = bit_parsers::take(6usize)(input)?;
+    let input = if num_planes > 1 && (loop_filter_l0 > 0 || loop_filter_l1 > 0) {
+        let (input, loop_filter_l2): (_, u8) = bit_parsers::take(6usize)(input)?;
+        let (input, loop_filter_l3): (_, u8) = bit_parsers::take(6usize)(input)?;
+        input
+    } else {
+        input
+    };
+    let (input, loop_filter_sharpness): (_, u8) = bit_parsers::take(3usize)(input)?;
+    let (input, loop_filter_delta_enabled) = take_bool_bit(input)?;
+    let input = if loop_filter_delta_enabled {
+        let (mut input, loop_filter_delta_update) = take_bool_bit(input)?;
+        if loop_filter_delta_update {
+            for i in 0..TOTAL_REFS_PER_FRAME {
+                let (inner_input, update_ref_delta) = take_bool_bit(input)?;
+                input = if update_ref_delta {
+                    let (inner_input, loop_filter_ref_delta) = su(inner_input, 1 + 6)?;
+                    inner_input
+                } else {
+                    inner_input
+                };
+            }
+            for i in 0..2 {
+                let (inner_input, update_mode_delta) = take_bool_bit(input)?;
+                input = if update_mode_delta {
+                    let (inner_input, loop_filter_mode_delta) = su(inner_input, 1 + 6)?;
+                    inner_input
+                } else {
+                    inner_input
+                };
+            }
+            input
+        } else {
+            input
+        }
+    } else {
+        input
+    };
+
+    Ok((input, ()))
 }
 
-fn cdef_params(input: BitInput) -> IResult<BitInput, ()> {
-    todo!()
+fn cdef_params(
+    input: BitInput,
+    coded_lossless: bool,
+    allow_intrabc: bool,
+    enable_cdef: bool,
+    num_planes: u8,
+) -> IResult<BitInput, ()> {
+    if coded_lossless || allow_intrabc || !enable_cdef {
+        return Ok((input, ()));
+    }
+
+    let (input, cdef_damping_minus_1): (_, u8) = bit_parsers::take(2usize)(input)?;
+    let (mut input, cdef_bits): (_, u8) = bit_parsers::take(2usize)(input)?;
+    for _ in 0..(1 << cdef_bits) {
+        let (inner_input, cdef_y_pri_str): (_, u8) = bit_parsers::take(4usize)(input)?;
+        let (inner_input, cdef_y_sec_str): (_, u8) = bit_parsers::take(2usize)(inner_input)?;
+        input = if num_planes > 1 {
+            let (inner_input, cdef_uv_pri_str): (_, u8) = bit_parsers::take(4usize)(inner_input)?;
+            let (inner_input, cdef_uv_sec_str): (_, u8) = bit_parsers::take(2usize)(inner_input)?;
+            inner_input
+        } else {
+            inner_input
+        }
+    }
+
+    Ok((input, ()))
 }
 
-fn lr_params(input: BitInput) -> IResult<BitInput, ()> {
-    todo!()
+#[allow(clippy::fn_params_excessive_bools)]
+fn lr_params<'a>(
+    input: BitInput<'a>,
+    all_lossless: bool,
+    allow_intrabc: bool,
+    enable_restoration: bool,
+    use_128x128_superblock: bool,
+    num_planes: u8,
+    remap_lr_type: &'a [u8],
+    subsampling: (u8, u8),
+) -> IResult<BitInput<'a>, ()> {
+    if all_lossless || allow_intrabc || !enable_restoration {
+        return Ok((input, ()));
+    }
+
+    let mut input = input;
+    let mut uses_lr = false;
+    let mut uses_chroma_lr = false;
+    for i in 0..num_planes {
+        let (inner_input, lr_type): (_, u8) = bit_parsers::take(2usize)(input)?;
+        if remap_lr_type[lr_type as usize] != RESTORE_NONE {
+            uses_lr = true;
+            if i > 0 {
+                uses_chroma_lr = true;
+            }
+        }
+        input = inner_input;
+    }
+
+    let input = if uses_lr {
+        let input = if use_128x128_superblock {
+            let (input, lr_unit_shift) = take_bool_bit(input)?;
+            input
+        } else {
+            let (input, lr_unit_shift) = take_bool_bit(input)?;
+            if lr_unit_shift {
+                let (input, lr_unit_extra_shift) = take_bool_bit(input)?;
+                input
+            } else {
+                input
+            }
+        };
+        if subsampling.0 > 0 && subsampling.1 > 0 && uses_chroma_lr {
+            let (input, lr_uv_shift) = take_bool_bit(input)?;
+            input
+        } else {
+            input
+        }
+    } else {
+        input
+    };
+
+    Ok((input, ()))
 }
 
-fn read_tx_mode(input: BitInput) -> IResult<BitInput, ()> {
-    todo!()
+fn read_tx_mode(input: BitInput, coded_lossless: bool) -> IResult<BitInput, ()> {
+    let input = if coded_lossless {
+        input
+    } else {
+        let (input, _tx_mode_select) = take_bool_bit(input)?;
+        input
+    };
+    Ok((input, ()))
 }
 
-fn frame_reference_mode(input: BitInput) -> IResult<BitInput, ()> {
-    todo!()
+fn frame_reference_mode(input: BitInput, frame_is_intra: bool) -> IResult<BitInput, bool> {
+    Ok(if frame_is_intra {
+        (input, false)
+    } else {
+        take_bool_bit(input)?
+    })
 }
 
-fn skip_mode_params(input: BitInput) -> IResult<BitInput, ()> {
-    todo!()
+fn skip_mode_params(
+    input: BitInput,
+    frame_is_intra: bool,
+    reference_select: bool,
+    enable_order_hint: bool,
+    ref_order_hint: &[u8],
+    ref_frame_idx: &[usize],
+    mut forward_hint: u8,
+    mut backward_hint: u8,
+    mut second_forward_hint: u8,
+) -> IResult<BitInput, ()> {
+    let mut skip_mode_allowed = false;
+    if frame_is_intra || !reference_select || !enable_order_hint {
+        skip_mode_allowed = false;
+    } else {
+        let mut forward_idx = -1;
+        let mut backward_idx = -1;
+        for i in 0..(REFS_PER_FRAME as isize) {
+            let ref_hint = ref_order_hint[ref_frame_idx[i as usize]];
+            if get_relative_dist(ref_hint, order_hint) < 0 {
+                if forward_idx < 0 || get_relative_dist(ref_hint, forward_hint) > 0 {
+                    forward_idx = i;
+                    forward_hint = ref_hint;
+                }
+            } else if get_relative_dist(ref_hint, order_hint) > 0 {
+                if backward_idx < 0 || get_relative_dist(ref_hint, backward_hint) < 0 {
+                    backward_idx = i;
+                    backward_hint = ref_hint;
+                }
+            }
+        }
+
+        if forward_idx < 0 {
+            skip_mode_allowed = false;
+        } else if backward_idx >= 0 {
+            skip_mode_allowed = true;
+        } else {
+            let mut second_forward_idx = -1;
+            for i in 0..(REFS_PER_FRAME as isize) {
+                let ref_hint = ref_order_hint[ref_frame_idx[i as usize]];
+                if get_relative_dist(ref_hint, forward_hint) < 0 {
+                    if second_forward_idx < 0
+                        || get_relative_dist(ref_hint, second_forward_hint) > 0
+                    {
+                        second_forward_idx = i;
+                        second_forward_hint = ref_hint;
+                    }
+                }
+            }
+
+            if second_forward_idx < 0 {
+                skip_mode_allowed = false;
+            } else {
+                skip_mode_allowed = true;
+            }
+        }
+    }
+
+    let (input, skip_mode_present) = if skip_mode_allowed {
+        take_bool_bit(input)?
+    } else {
+        (input, false)
+    };
+
+    Ok((input, ()))
 }
 
-fn global_motion_params(input: BitInput) -> IResult<BitInput, ()> {
-    todo!()
+fn global_motion_params(input: BitInput, frame_is_intra: bool) -> IResult<BitInput, ()> {
+    if frame_is_intra {
+        return Ok((input, ()));
+    }
+
+    let mut outer_input = input;
+    for _ in RefType::Last..=RefType::Altref {
+        let input = outer_input;
+        let (input, is_global) = take_bool_bit(input)?;
+        outer_input = if is_global {
+            let (input, is_rot_zoom) = take_bool_bit(input)?;
+            let input = if is_rot_zoom {
+                input
+            } else {
+                let (input, is_translation) = take_bool_bit(input)?;
+                input
+            };
+        } else {
+            input
+        };
+    }
+
+    Ok((outer_input, ()))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum RefType {
+    Intra = 0,
+    Last = 1,
+    Last2 = 2,
+    Last3 = 3,
+    Golden = 4,
+    Bwdref = 5,
+    Altref2 = 6,
+    Altref = 7,
 }

@@ -28,6 +28,7 @@ pub struct SequenceHeader {
     pub timing_info: Option<TimingInfo>,
     pub enable_ref_frame_mvs: bool,
     pub enable_warped_motion: bool,
+    pub enable_superres: bool,
 }
 
 impl SequenceHeader {
@@ -219,7 +220,7 @@ pub fn parse_sequence_header(input: &[u8]) -> IResult<&[u8], SequenceHeader> {
             )
         };
 
-        let (input, _enable_superres) = take_bool_bit(input)?;
+        let (input, enable_superres) = take_bool_bit(input)?;
         let (input, _enable_cdef) = take_bool_bit(input)?;
         let (input, _enable_restoration) = take_bool_bit(input)?;
         let input = color_config(input, seq_profile)?.0;
@@ -245,6 +246,7 @@ pub fn parse_sequence_header(input: &[u8]) -> IResult<&[u8], SequenceHeader> {
             timing_info,
             enable_ref_frame_mvs,
             enable_warped_motion,
+            enable_superres,
         }))
     })(input)
 }

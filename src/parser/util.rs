@@ -64,3 +64,28 @@ pub fn uvlc(mut input: BitInput) -> IResult<BitInput, u32> {
     let (input, value): (_, u32) = bit_parsers::take(leading_zeros)(input)?;
     Ok((input, value + (1 << leading_zeros) - 1))
 }
+
+/// The abbreviation `ns` stands for non-symmetric. This encoding is
+/// non-symmetric because the values are not all coded with the same number of
+/// bits.
+pub fn ns(input: BitInput, n: usize) -> IResult<BitInput, u64> {
+    // I don't know what these variables stand for.
+    // This is from the AV1 spec pdf.
+    let w = floor_log2(n) + 1;
+    let m = (1 << w) - n;
+    let (input, v): (_, u64) = bit_parsers::take(w - 1)(input)?;
+    if v < m {
+        return Ok((input, v));
+    }
+    let (input, extra_bit): (_, u64) = bit_parsers::take(1usize)(input)?;
+    Ok((input, (v << 1) - m + extra_bit))
+}
+
+pub fn su(input: BitInput, n: usize) -> IResult<BitInput, i64> {
+    let (input, mut value) = bit_parsers::take(n)(input)?;
+    let sign_mask = 1 << (n - 1);
+    if (value & sign_mask) > 0 {
+        value = value - 2 * sign_mask;
+    }
+    Ok((input, value))
+}
