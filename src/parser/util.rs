@@ -75,11 +75,11 @@ pub fn ns(input: BitInput, n: usize) -> IResult<BitInput, u64> {
     let w = floor_log2(n) + 1;
     let m = (1 << w) - n;
     let (input, v): (_, u64) = bit_parsers::take(w - 1)(input)?;
-    if v < m {
+    if v < m as u64 {
         return Ok((input, v));
     }
     let (input, extra_bit): (_, u64) = bit_parsers::take(1usize)(input)?;
-    Ok((input, (v << 1) - m + extra_bit))
+    Ok((input, (v << 1) - m as u64 + extra_bit))
 }
 
 pub fn su(input: BitInput, n: usize) -> IResult<BitInput, i64> {
@@ -93,9 +93,9 @@ pub fn su(input: BitInput, n: usize) -> IResult<BitInput, i64> {
 
 pub fn floor_log2<T: PrimInt>(mut x: T) -> T {
     let mut s = 0;
-    while x != 0 {
-        x >>= 1;
+    while x != T::from(0).unwrap() {
+        x = x >> 1;
         s += 1;
     }
-    s - 1
+    T::from(s - 1).unwrap()
 }

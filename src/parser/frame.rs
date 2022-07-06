@@ -33,8 +33,22 @@ const MAX_TILE_AREA: u32 = 4096 * 2304;
 const MAX_SEGMENTS: usize = 8;
 const SEG_LVL_MAX: usize = 8;
 const SEG_LVL_ALT_Q: usize = 0;
+const SEGMENTATION_FEATURE_BITS: [u8; SEG_LVL_MAX] = [8, 6, 6, 6, 6, 3, 0, 0];
+const SEGMENTATION_FEATURE_SIGNED: [bool; SEG_LVL_MAX] =
+    [true, true, true, true, true, false, false, false];
+const SEGMENTATION_FEATURE_MAX: [u8; SEG_LVL_MAX] = [
+    255,
+    MAX_LOOP_FILTER,
+    MAX_LOOP_FILTER,
+    MAX_LOOP_FILTER,
+    MAX_LOOP_FILTER,
+    7,
+    0,
+    0,
+];
 type SegmentationData = [[Option<i16>; SEG_LVL_MAX]; MAX_SEGMENTS];
 
+const MAX_LOOP_FILTER: u8 = 63;
 const RESTORE_NONE: u8 = 0;
 const RESTORE_SWITCHABLE: u8 = 1;
 const RESTORE_WIENER: u8 = 2;
@@ -412,7 +426,14 @@ fn uncompressed_header<'a>(
 
     let mut coded_lossless = true;
     for segment_id in 0..MAX_SEGMENTS {
-        let qindex = get_qindex(true, segment_id, q_params.base_q_idx, delta_q_present);
+        let qindex = get_qindex(
+            true,
+            segment_id,
+            q_params.base_q_idx,
+            current_q_index,
+            segmentation_enabled,
+            segmentation_feature_data,
+        );
         let lossless = qindex == 0
             && q_params.deltaq_y_dc == 0
             && q_params.deltaq_u_ac == 0
@@ -846,7 +867,11 @@ pub struct QuantizationParams {
     pub deltaq_v_ac: i64,
 }
 
-fn segmentation_params(input: BitInput, primary_ref_frame: u8) -> IResult<BitInput, ()> {
+fn segmentation_params(
+    input: BitInput,
+    primary_ref_frame: u8,
+) -> IResult<BitInput, SegmentationData> {
+    let mut segmentation_data: SegmentationData = Default::default();
     let (input, segmentation_enabled) = take_bool_bit(input)?;
     let input = if segmentation_enabled {
         let (input, segmentation_update_data) = if primary_ref_frame == PRIMARY_REF_NONE {
@@ -867,12 +892,16 @@ fn segmentation_params(input: BitInput, primary_ref_frame: u8) -> IResult<BitInp
                 for j in 0..SEG_LVL_MAX {
                     let (inner_input, feature_enabled) = take_bool_bit(input)?;
                     input = if feature_enabled {
-                        let bits_to_read = segmentation_feature_bits[j];
-                        let (inner_input, _feature_value) = if segmentation_feature_signed[j] {
-                            su(inner_input, 1 + bits_to_read)?
+                        let bits_to_read = SEGMENTATION_FEATURE_BITS[j] as usize;
+                        let limit = SEGMENTATION_FEATURE_MAX[j] as i16;
+                        let (inner_input, feature_value) = if SEGMENTATION_FEATURE_SIGNED[j] {
+                            let (input, value) = su(inner_input, 1 + bits_to_read)?;
+                            (input, clamp(value as i16, -limit, limit))
                         } else {
-                            bit_parsers::take(bits_to_read)(inner_input)?
+                            let (input, value) = bit_parsers::take(bits_to_read)(inner_input)?;
+                            (input, clamp(value, 0, limit))
                         };
+                        segmentation_data[i][j] = Some(feature_value);
                         inner_input
                     } else {
                         inner_input
@@ -888,7 +917,7 @@ fn segmentation_params(input: BitInput, primary_ref_frame: u8) -> IResult<BitInp
     };
 
     // The rest of the stuff in this method doesn't read any input, so return
-    Ok((input, ()))
+    Ok((input, segmentation_data))
 }
 
 fn delta_q_params(input: BitInput, base_q_idx: u8) -> IResult<BitInput, bool> {
