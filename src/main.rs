@@ -46,6 +46,7 @@ pub mod parser {
     pub mod grain;
     pub mod obu;
     pub mod sequence;
+    pub mod tile_group;
     pub mod util;
 }
 
@@ -56,6 +57,7 @@ use clap::{Parser, Subcommand};
 use parser::grain::FilmGrainHeader;
 
 use crate::parser::{
+    frame::FrameHeader,
     grain::FilmGrainParser,
     obu::{parse_obu, Obu, ObuType},
 };
@@ -99,26 +101,32 @@ pub fn main() -> Result<()> {
     Ok(())
 }
 
-fn get_grain_headers(input: &[u8]) -> Result<FilmGrainHeader> {
+fn get_grain_headers(mut input: &[u8]) -> Result<FilmGrainHeader> {
     let mut size = None;
     let mut seen_frame_header = false;
     let mut sequence_header = None;
+    let mut grain_headers = vec![];
     loop {
-        let (input, obu) = parse_obu(
+        let (inner_input, obu) = parse_obu(
             input,
             size,
             &mut seen_frame_header,
             sequence_header.as_ref(),
         )
         .map_err(|e| anyhow!("{}", e.to_string()))?;
+        input = inner_input;
         match obu {
             Some(Obu::SequenceHeader(obu)) => {
                 sequence_header = Some(obu);
             }
+            Some(Obu::FrameHeader(obu)) => {
+                grain_headers.push(obu.film_grain_params);
+            }
+            None => todo!(),
         };
     }
 
-    todo!();
+    todo!("Actually do something with the grain params we parsed");
 }
 
 #[derive(Parser, Debug)]

@@ -56,8 +56,9 @@ const RESTORE_SGRPROJ: u8 = 3;
 
 #[derive(Debug, Clone)]
 pub struct FrameHeader {
-    show_existing_frame: bool,
-    film_grain_params: FilmGrainHeader,
+    pub show_frame: bool,
+    pub show_existing_frame: bool,
+    pub film_grain_params: FilmGrainHeader,
 }
 
 /// This will return `None` for a show-existing frame. We don't need to apply
@@ -68,11 +69,11 @@ pub struct FrameHeader {
 /// but the film grain params are of course the very last item,
 /// and we don't know how many bits precede it, so we have to parse
 /// THE WHOLE THING before we get the film grain params.
-pub fn parse_frame_header<'a>(
+pub fn parse_frame_header<'a, 'b>(
     input: &'a [u8],
-    seen_frame_header: &'a mut bool,
-    sequence_headers: &SequenceHeader,
-    obu_headers: &ObuHeader,
+    seen_frame_header: &'b mut bool,
+    sequence_headers: &'b SequenceHeader,
+    obu_headers: &'b ObuHeader,
 ) -> IResult<&'a [u8], Option<FrameHeader>> {
     if *seen_frame_header {
         return Ok((input, None));
@@ -84,19 +85,33 @@ pub fn parse_frame_header<'a>(
         if header.show_existing_frame {
             let (input, _) = decode_frame_wrapup(input)?;
             *seen_frame_header = false;
-            Ok((input, Some(header)))
+            Ok((
+                input,
+                if header.show_frame {
+                    Some(header)
+                } else {
+                    None
+                },
+            ))
         } else {
             *seen_frame_header = true;
-            Ok((input, Some(header)))
+            Ok((
+                input,
+                if header.show_frame {
+                    Some(header)
+                } else {
+                    None
+                },
+            ))
         }
     })(input)
 }
 
 #[allow(clippy::fn_params_excessive_bools)]
-fn uncompressed_header<'a>(
+fn uncompressed_header<'a, 'b>(
     input: BitInput<'a>,
-    sequence_headers: &'a SequenceHeader,
-    obu_headers: &ObuHeader,
+    sequence_headers: &'b SequenceHeader,
+    obu_headers: &'b ObuHeader,
 ) -> IResult<BitInput<'a>, FrameHeader> {
     let id_len = if sequence_headers.frame_id_numbers_present {
         Some(
@@ -116,12 +131,13 @@ fn uncompressed_header<'a>(
             if show_existing_frame {
                 let (input, _frame_to_show_map_idx): (_, u8) = bit_parsers::take(3usize)(input)?;
                 let input = if let Some(id_len) = id_len {
-                    let (input, display_frame_id) = bit_parsers::take(id_len)(input)?;
+                    let (input, _display_frame_id): (_, u64) = bit_parsers::take(id_len)(input)?;
                     input
                 } else {
                     input
                 };
                 return Ok((input, FrameHeader {
+                    show_frame: true,
                     show_existing_frame,
                     film_grain_params: FilmGrainHeader::Disable,
                 }));
@@ -220,7 +236,7 @@ fn uncompressed_header<'a>(
 
     let mut input = input;
     if let Some(decoder_model_info) = sequence_headers.decoder_model_info {
-        let (input, buffer_removal_time_present_flag) = take_bool_bit(input)?;
+        let (inner_input, buffer_removal_time_present_flag) = take_bool_bit(input)?;
         if buffer_removal_time_present_flag {
             for op_num in 0..=sequence_headers.operating_points_cnt_minus_1 {
                 if sequence_headers.decoder_model_present_for_op[op_num] {
@@ -235,7 +251,7 @@ fn uncompressed_header<'a>(
                     if op_pt_idc == 0 || (in_temporal_layer && in_spatial_layer) {
                         let n = decoder_model_info.buffer_removal_time_length_minus_1 + 1;
                         let (inner_input, _buffer_removal_time): (_, u64) =
-                            bit_parsers::take(n)(input)?;
+                            bit_parsers::take(n)(inner_input)?;
                         input = inner_input;
                     }
                 }
@@ -248,7 +264,7 @@ fn uncompressed_header<'a>(
         if frame_type == FrameType::Switch || (frame_type == FrameType::Key && show_frame) {
             (input, REFRESH_ALL_FRAMES)
         } else {
-            bit_parsers::take(8)(input)?
+            bit_parsers::take(8usize)(input)?
         };
 
     let mut ref_order_hint: ArrayVec<u64, NUM_REF_FRAMES> = ArrayVec::new();
@@ -283,7 +299,7 @@ fn uncompressed_header<'a>(
                 max_frame_size,
             )?;
             let mut upscaled_size = frame_size;
-            let (input, render_size) = render_size(input, frame_size, &mut upscaled_size)?;
+            let (input, _render_size) = render_size(input, frame_size, &mut upscaled_size)?;
             (
                 if allow_screen_content_tools && upscaled_size.width == frame_size.width {
                     let (input, allow_intrabc_inner) = take_bool_bit(input)?;
@@ -303,8 +319,8 @@ fn uncompressed_header<'a>(
             } else {
                 let (input, frame_refs_short_signaling) = take_bool_bit(input)?;
                 if frame_refs_short_signaling {
-                    let (input, last_frame_idx) = bit_parsers::take(3usize)(input)?;
-                    let (input, gold_frame_idx) = bit_parsers::take(3usize)(input)?;
+                    let (input, _last_frame_idx): (_, u8) = bit_parsers::take(3usize)(input)?;
+                    let (input, _gold_frame_idx): (_, u8) = bit_parsers::take(3usize)(input)?;
                     let (input, _) = set_frame_refs(input)?;
                     (input, frame_refs_short_signaling)
                 } else {
@@ -415,7 +431,7 @@ fn uncompressed_header<'a>(
         sequence_headers.color_config.num_planes,
         sequence_headers.color_config.separate_uv_delta_q,
     )?;
-    let (input, _) = segmentation_params(input, primary_ref_frame)?;
+    let (input, segmentation_data) = segmentation_params(input, primary_ref_frame)?;
     let (input, delta_q_present) = delta_q_params(input, q_params.base_q_idx)?;
     let (input, _) = delta_lf_params(input, delta_q_present, allow_intrabc)?;
     let input = if primary_ref_frame == PRIMARY_REF_NONE {
@@ -430,9 +446,8 @@ fn uncompressed_header<'a>(
             true,
             segment_id,
             q_params.base_q_idx,
-            current_q_index,
-            segmentation_enabled,
-            segmentation_feature_data,
+            None,
+            segmentation_data.as_ref(),
         );
         let lossless = qindex == 0
             && q_params.deltaq_y_dc == 0
@@ -500,6 +515,7 @@ fn uncompressed_header<'a>(
     )?;
 
     Ok((input, FrameHeader {
+        show_frame,
         show_existing_frame,
         film_grain_params,
     }))
@@ -562,10 +578,10 @@ fn frame_size(
     Ok((input, frame_size))
 }
 
-fn render_size<'a>(
+fn render_size<'a, 'b>(
     input: BitInput<'a>,
     frame_size: Dimensions,
-    upscaled_size: &'a mut Dimensions,
+    upscaled_size: &'b mut Dimensions,
 ) -> IResult<BitInput<'a>, Dimensions> {
     let (input, render_and_frame_size_different) = take_bool_bit(input)?;
     let (input, width, height) = if render_and_frame_size_different {
@@ -583,19 +599,21 @@ fn set_frame_refs(input: BitInput) -> IResult<BitInput, ()> {
     Ok((input, ()))
 }
 
-fn frame_size_with_refs<'a>(
+fn frame_size_with_refs<'a, 'b>(
     input: BitInput<'a>,
     enable_superres: bool,
     frame_size_override: bool,
     frame_width_bits: usize,
     frame_height_bits: usize,
     max_frame_size: Dimensions,
-    ref_frame_size: &'a mut Dimensions,
-    ref_upscaled_size: &'a mut Dimensions,
+    ref_frame_size: &'b mut Dimensions,
+    ref_upscaled_size: &'b mut Dimensions,
 ) -> IResult<BitInput<'a>, Dimensions> {
     let mut found_ref = false;
+    let mut input = input;
     for _ in 0..REFS_PER_FRAME {
-        let (input, found_this_ref) = take_bool_bit(input)?;
+        let (inner_input, found_this_ref) = take_bool_bit(input)?;
+        input = inner_input;
         if found_this_ref {
             found_ref = true;
             // We don't actually care about the changes to frame size. But if we did, we'd
@@ -622,11 +640,11 @@ fn frame_size_with_refs<'a>(
     Ok((input, frame_size))
 }
 
-fn superres_params<'a>(
-    input: BitInput,
+fn superres_params<'a, 'b>(
+    input: BitInput<'a>,
     enable_superres: bool,
-    frame_size: &'a mut Dimensions,
-    upscaled_size: &'a mut Dimensions,
+    frame_size: &'b mut Dimensions,
+    upscaled_size: &'b mut Dimensions,
 ) -> IResult<BitInput<'a>, ()> {
     let (input, use_superres) = if enable_superres {
         take_bool_bit(input)?
@@ -723,13 +741,13 @@ fn tile_info(
             }
         }
         let tile_width_sb = (sb_cols + (1 << tile_cols_log2) - 1) >> tile_cols_log2;
-        for i in (0..sb_cols).step_by(tile_width_sb) {
+        for i in (0..sb_cols).step_by(tile_width_sb as usize) {
             // don't care about MiRowStarts
             tile_cols = i;
         }
 
-        let mut min_log2_tile_rows = max(min_log2_tiles - tile_cols_log2, 0);
-        let tile_rows_log2 = min_log2_tile_rows;
+        let min_log2_tile_rows = max(min_log2_tiles - tile_cols_log2, 0);
+        let mut tile_rows_log2 = min_log2_tile_rows;
         while tile_rows_log2 < min_log2_tile_rows {
             let (inner_input, increment_tile_rows_log2) = take_bool_bit(input)?;
             input = inner_input;
@@ -753,6 +771,7 @@ fn tile_info(
             let (inner_input, width_in_sbs_minus_1) = ns(input, max_width as usize)?;
             input = inner_input;
             let size_sb = width_in_sbs_minus_1 + 1;
+            widest_tile_sb = max(size_sb as u32, widest_tile_sb);
             start_sb += size_sb as u32;
             i += 1;
         }
@@ -775,9 +794,9 @@ fn tile_info(
     let tile_cols_log2 = tile_log2(1, tile_cols);
     let tile_rows_log2 = tile_log2(1, tile_rows);
     let input = if tile_cols_log2 > 0 || tile_rows_log2 > 0 {
-        let (input, context_update_tile_id) =
+        let (input, _context_update_tile_id): (_, u64) =
             bit_parsers::take(tile_rows_log2 + tile_cols_log2)(input)?;
-        let (input, tile_size_bytes_minus_1): (_, u8) = bit_parsers::take(2)(input)?;
+        let (input, _tile_size_bytes_minus_1): (_, u8) = bit_parsers::take(2usize)(input)?;
         input
     } else {
         input
@@ -796,7 +815,7 @@ fn tile_log2<T: PrimInt>(blk_size: T, target: T) -> T {
     while (blk_size << k) < target {
         k += 1;
     }
-    k
+    T::from(k).unwrap()
 }
 
 fn quantization_params(
@@ -821,6 +840,7 @@ fn quantization_params(
         } else {
             (input, deltaq_u_dc, deltaq_u_ac)
         };
+        (input, deltaq_u_dc, deltaq_u_ac, deltaq_v_dc, deltaq_v_ac)
     } else {
         (input, 0, 0, 0, 0)
     };
@@ -870,7 +890,7 @@ pub struct QuantizationParams {
 fn segmentation_params(
     input: BitInput,
     primary_ref_frame: u8,
-) -> IResult<BitInput, SegmentationData> {
+) -> IResult<BitInput, Option<SegmentationData>> {
     let mut segmentation_data: SegmentationData = Default::default();
     let (input, segmentation_enabled) = take_bool_bit(input)?;
     let input = if segmentation_enabled {
@@ -917,7 +937,14 @@ fn segmentation_params(
     };
 
     // The rest of the stuff in this method doesn't read any input, so return
-    Ok((input, segmentation_data))
+    Ok((
+        input,
+        if segmentation_enabled {
+            Some(segmentation_data)
+        } else {
+            None
+        },
+    ))
 }
 
 fn delta_q_params(input: BitInput, base_q_idx: u8) -> IResult<BitInput, bool> {
@@ -1121,14 +1148,14 @@ fn frame_reference_mode(input: BitInput, frame_is_intra: bool) -> IResult<BitInp
     })
 }
 
-fn skip_mode_params<'a>(
+fn skip_mode_params<'a, 'b>(
     input: BitInput<'a>,
     frame_is_intra: bool,
     reference_select: bool,
     order_hint_bits: usize,
     order_hint: u64,
-    ref_order_hint: &'a [u64],
-    ref_frame_idx: &'a [usize],
+    ref_order_hint: &'b [u64],
+    ref_frame_idx: &'b [usize],
 ) -> IResult<BitInput<'a>, ()> {
     let mut skip_mode_allowed = false;
     let mut forward_hint = -1;
@@ -1245,16 +1272,10 @@ fn get_qindex(
     segment_id: usize,
     base_q_idx: u8,
     current_q_index: Option<u8>,
-    segmentation_enabled: bool,
-    feature_data: &SegmentationData,
+    feature_data: Option<&SegmentationData>,
 ) -> u8 {
-    if seg_feature_active_idx(
-        segment_id,
-        SEG_LVL_ALT_Q,
-        segmentation_enabled,
-        feature_data,
-    ) {
-        let data = feature_data[segment_id][SEG_LVL_ALT_Q].unwrap();
+    if seg_feature_active_idx(segment_id, SEG_LVL_ALT_Q, feature_data) {
+        let data = feature_data.unwrap()[segment_id][SEG_LVL_ALT_Q].unwrap();
         let mut qindex = base_q_idx as i16 + data;
         if !ignore_delta_q && current_q_index.is_some() {
             qindex = current_q_index.unwrap() as i16 + data;
@@ -1270,8 +1291,7 @@ fn get_qindex(
 fn seg_feature_active_idx(
     segment_id: usize,
     feature: usize,
-    segmentation_enabled: bool,
-    feature_data: &SegmentationData,
+    feature_data: Option<&SegmentationData>,
 ) -> bool {
-    segmentation_enabled && feature_data[segment_id][SEG_LVL_ALT_Q].is_some()
+    feature_data.is_some() && feature_data.unwrap()[segment_id][SEG_LVL_ALT_Q].is_some()
 }

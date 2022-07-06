@@ -8,14 +8,15 @@ use num_enum::TryFromPrimitive;
 use super::{
     frame::{parse_frame_header, FrameHeader},
     sequence::{parse_sequence_header, SequenceHeader},
+    tile_group::parse_tile_group_obu,
     util::{leb128, take_bool_bit, take_zero_bit, BitInput},
 };
 
-pub fn parse_obu<'a>(
+pub fn parse_obu<'a, 'b>(
     input: &'a [u8],
     size: Option<usize>,
-    seen_frame_header: &'a mut bool,
-    sequence_header: Option<&'a SequenceHeader>,
+    seen_frame_header: &'b mut bool,
+    sequence_header: Option<&'b SequenceHeader>,
 ) -> IResult<&'a [u8], Option<Obu>> {
     let (input, obu_header) = parse_obu_header(input)?;
     let (input, obu_size) = if obu_header.has_size_field {
@@ -45,7 +46,8 @@ pub fn parse_obu<'a>(
             Ok((input, header.map(Obu::FrameHeader)))
         }
         ObuType::TileGroup => {
-            todo!("Find if we need to flip the seen_frame_header flag");
+            let (input, _) = parse_tile_group_obu(input, seen_frame_header)?;
+            Ok((input, None))
         }
         ObuType::TemporalDelimiter => {
             *seen_frame_header = false;
