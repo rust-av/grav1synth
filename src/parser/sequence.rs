@@ -221,7 +221,6 @@ pub fn parse_sequence_header(input: &[u8]) -> IResult<&[u8], SequenceHeader> {
                 order_hint_bits,
                 enable_ref_frame_mvs,
                 enable_warped_motion,
-                use_128x128_superblock,
             )
         };
 
@@ -347,7 +346,7 @@ fn color_config(input: BitInput, seq_profile: u8) -> IResult<BitInput, ColorConf
                 ),
             )
         };
-    let (input, color_range) = if monochrome {
+    let (input, color_range, subsampling) = if monochrome {
         let (input, color_range): (_, u8) = bit_parsers::take(1usize)(input)?;
         return Ok((input, ColorConfig {
             color_primaries,
@@ -356,12 +355,13 @@ fn color_config(input: BitInput, seq_profile: u8) -> IResult<BitInput, ColorConf
             color_range: ColorRange::try_from(color_range).unwrap(),
             num_planes,
             separate_uv_delta_q: false,
+            subsampling: (1, 1),
         }));
     } else if color_primaries == ColorPrimaries::Bt709
         && transfer_characteristics == TransferCharacteristics::Srgb
         && matrix_coefficients == MatrixCoefficients::Identity
     {
-        (input, ColorRange::Full)
+        (input, ColorRange::Full, (0, 0))
     } else {
         let (input, color_range): (_, u8) = bit_parsers::take(1usize)(input)?;
         let (input, ss_x, ss_y) = if seq_profile == 0 {
@@ -385,7 +385,11 @@ fn color_config(input: BitInput, seq_profile: u8) -> IResult<BitInput, ColorConf
         } else {
             input
         };
-        (input, ColorRange::try_from(color_range).unwrap())
+        (
+            input,
+            ColorRange::try_from(color_range).unwrap(),
+            (ss_x, ss_y),
+        )
     };
     let (input, separate_uv_delta_q) = take_bool_bit(input)?;
     Ok((input, ColorConfig {
@@ -395,6 +399,7 @@ fn color_config(input: BitInput, seq_profile: u8) -> IResult<BitInput, ColorConf
         color_range,
         num_planes,
         separate_uv_delta_q,
+        subsampling,
     }))
 }
 
@@ -406,6 +411,7 @@ pub struct ColorConfig {
     pub color_range: ColorRange,
     pub num_planes: u8,
     pub separate_uv_delta_q: bool,
+    pub subsampling: (u8, u8),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]

@@ -6,7 +6,7 @@ use nom::{
     IResult,
 };
 use num_enum::TryFromPrimitive;
-use num_traits::PrimInt;
+use num_traits::{clamp, PrimInt};
 
 use super::{
     grain::{film_grain_params, FilmGrainHeader},
@@ -32,8 +32,13 @@ const MAX_TILE_AREA: u32 = 4096 * 2304;
 
 const MAX_SEGMENTS: usize = 8;
 const SEG_LVL_MAX: usize = 8;
+const SEG_LVL_ALT_Q: usize = 0;
+type SegmentationData = [[Option<i16>; SEG_LVL_MAX]; MAX_SEGMENTS];
 
 const RESTORE_NONE: u8 = 0;
+const RESTORE_SWITCHABLE: u8 = 1;
+const RESTORE_WIENER: u8 = 2;
+const RESTORE_SGRPROJ: u8 = 3;
 
 #[derive(Debug, Clone)]
 pub struct FrameHeader {
@@ -89,9 +94,9 @@ fn uncompressed_header<'a>(
         None
     };
 
-    let (input, frame_type, show_frame, show_existing_frame, error_resilient_mode) =
+    let (input, frame_type, show_frame, showable_frame, show_existing_frame, error_resilient_mode) =
         if sequence_headers.reduced_still_picture_header {
-            (input, FrameType::Inter, true, false, false)
+            (input, FrameType::Inter, true, true, false, false)
         } else {
             let (input, show_existing_frame) = take_bool_bit(input)?;
             if show_existing_frame {
@@ -129,11 +134,10 @@ fn uncompressed_header<'a>(
             } else {
                 input
             };
-            let input = if show_frame {
-                input
+            let (input, showable_frame) = if show_frame {
+                (input, true)
             } else {
-                let (input, _showable_frame) = take_bool_bit(input)?;
-                input
+                take_bool_bit(input)?
             };
             let (input, error_resilient_mode) = if frame_type == FrameType::Switch
                 || (frame_type == FrameType::Key && show_frame)
@@ -146,10 +150,26 @@ fn uncompressed_header<'a>(
                 input,
                 frame_type,
                 show_frame,
+                showable_frame,
                 show_existing_frame,
                 error_resilient_mode,
             )
         };
+
+    let mut big_ref_order_hint: ArrayVec<u64, NUM_REF_FRAMES> = ArrayVec::new();
+    let mut big_ref_valid: ArrayVec<bool, NUM_REF_FRAMES> = ArrayVec::new();
+    let mut big_order_hints: ArrayVec<u64, { RefType::Last as usize + REFS_PER_FRAME }> =
+        ArrayVec::new();
+    if frame_type == FrameType::Key && show_frame {
+        for _ in 0..NUM_REF_FRAMES {
+            big_ref_valid.push(false);
+            big_ref_order_hint.push(0);
+        }
+        big_order_hints.push(0);
+        for _ in 0..REFS_PER_FRAME {
+            big_order_hints.push(0);
+        }
+    }
 
     let (input, disable_cdf_update) = take_bool_bit(input)?;
     let (input, allow_screen_content_tools) =
@@ -177,8 +197,7 @@ fn uncompressed_header<'a>(
     } else {
         take_bool_bit(input)?
     };
-    let (input, _order_hint): (_, u64) =
-        bit_parsers::take(sequence_headers.order_hint_bits)(input)?;
+    let (input, order_hint): (_, u64) = bit_parsers::take(sequence_headers.order_hint_bits)(input)?;
     let (input, primary_ref_frame) = if frame_type.is_intra() || error_resilient_mode {
         (input, PRIMARY_REF_NONE)
     } else {
@@ -218,14 +237,19 @@ fn uncompressed_header<'a>(
             bit_parsers::take(8)(input)?
         };
 
+    let mut ref_order_hint: ArrayVec<u64, NUM_REF_FRAMES> = ArrayVec::new();
     let mut input = input;
     if (!frame_type.is_intra() || refresh_frame_flags != REFRESH_ALL_FRAMES)
         && error_resilient_mode
         && sequence_headers.enable_order_hint()
     {
-        for _ in 0..NUM_REF_FRAMES {
-            let (inner_input, ref_order_hint): (_, u64) =
+        for i in 0..NUM_REF_FRAMES {
+            let (inner_input, cur_ref_order_hint): (_, u64) =
                 bit_parsers::take(sequence_headers.order_hint_bits)(input)?;
+            ref_order_hint.push(cur_ref_order_hint);
+            if ref_order_hint[i] != big_ref_order_hint[i] {
+                big_ref_valid[i] = false;
+            }
             input = inner_input;
         }
     }
@@ -273,7 +297,7 @@ fn uncompressed_header<'a>(
                     (input, frame_refs_short_signaling)
                 }
             };
-            let mut ref_frame_idx: ArrayVec<u8, REFS_PER_FRAME> = ArrayVec::new();
+            let mut ref_frame_idx: ArrayVec<usize, REFS_PER_FRAME> = ArrayVec::new();
             for _ in 0..REFS_PER_FRAME {
                 if !frame_refs_short_signaling {
                     let (inner_input, this_ref_frame_idx) = bit_parsers::take(3usize)(input)?;
@@ -330,6 +354,12 @@ fn uncompressed_header<'a>(
                 } else {
                     take_bool_bit(input)?
                 };
+            for i in 0..REFS_PER_FRAME {
+                let ref_frame = RefType::Last as usize + i;
+                let hint = big_ref_order_hint[ref_frame_idx[i]];
+                big_order_hints[ref_frame] = hint;
+                // don't think we care about ref frame sign bias
+            }
             (
                 input,
                 use_ref_frame_mvs,
@@ -382,7 +412,7 @@ fn uncompressed_header<'a>(
 
     let mut coded_lossless = true;
     for segment_id in 0..MAX_SEGMENTS {
-        let qindex = get_qindex(1, segment_id);
+        let qindex = get_qindex(true, segment_id, q_params.base_q_idx, delta_q_present);
         let lossless = qindex == 0
             && q_params.deltaq_y_dc == 0
             && q_params.deltaq_u_ac == 0
@@ -415,8 +445,7 @@ fn uncompressed_header<'a>(
         sequence_headers.enable_restoration,
         sequence_headers.use_128x128_superblock,
         sequence_headers.color_config.num_planes,
-        remap_lr_type,
-        subsampling,
+        sequence_headers.color_config.subsampling,
     )?;
     let (input, _) = read_tx_mode(input, coded_lossless)?;
     let (input, reference_select) = frame_reference_mode(input, frame_type.is_intra())?;
@@ -424,12 +453,10 @@ fn uncompressed_header<'a>(
         input,
         frame_type.is_intra(),
         reference_select,
-        sequence_headers.enable_order_hint(),
-        ref_order_hint,
-        ref_frame_idx,
-        forward_hint,
-        backward_hint,
-        second_forward_hint,
+        sequence_headers.order_hint_bits,
+        order_hint,
+        &big_ref_order_hint,
+        &ref_frame_idx,
     )?;
     let (input, allow_warped_motion) = if frame_type.is_intra()
         || error_resilient_mode
@@ -447,8 +474,8 @@ fn uncompressed_header<'a>(
         show_frame,
         showable_frame,
         frame_type,
-        sequence_headers.color_config.num_planes > 1,
-        subsampling,
+        sequence_headers.color_config.num_planes == 1,
+        sequence_headers.color_config.subsampling,
     )?;
 
     Ok((input, FrameHeader {
@@ -1001,7 +1028,6 @@ fn lr_params<'a>(
     enable_restoration: bool,
     use_128x128_superblock: bool,
     num_planes: u8,
-    remap_lr_type: &'a [u8],
     subsampling: (u8, u8),
 ) -> IResult<BitInput<'a>, ()> {
     if all_lossless || allow_intrabc || !enable_restoration {
@@ -1013,7 +1039,7 @@ fn lr_params<'a>(
     let mut uses_chroma_lr = false;
     for i in 0..num_planes {
         let (inner_input, lr_type): (_, u8) = bit_parsers::take(2usize)(input)?;
-        if remap_lr_type[lr_type as usize] != RESTORE_NONE {
+        if lr_type != RESTORE_NONE {
             uses_lr = true;
             if i > 0 {
                 uses_chroma_lr = true;
@@ -1071,13 +1097,14 @@ fn skip_mode_params<'a>(
     frame_is_intra: bool,
     reference_select: bool,
     order_hint_bits: usize,
-    ref_order_hint: &'a [u8],
+    order_hint: u64,
+    ref_order_hint: &'a [u64],
     ref_frame_idx: &'a [usize],
-    mut forward_hint: u8,
-    mut backward_hint: u8,
-    mut second_forward_hint: u8,
 ) -> IResult<BitInput<'a>, ()> {
     let mut skip_mode_allowed = false;
+    let mut forward_hint = -1;
+    let mut backward_hint = -1;
+    let mut second_forward_hint = -1;
     if frame_is_intra || !reference_select || order_hint_bits == 0 {
         skip_mode_allowed = false;
     } else {
@@ -1085,19 +1112,19 @@ fn skip_mode_params<'a>(
         let mut backward_idx = -1;
         for i in 0..(REFS_PER_FRAME as isize) {
             let ref_hint = ref_order_hint[ref_frame_idx[i as usize]];
-            if get_relative_dist(ref_hint, order_hint, order_hint_bits) < 0 {
-                if forward_idx < 0 || get_relative_dist(ref_hint, forward_hint, order_hint_bits) > 0
+            if get_relative_dist(ref_hint as i64, order_hint as i64, order_hint_bits) < 0 {
+                if forward_idx < 0
+                    || get_relative_dist(ref_hint as i64, forward_hint, order_hint_bits) > 0
                 {
                     forward_idx = i;
-                    forward_hint = ref_hint;
+                    forward_hint = ref_hint as i64;
                 }
-            } else if get_relative_dist(ref_hint, order_hint) > 0 {
-                if backward_idx < 0
-                    || get_relative_dist(ref_hint, backward_hint, order_hint_bits) < 0
-                {
-                    backward_idx = i;
-                    backward_hint = ref_hint;
-                }
+            } else if get_relative_dist(ref_hint as i64, order_hint as i64, order_hint_bits) > 0
+                && (backward_idx < 0
+                    || get_relative_dist(ref_hint as i64, backward_hint, order_hint_bits) < 0)
+            {
+                backward_idx = i;
+                backward_hint = ref_hint as i64;
             }
         }
 
@@ -1109,13 +1136,13 @@ fn skip_mode_params<'a>(
             let mut second_forward_idx = -1;
             for i in 0..(REFS_PER_FRAME as isize) {
                 let ref_hint = ref_order_hint[ref_frame_idx[i as usize]];
-                if get_relative_dist(ref_hint, forward_hint, order_hint_bits) < 0 {
-                    if second_forward_idx < 0
-                        || get_relative_dist(ref_hint, second_forward_hint, order_hint_bits) > 0
-                    {
-                        second_forward_idx = i;
-                        second_forward_hint = ref_hint;
-                    }
+                if get_relative_dist(ref_hint as i64, forward_hint, order_hint_bits) < 0
+                    && (second_forward_idx < 0
+                        || get_relative_dist(ref_hint as i64, second_forward_hint, order_hint_bits)
+                            > 0)
+                {
+                    second_forward_idx = i;
+                    second_forward_hint = ref_hint as i64;
                 }
             }
 
@@ -1136,7 +1163,7 @@ fn skip_mode_params<'a>(
     Ok((input, ()))
 }
 
-fn get_relative_dist(a: i32, b: i32, order_hint_bits: usize) -> i32 {
+fn get_relative_dist(a: i64, b: i64, order_hint_bits: usize) -> i64 {
     if order_hint_bits == 0 {
         return 0;
     }
@@ -1152,17 +1179,17 @@ fn global_motion_params(input: BitInput, frame_is_intra: bool) -> IResult<BitInp
     }
 
     let mut outer_input = input;
-    for _ in RefType::Last..=RefType::Altref {
+    for _ in (RefType::Last as u8)..=(RefType::Altref as u8) {
         let input = outer_input;
         let (input, is_global) = take_bool_bit(input)?;
         outer_input = if is_global {
             let (input, is_rot_zoom) = take_bool_bit(input)?;
-            let input = if is_rot_zoom {
+            if is_rot_zoom {
                 input
             } else {
                 let (input, is_translation) = take_bool_bit(input)?;
                 input
-            };
+            }
         } else {
             input
         };
@@ -1182,4 +1209,40 @@ enum RefType {
     Bwdref = 5,
     Altref2 = 6,
     Altref = 7,
+}
+
+fn get_qindex(
+    ignore_delta_q: bool,
+    segment_id: usize,
+    base_q_idx: u8,
+    current_q_index: Option<u8>,
+    segmentation_enabled: bool,
+    feature_data: &SegmentationData,
+) -> u8 {
+    if seg_feature_active_idx(
+        segment_id,
+        SEG_LVL_ALT_Q,
+        segmentation_enabled,
+        feature_data,
+    ) {
+        let data = feature_data[segment_id][SEG_LVL_ALT_Q].unwrap();
+        let mut qindex = base_q_idx as i16 + data;
+        if !ignore_delta_q && current_q_index.is_some() {
+            qindex = current_q_index.unwrap() as i16 + data;
+        }
+        return clamp(qindex, 0, 255) as u8;
+    } else if !ignore_delta_q && current_q_index.is_some() {
+        return current_q_index.unwrap();
+    }
+    return base_q_idx;
+}
+
+#[inline(always)]
+fn seg_feature_active_idx(
+    segment_id: usize,
+    feature: usize,
+    segmentation_enabled: bool,
+    feature_data: &SegmentationData,
+) -> bool {
+    segmentation_enabled && feature_data[segment_id][SEG_LVL_ALT_Q].is_some()
 }

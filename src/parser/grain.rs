@@ -167,7 +167,7 @@ pub fn film_grain_params(
         (input, true)
     };
     if !update_grain {
-        let (input, film_grain_params_ref_idx) = bit_parsers::take(3usize)?;
+        let (input, film_grain_params_ref_idx) = bit_parsers::take(3usize)(input)?;
         return Ok((
             input,
             FilmGrainHeader::CopyRefFrame(film_grain_params_ref_idx),
@@ -214,7 +214,7 @@ pub fn film_grain_params(
         (input, num_cb_points, num_cr_points)
     };
 
-    let (input, grain_scaling_minus_8) = bit_parsers::take(2usize)(input)?;
+    let (input, grain_scaling_minus_8): (_, u8) = bit_parsers::take(2usize)(input)?;
     let (mut input, ar_coeff_lag) = bit_parsers::take(2usize)(input)?;
     let mut ar_coeffs_y = ArrayVec::new();
     let mut ar_coeffs_cb = ArrayVec::new();
@@ -245,7 +245,7 @@ pub fn film_grain_params(
         }
     }
 
-    let (input, ar_coeff_shift_minus_6) = bit_parsers::take(2usize)(input)?;
+    let (input, ar_coeff_shift_minus_6): (_, u8) = bit_parsers::take(2usize)(input)?;
     let (input, grain_scale_shift) = bit_parsers::take(2usize)(input)?;
     let (input, cb_mult, cb_luma_mult, cb_offset) = if num_cb_points > 0 {
         let (input, cb_mult) = bit_parsers::take(8usize)(input)?;
