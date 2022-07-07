@@ -12,6 +12,7 @@ use super::{
     grain::{film_grain_params, FilmGrainHeader},
     obu::ObuHeader,
     sequence::{SequenceHeader, SELECT_INTEGER_MV, SELECT_SCREEN_CONTENT_TOOLS},
+    tile_group::parse_tile_group_obu,
     util::{ns, su, take_bool_bit, BitInput},
 };
 
@@ -58,6 +59,22 @@ pub struct FrameHeader {
     pub film_grain_params: FilmGrainHeader,
 }
 
+pub fn parse_frame_obu<'a, 'b>(
+    input: &'a [u8],
+    size: usize,
+    seen_frame_header: &'b mut bool,
+    sequence_headers: &'b SequenceHeader,
+    obu_headers: ObuHeader,
+) -> IResult<&'a [u8], Option<FrameHeader>> {
+    let input_len = input.len();
+    let (input, frame_header) =
+        parse_frame_header(input, seen_frame_header, sequence_headers, obu_headers)?;
+    // A reminder that obu size is in bits
+    let size = size - (input_len - input.len()) * 8;
+    let (input, _) = parse_tile_group_obu(input, size, seen_frame_header)?;
+    Ok((input, frame_header))
+}
+
 /// This will return `None` for a show-existing frame. We don't need to apply
 /// film grain params to those packets, because they are inherited from the ref
 /// frame.
@@ -66,7 +83,7 @@ pub struct FrameHeader {
 /// but the film grain params are of course the very last item,
 /// and we don't know how many bits precede it, so we have to parse
 /// THE WHOLE THING before we get the film grain params.
-pub fn parse_frame_header<'a, 'b>(
+fn parse_frame_header<'a, 'b>(
     input: &'a [u8],
     seen_frame_header: &'b mut bool,
     sequence_headers: &'b SequenceHeader,

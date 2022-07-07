@@ -6,9 +6,8 @@ use nom::{
 use num_enum::TryFromPrimitive;
 
 use super::{
-    frame::{parse_frame_header, FrameHeader},
+    frame::{parse_frame_obu, FrameHeader},
     sequence::{parse_sequence_header, SequenceHeader},
-    tile_group::parse_tile_group_obu,
     util::{leb128, take_bool_bit, take_zero_bit, BitInput},
 };
 
@@ -52,18 +51,20 @@ pub fn parse_obu<'a, 'b>(
             let (input, header) = parse_sequence_header(input)?;
             Ok((input, Some(Obu::SequenceHeader(header))))
         }
-        ObuType::FrameHeader => {
-            let (input, header) = parse_frame_header(
+        ObuType::Frame => {
+            let (input, header) = parse_frame_obu(
                 input,
+                *size,
                 seen_frame_header,
                 sequence_header.unwrap(),
                 obu_header,
             )?;
             Ok((input, header.map(Obu::FrameHeader)))
         }
-        ObuType::TileGroup => {
-            let (input, _) = parse_tile_group_obu(input, seen_frame_header)?;
-            Ok((input, None))
+        ObuType::FrameHeader | ObuType::TileGroup => {
+            // I'm adding an assert here explicitly because I'm not sure if the spec
+            // actually requires this. I think it does. But it's 681 pages.
+            unreachable!("This should only be called from within a frame OBU.");
         }
         ObuType::TemporalDelimiter => {
             *seen_frame_header = false;
