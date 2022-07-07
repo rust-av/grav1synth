@@ -79,23 +79,25 @@ pub fn ns(input: BitInput, n: usize) -> IResult<BitInput, u64> {
         return Ok((input, v));
     }
     let (input, extra_bit): (_, u64) = bit_parsers::take(1usize)(input)?;
-    Ok((input, (v << 1) - m as u64 + extra_bit))
+    Ok((input, (v << 1u8) - m as u64 + extra_bit))
 }
 
 pub fn su(input: BitInput, n: usize) -> IResult<BitInput, i64> {
     let (input, mut value) = bit_parsers::take(n)(input)?;
     let sign_mask = 1 << (n - 1);
     if (value & sign_mask) > 0 {
-        value = value - 2 * sign_mask;
+        value -= 2 * sign_mask;
     }
     Ok((input, value))
 }
 
 pub fn floor_log2<T: PrimInt>(mut x: T) -> T {
-    let mut s = 0;
-    while x != T::from(0).unwrap() {
+    let zero = T::from(0u8).unwrap();
+    let one = T::from(1u8).unwrap();
+    let mut s = zero;
+    while x != zero {
         x = x >> 1;
-        s += 1;
+        s = s + one;
     }
-    T::from(s - 1).unwrap()
+    s - one
 }

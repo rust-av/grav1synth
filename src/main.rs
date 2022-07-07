@@ -57,9 +57,8 @@ use clap::{Parser, Subcommand};
 use parser::grain::FilmGrainHeader;
 
 use crate::parser::{
-    frame::FrameHeader,
     grain::FilmGrainParser,
-    obu::{parse_obu, Obu, ObuType},
+    obu::{parse_obu, Obu},
 };
 
 pub fn main() -> Result<()> {
@@ -102,14 +101,14 @@ pub fn main() -> Result<()> {
 }
 
 fn get_grain_headers(mut input: &[u8]) -> Result<FilmGrainHeader> {
-    let mut size = None;
+    let mut size = 0usize;
     let mut seen_frame_header = false;
     let mut sequence_header = None;
     let mut grain_headers = vec![];
     loop {
         let (inner_input, obu) = parse_obu(
             input,
-            size,
+            &mut size,
             &mut seen_frame_header,
             sequence_header.as_ref(),
         )

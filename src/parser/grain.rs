@@ -142,6 +142,7 @@ pub struct FilmGrainParams {
 }
 
 #[allow(clippy::fn_params_excessive_bools)]
+#[allow(clippy::too_many_lines)]
 pub fn film_grain_params(
     input: BitInput,
     film_grain_params_present: bool,
@@ -176,7 +177,7 @@ pub fn film_grain_params(
 
     let (mut input, num_y_points) = bit_parsers::take(4usize)(input)?;
     let mut scaling_points_y: ArrayVec<[u8; 2], GS_NUM_Y_POINTS> = ArrayVec::new();
-    for _ in 0..num_y_points {
+    for _ in 0u8..num_y_points {
         let (inner_input, point_y_value) = bit_parsers::take(8usize)(input)?;
         let (inner_input, point_y_scaling) = bit_parsers::take(8usize)(inner_input)?;
         scaling_points_y.push([point_y_value, point_y_scaling]);
@@ -194,7 +195,7 @@ pub fn film_grain_params(
         || chroma_scaling_from_luma
         || (subsampling.0 == 1 && subsampling.1 == 1 && num_y_points == 0)
     {
-        (input, 0, 0)
+        (input, 0u8, 0u8)
     } else {
         let (mut input, num_cb_points) = bit_parsers::take(4usize)(input)?;
         for _ in 0..num_cb_points {
@@ -214,7 +215,7 @@ pub fn film_grain_params(
         (input, num_cb_points, num_cr_points)
     };
 
-    let (input, grain_scaling_minus_8): (_, u8) = bit_parsers::take(2usize)(input)?;
+    let (input, _grain_scaling_minus_8): (_, u8) = bit_parsers::take(2usize)(input)?;
     let (mut input, ar_coeff_lag) = bit_parsers::take(2usize)(input)?;
     let mut ar_coeffs_y = ArrayVec::new();
     let mut ar_coeffs_cb = ArrayVec::new();

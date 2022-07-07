@@ -22,9 +22,10 @@ pub struct SequenceHeader {
     pub max_frame_width_minus_1: u32,
     pub max_frame_height_minus_1: u32,
     pub decoder_model_info: Option<DecoderModelInfo>,
-    pub decoder_model_present_for_op: ArrayVec<bool, { 1 << 5 }>,
+    pub decoder_model_present_for_op: ArrayVec<bool, { 1 << 5u8 }>,
     pub operating_points_cnt_minus_1: usize,
-    pub operating_point_idc: ArrayVec<u16, { 1 << 5 }>,
+    pub operating_point_idc: ArrayVec<u16, { 1 << 5u8 }>,
+    pub cur_operating_point_idc: u16,
     pub timing_info: Option<TimingInfo>,
     pub enable_ref_frame_mvs: bool,
     pub enable_warped_motion: bool,
@@ -36,7 +37,8 @@ pub struct SequenceHeader {
 }
 
 impl SequenceHeader {
-    pub fn enable_order_hint(&self) -> bool {
+    #[must_use]
+    pub const fn enable_order_hint(&self) -> bool {
         self.order_hint_bits > 0
     }
 }
@@ -133,6 +135,8 @@ pub fn parse_sequence_header(input: &[u8]) -> IResult<&[u8], SequenceHeader> {
             )
         };
 
+        let operating_point = choose_operating_point();
+        let cur_operating_point_idc = operating_point_idc[operating_point];
         let (input, frame_width_bits_minus_1) = bit_parsers::take(4usize)(input)?;
         let (input, frame_height_bits_minus_1) = bit_parsers::take(4usize)(input)?;
         let (input, max_frame_width_minus_1) =
@@ -247,6 +251,7 @@ pub fn parse_sequence_header(input: &[u8]) -> IResult<&[u8], SequenceHeader> {
             decoder_model_present_for_op,
             operating_points_cnt_minus_1,
             operating_point_idc,
+            cur_operating_point_idc,
             timing_info,
             enable_ref_frame_mvs,
             enable_warped_motion,
@@ -480,4 +485,10 @@ pub enum MatrixCoefficients {
     ChromaticityNcl = 12,
     ChromaticityCl = 13,
     ICtCp = 14,
+}
+
+#[must_use]
+const fn choose_operating_point() -> usize {
+    // I HAVE NO IDEA HOW THIS SHIT WORKS
+    0
 }

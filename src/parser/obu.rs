@@ -14,7 +14,7 @@ use super::{
 
 pub fn parse_obu<'a, 'b>(
     input: &'a [u8],
-    size: Option<usize>,
+    size: &'b mut usize,
     seen_frame_header: &'b mut bool,
     sequence_header: Option<&'b SequenceHeader>,
 ) -> IResult<&'a [u8], Option<Obu>> {
@@ -23,13 +23,29 @@ pub fn parse_obu<'a, 'b>(
         let (input, result) = leb128(input)?;
         (input, result.value as usize)
     } else {
+        debug_assert!(*size > 0);
         (
             input,
-            size.expect("OBU requires size but no size provided")
-                - 1
-                - if obu_header.extension.is_some() { 1 } else { 0 },
+            *size - 1 - if obu_header.extension.is_some() { 1 } else { 0 },
         )
     };
+
+    if obu_header.obu_type != ObuType::SequenceHeader
+        && obu_header.obu_type != ObuType::TemporalDelimiter
+    {
+        if let Some(obu_ext) = obu_header.extension {
+            if let Some(sequence_header) = sequence_header {
+                let op_pt_idc = sequence_header.cur_operating_point_idc;
+                if op_pt_idc != 0 {
+                    let in_temporal_layer = (op_pt_idc >> obu_ext.temporal_id) & 1 > 0;
+                    let in_spatial_layer = (op_pt_idc >> (obu_ext.spatial_id + 8)) & 1 > 0;
+                    if !in_temporal_layer || !in_spatial_layer {
+                        return Ok((&input[obu_size..], None));
+                    }
+                }
+            }
+        }
+    }
 
     match obu_header.obu_type {
         ObuType::SequenceHeader => {
@@ -41,7 +57,7 @@ pub fn parse_obu<'a, 'b>(
                 input,
                 seen_frame_header,
                 sequence_header.unwrap(),
-                &obu_header,
+                obu_header,
             )?;
             Ok((input, header.map(Obu::FrameHeader)))
         }

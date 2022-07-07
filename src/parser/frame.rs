@@ -50,9 +50,6 @@ type SegmentationData = [[Option<i16>; SEG_LVL_MAX]; MAX_SEGMENTS];
 
 const MAX_LOOP_FILTER: u8 = 63;
 const RESTORE_NONE: u8 = 0;
-const RESTORE_SWITCHABLE: u8 = 1;
-const RESTORE_WIENER: u8 = 2;
-const RESTORE_SGRPROJ: u8 = 3;
 
 #[derive(Debug, Clone)]
 pub struct FrameHeader {
@@ -73,7 +70,7 @@ pub fn parse_frame_header<'a, 'b>(
     input: &'a [u8],
     seen_frame_header: &'b mut bool,
     sequence_headers: &'b SequenceHeader,
-    obu_headers: &'b ObuHeader,
+    obu_headers: ObuHeader,
 ) -> IResult<&'a [u8], Option<FrameHeader>> {
     if *seen_frame_header {
         return Ok((input, None));
@@ -85,43 +82,27 @@ pub fn parse_frame_header<'a, 'b>(
         if header.show_existing_frame {
             let (input, _) = decode_frame_wrapup(input)?;
             *seen_frame_header = false;
-            Ok((
-                input,
-                if header.show_frame {
-                    Some(header)
-                } else {
-                    None
-                },
-            ))
+            Ok((input, header.show_frame.then(|| header)))
         } else {
             *seen_frame_header = true;
-            Ok((
-                input,
-                if header.show_frame {
-                    Some(header)
-                } else {
-                    None
-                },
-            ))
+            Ok((input, header.show_frame.then(|| header)))
         }
     })(input)
 }
 
 #[allow(clippy::fn_params_excessive_bools)]
+#[allow(clippy::cognitive_complexity)]
+#[allow(clippy::too_many_lines)]
 fn uncompressed_header<'a, 'b>(
     input: BitInput<'a>,
     sequence_headers: &'b SequenceHeader,
-    obu_headers: &'b ObuHeader,
+    obu_headers: ObuHeader,
 ) -> IResult<BitInput<'a>, FrameHeader> {
-    let id_len = if sequence_headers.frame_id_numbers_present {
-        Some(
-            sequence_headers.additional_frame_id_len_minus_1
-                + sequence_headers.delta_frame_id_len_minus_2
-                + 3,
-        )
-    } else {
-        None
-    };
+    let id_len = sequence_headers.frame_id_numbers_present.then(|| {
+        sequence_headers.additional_frame_id_len_minus_1
+            + sequence_headers.delta_frame_id_len_minus_2
+            + 3
+    });
 
     let (input, frame_type, show_frame, showable_frame, show_existing_frame, error_resilient_mode) =
         if sequence_headers.reduced_still_picture_header {
@@ -149,8 +130,7 @@ fn uncompressed_header<'a, 'b>(
                 && sequence_headers.decoder_model_info.is_some()
                 && !sequence_headers
                     .timing_info
-                    .map(|ti| ti.equal_picture_interval)
-                    .unwrap_or(false)
+                    .map_or(false, |ti| ti.equal_picture_interval)
             {
                 temporal_point_info(
                     input,
@@ -241,11 +221,8 @@ fn uncompressed_header<'a, 'b>(
             for op_num in 0..=sequence_headers.operating_points_cnt_minus_1 {
                 if sequence_headers.decoder_model_present_for_op[op_num] {
                     let op_pt_idc = sequence_headers.operating_point_idc[op_num];
-                    let temporal_id = obu_headers
-                        .extension
-                        .map(|ext| ext.temporal_id)
-                        .unwrap_or(0);
-                    let spatial_id = obu_headers.extension.map(|ext| ext.spatial_id).unwrap_or(0);
+                    let temporal_id = obu_headers.extension.map_or(0, |ext| ext.temporal_id);
+                    let spatial_id = obu_headers.extension.map_or(0, |ext| ext.spatial_id);
                     let in_temporal_layer = (op_pt_idc >> temporal_id) & 1 > 0;
                     let in_spatial_layer = (op_pt_idc >> (spatial_id + 8)) & 1 > 0;
                     if op_pt_idc == 0 || (in_temporal_layer && in_spatial_layer) {
@@ -314,9 +291,7 @@ fn uncompressed_header<'a, 'b>(
                 upscaled_size,
             )
         } else {
-            let (mut input, frame_refs_short_signaling) = if !sequence_headers.enable_order_hint() {
-                (input, false)
-            } else {
+            let (mut input, frame_refs_short_signaling) = if sequence_headers.enable_order_hint() {
                 let (input, frame_refs_short_signaling) = take_bool_bit(input)?;
                 if frame_refs_short_signaling {
                     let (input, _last_frame_idx): (_, u8) = bit_parsers::take(3usize)(input)?;
@@ -326,10 +301,14 @@ fn uncompressed_header<'a, 'b>(
                 } else {
                     (input, frame_refs_short_signaling)
                 }
+            } else {
+                (input, false)
             };
             let mut ref_frame_idx: ArrayVec<usize, REFS_PER_FRAME> = ArrayVec::new();
             for _ in 0..REFS_PER_FRAME {
-                if !frame_refs_short_signaling {
+                if frame_refs_short_signaling {
+                    ref_frame_idx.push(0);
+                } else {
                     let (inner_input, this_ref_frame_idx) = bit_parsers::take(3usize)(input)?;
                     input = inner_input;
                     ref_frame_idx.push(this_ref_frame_idx);
@@ -339,13 +318,11 @@ fn uncompressed_header<'a, 'b>(
                             bit_parsers::take(n)(input)?;
                         input = inner_input;
                     }
-                } else {
-                    ref_frame_idx.push(0);
                 }
             }
             let (input, frame_size, upscaled_size) =
                 if frame_size_override_flag && !error_resilient_mode {
-                    let frame_size = max_frame_size;
+                    let mut frame_size = max_frame_size;
                     let mut upscaled_size = frame_size;
                     let (input, frame_size) = frame_size_with_refs(
                         input,
@@ -368,16 +345,16 @@ fn uncompressed_header<'a, 'b>(
                         max_frame_size,
                     )?;
                     let mut upscaled_size = frame_size;
-                    let (input, render_size) = render_size(input, frame_size, &mut upscaled_size)?;
+                    let (input, _render_size) = render_size(input, frame_size, &mut upscaled_size)?;
                     (input, frame_size, upscaled_size)
                 };
-            let (input, allow_high_precision_mv) = if sequence_headers.force_integer_mv == 1 {
+            let (input, _allow_high_precision_mv) = if sequence_headers.force_integer_mv == 1 {
                 (input, false)
             } else {
                 take_bool_bit(input)?
             };
             let (input, _) = read_interpolation_filter(input)?;
-            let (input, is_motion_mode_switchable) = take_bool_bit(input)?;
+            let (input, _is_motion_mode_switchable) = take_bool_bit(input)?;
             let (input, use_ref_frame_mvs) =
                 if error_resilient_mode || !sequence_headers.enable_ref_frame_mvs {
                     (input, false)
@@ -400,7 +377,7 @@ fn uncompressed_header<'a, 'b>(
         };
     let (mi_cols, mi_rows) = compute_image_size(frame_size);
 
-    let (input, disable_frame_end_update_cdf) =
+    let (input, _disable_frame_end_update_cdf) =
         if sequence_headers.reduced_still_picture_header || disable_cdf_update {
             (input, true)
         } else {
@@ -494,7 +471,7 @@ fn uncompressed_header<'a, 'b>(
         &big_ref_order_hint,
         &ref_frame_idx,
     )?;
-    let (input, allow_warped_motion) = if frame_type.is_intra()
+    let (input, _allow_warped_motion) = if frame_type.is_intra()
         || error_resilient_mode
         || !sequence_headers.enable_warped_motion
     {
@@ -502,7 +479,7 @@ fn uncompressed_header<'a, 'b>(
     } else {
         take_bool_bit(input)?
     };
-    let (input, reduced_tx_set) = take_bool_bit(input)?;
+    let (input, _reduced_tx_set) = take_bool_bit(input)?;
     let (input, _) = global_motion_params(input, frame_type.is_intra())?;
     let (input, film_grain_params) = film_grain_params(
         input,
@@ -531,12 +508,15 @@ pub enum FrameType {
 }
 
 impl FrameType {
+    #[must_use]
     pub fn is_intra(self) -> bool {
         self == FrameType::Key || self == FrameType::IntraOnly
     }
 }
 
-fn decode_frame_wrapup(input: BitInput) -> IResult<BitInput, ()> {
+#[inline(always)]
+#[allow(clippy::unnecessary_wraps)]
+const fn decode_frame_wrapup(input: BitInput) -> IResult<BitInput, ()> {
     // I don't believe this actually parses anything
     // or does anything relevant to us...
     Ok((input, ()))
@@ -594,11 +574,14 @@ fn render_size<'a, 'b>(
     Ok((input, Dimensions { width, height }))
 }
 
-fn set_frame_refs(input: BitInput) -> IResult<BitInput, ()> {
+#[inline(always)]
+#[allow(clippy::unnecessary_wraps)]
+const fn set_frame_refs(input: BitInput) -> IResult<BitInput, ()> {
     // Does nothing that we care about
     Ok((input, ()))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn frame_size_with_refs<'a, 'b>(
     input: BitInput<'a>,
     enable_superres: bool,
@@ -621,7 +604,11 @@ fn frame_size_with_refs<'a, 'b>(
             break;
         }
     }
-    let (input, frame_size) = if !found_ref {
+    let (input, frame_size) = if found_ref {
+        let (input, _) =
+            superres_params(input, enable_superres, ref_frame_size, ref_upscaled_size)?;
+        (input, *ref_frame_size)
+    } else {
         let (input, frame_size) = frame_size(
             input,
             frame_size_override,
@@ -632,10 +619,6 @@ fn frame_size_with_refs<'a, 'b>(
         )?;
         let (input, _) = render_size(input, frame_size, ref_upscaled_size)?;
         (input, frame_size)
-    } else {
-        let (input, _) =
-            superres_params(input, enable_superres, ref_frame_size, ref_upscaled_size)?;
-        (input, *ref_frame_size)
     };
     Ok((input, frame_size))
 }
@@ -662,9 +645,9 @@ fn superres_params<'a, 'b>(
     Ok((input, ()))
 }
 
-fn compute_image_size(frame_size: Dimensions) -> (u32, u32) {
-    let mi_cols = 2 * ((frame_size.width + 7) >> 3);
-    let mi_rows = 2 * ((frame_size.height + 7) >> 3);
+const fn compute_image_size(frame_size: Dimensions) -> (u32, u32) {
+    let mi_cols = 2 * ((frame_size.width + 7) >> 3u8);
+    let mi_rows = 2 * ((frame_size.height + 7) >> 3u8);
     (mi_cols, mi_rows)
 }
 
@@ -673,27 +656,37 @@ fn read_interpolation_filter(input: BitInput) -> IResult<BitInput, ()> {
     Ok((input, ()))
 }
 
-fn init_non_coeff_cdfs(input: BitInput) -> IResult<BitInput, ()> {
+#[inline(always)]
+#[allow(clippy::unnecessary_wraps)]
+const fn init_non_coeff_cdfs(input: BitInput) -> IResult<BitInput, ()> {
     // We don't care about this
     Ok((input, ()))
 }
 
-fn setup_past_independence(input: BitInput) -> IResult<BitInput, ()> {
+#[inline(always)]
+#[allow(clippy::unnecessary_wraps)]
+const fn setup_past_independence(input: BitInput) -> IResult<BitInput, ()> {
     // We don't care about this
     Ok((input, ()))
 }
 
-fn load_cdfs(input: BitInput) -> IResult<BitInput, ()> {
+#[inline(always)]
+#[allow(clippy::unnecessary_wraps)]
+const fn load_cdfs(input: BitInput) -> IResult<BitInput, ()> {
     // We don't care about this
     Ok((input, ()))
 }
 
-fn load_previous(input: BitInput) -> IResult<BitInput, ()> {
+#[inline(always)]
+#[allow(clippy::unnecessary_wraps)]
+const fn load_previous(input: BitInput) -> IResult<BitInput, ()> {
     // We don't care about this
     Ok((input, ()))
 }
 
-fn motion_field_estimation(input: BitInput) -> IResult<BitInput, ()> {
+#[inline(always)]
+#[allow(clippy::unnecessary_wraps)]
+const fn motion_field_estimation(input: BitInput) -> IResult<BitInput, ()> {
     // We don't care about this
     Ok((input, ()))
 }
@@ -705,22 +698,22 @@ fn tile_info(
     mi_rows: u32,
 ) -> IResult<BitInput, ()> {
     let sb_cols = if use_128x128_superblock {
-        (mi_cols + 31) >> 5
+        (mi_cols + 31) >> 5u8
     } else {
-        (mi_cols + 15) >> 4
+        (mi_cols + 15) >> 4u8
     };
     let sb_rows = if use_128x128_superblock {
-        (mi_rows + 31) >> 5
+        (mi_rows + 31) >> 5u8
     } else {
-        (mi_rows + 15) >> 4
+        (mi_rows + 15) >> 4u8
     };
-    let sb_shift = if use_128x128_superblock { 5 } else { 4 };
+    let sb_shift = if use_128x128_superblock { 5u8 } else { 4u8 };
     let sb_size = sb_shift + 2;
     let max_tile_width_sb = MAX_TILE_WIDTH >> sb_size;
-    let max_tile_area_sb = MAX_TILE_AREA >> (2 * sb_size);
+    let max_tile_area_sb = MAX_TILE_AREA >> (2u8 * sb_size);
     let min_log2_tile_cols = tile_log2(max_tile_width_sb, sb_cols);
     let max_log2_tile_cols = tile_log2(1, min(sb_cols, MAX_TILE_COLS));
-    let max_log2_tile_rows = tile_log2(1, min(sb_rows, MAX_TILE_ROWS));
+    let _max_log2_tile_rows = tile_log2(1, min(sb_rows, MAX_TILE_ROWS));
     let min_log2_tiles = max(
         min_log2_tile_cols,
         tile_log2(max_tile_area_sb, sb_rows * sb_cols),
@@ -847,11 +840,11 @@ fn quantization_params(
     let (input, using_qmatrix) = take_bool_bit(input)?;
     let input = if using_qmatrix {
         let (input, _qm_y): (_, u8) = bit_parsers::take(4usize)(input)?;
-        let (input, _qm_u): (_, u8) = bit_parsers::take(4usize)(input)?;
+        let (input, qm_u): (_, u8) = bit_parsers::take(4usize)(input)?;
         let (input, _qm_v): (_, u8) = if separate_uv_delta_q {
             bit_parsers::take(4usize)(input)?
         } else {
-            (input, _qm_u)
+            (input, qm_u)
         };
         input
     } else {
@@ -908,12 +901,13 @@ fn segmentation_params(
         };
         if segmentation_update_data {
             let mut input = input;
+            #[allow(clippy::needless_range_loop)]
             for i in 0..MAX_SEGMENTS {
                 for j in 0..SEG_LVL_MAX {
                     let (inner_input, feature_enabled) = take_bool_bit(input)?;
                     input = if feature_enabled {
                         let bits_to_read = SEGMENTATION_FEATURE_BITS[j] as usize;
-                        let limit = SEGMENTATION_FEATURE_MAX[j] as i16;
+                        let limit = i16::from(SEGMENTATION_FEATURE_MAX[j]);
                         let (inner_input, feature_value) = if SEGMENTATION_FEATURE_SIGNED[j] {
                             let (input, value) = su(inner_input, 1 + bits_to_read)?;
                             (input, clamp(value as i16, -limit, limit))
@@ -937,14 +931,7 @@ fn segmentation_params(
     };
 
     // The rest of the stuff in this method doesn't read any input, so return
-    Ok((
-        input,
-        if segmentation_enabled {
-            Some(segmentation_data)
-        } else {
-            None
-        },
-    ))
+    Ok((input, segmentation_enabled.then(|| segmentation_data)))
 }
 
 fn delta_q_params(input: BitInput, base_q_idx: u8) -> IResult<BitInput, bool> {
@@ -967,14 +954,14 @@ fn delta_lf_params(
     allow_intrabc: bool,
 ) -> IResult<BitInput, ()> {
     let input = if delta_q_present {
-        let (input, delta_lf_present) = if !allow_intrabc {
-            take_bool_bit(input)?
-        } else {
+        let (input, delta_lf_present) = if allow_intrabc {
             (input, false)
+        } else {
+            take_bool_bit(input)?
         };
         if delta_lf_present {
-            let (input, delta_lf_res): (_, u8) = bit_parsers::take(2usize)(input)?;
-            let (input, delta_lf_multi) = take_bool_bit(input)?;
+            let (input, _delta_lf_res): (_, u8) = bit_parsers::take(2usize)(input)?;
+            let (input, _delta_lf_multi) = take_bool_bit(input)?;
             input
         } else {
             input
@@ -985,12 +972,16 @@ fn delta_lf_params(
     Ok((input, ()))
 }
 
-fn init_coeff_cdfs(input: BitInput) -> IResult<BitInput, ()> {
+#[inline(always)]
+#[allow(clippy::unnecessary_wraps)]
+const fn init_coeff_cdfs(input: BitInput) -> IResult<BitInput, ()> {
     // We don't care about this
     Ok((input, ()))
 }
 
-fn load_previous_segment_ids(input: BitInput) -> IResult<BitInput, ()> {
+#[inline(always)]
+#[allow(clippy::unnecessary_wraps)]
+const fn load_previous_segment_ids(input: BitInput) -> IResult<BitInput, ()> {
     // We don't care about this
     Ok((input, ()))
 }
@@ -1008,41 +999,36 @@ fn loop_filter_params(
     let (input, loop_filter_l0): (_, u8) = bit_parsers::take(6usize)(input)?;
     let (input, loop_filter_l1): (_, u8) = bit_parsers::take(6usize)(input)?;
     let input = if num_planes > 1 && (loop_filter_l0 > 0 || loop_filter_l1 > 0) {
-        let (input, loop_filter_l2): (_, u8) = bit_parsers::take(6usize)(input)?;
-        let (input, loop_filter_l3): (_, u8) = bit_parsers::take(6usize)(input)?;
+        let (input, _loop_filter_l2): (_, u8) = bit_parsers::take(6usize)(input)?;
+        let (input, _loop_filter_l3): (_, u8) = bit_parsers::take(6usize)(input)?;
         input
     } else {
         input
     };
-    let (input, loop_filter_sharpness): (_, u8) = bit_parsers::take(3usize)(input)?;
+    let (input, _loop_filter_sharpness): (_, u8) = bit_parsers::take(3usize)(input)?;
     let (input, loop_filter_delta_enabled) = take_bool_bit(input)?;
-    let input = if loop_filter_delta_enabled {
+    if loop_filter_delta_enabled {
         let (mut input, loop_filter_delta_update) = take_bool_bit(input)?;
         if loop_filter_delta_update {
-            for i in 0..TOTAL_REFS_PER_FRAME {
+            for _ in 0..TOTAL_REFS_PER_FRAME {
                 let (inner_input, update_ref_delta) = take_bool_bit(input)?;
                 input = if update_ref_delta {
-                    let (inner_input, loop_filter_ref_delta) = su(inner_input, 1 + 6)?;
+                    let (inner_input, _loop_filter_ref_delta) = su(inner_input, 1 + 6)?;
                     inner_input
                 } else {
                     inner_input
                 };
             }
-            for i in 0..2 {
+            for _ in 0..2u8 {
                 let (inner_input, update_mode_delta) = take_bool_bit(input)?;
                 input = if update_mode_delta {
-                    let (inner_input, loop_filter_mode_delta) = su(inner_input, 1 + 6)?;
+                    let (inner_input, _loop_filter_mode_delta) = su(inner_input, 1 + 6)?;
                     inner_input
                 } else {
                     inner_input
                 };
             }
-            input
-        } else {
-            input
         }
-    } else {
-        input
     };
 
     Ok((input, ()))
@@ -1059,14 +1045,14 @@ fn cdef_params(
         return Ok((input, ()));
     }
 
-    let (input, cdef_damping_minus_1): (_, u8) = bit_parsers::take(2usize)(input)?;
+    let (input, _cdef_damping_minus_1): (_, u8) = bit_parsers::take(2usize)(input)?;
     let (mut input, cdef_bits): (_, u8) = bit_parsers::take(2usize)(input)?;
-    for _ in 0..(1 << cdef_bits) {
-        let (inner_input, cdef_y_pri_str): (_, u8) = bit_parsers::take(4usize)(input)?;
-        let (inner_input, cdef_y_sec_str): (_, u8) = bit_parsers::take(2usize)(inner_input)?;
+    for _ in 0..(1usize << cdef_bits) {
+        let (inner_input, _cdef_y_pri_str): (_, u8) = bit_parsers::take(4usize)(input)?;
+        let (inner_input, _cdef_y_sec_str): (_, u8) = bit_parsers::take(2usize)(inner_input)?;
         input = if num_planes > 1 {
-            let (inner_input, cdef_uv_pri_str): (_, u8) = bit_parsers::take(4usize)(inner_input)?;
-            let (inner_input, cdef_uv_sec_str): (_, u8) = bit_parsers::take(2usize)(inner_input)?;
+            let (inner_input, _cdef_uv_pri_str): (_, u8) = bit_parsers::take(4usize)(inner_input)?;
+            let (inner_input, _cdef_uv_sec_str): (_, u8) = bit_parsers::take(2usize)(inner_input)?;
             inner_input
         } else {
             inner_input
@@ -1077,15 +1063,15 @@ fn cdef_params(
 }
 
 #[allow(clippy::fn_params_excessive_bools)]
-fn lr_params<'a>(
-    input: BitInput<'a>,
+fn lr_params(
+    input: BitInput,
     all_lossless: bool,
     allow_intrabc: bool,
     enable_restoration: bool,
     use_128x128_superblock: bool,
     num_planes: u8,
     subsampling: (u8, u8),
-) -> IResult<BitInput<'a>, ()> {
+) -> IResult<BitInput, ()> {
     if all_lossless || allow_intrabc || !enable_restoration {
         return Ok((input, ()));
     }
@@ -1106,19 +1092,19 @@ fn lr_params<'a>(
 
     let input = if uses_lr {
         let input = if use_128x128_superblock {
-            let (input, lr_unit_shift) = take_bool_bit(input)?;
+            let (input, _lr_unit_shift) = take_bool_bit(input)?;
             input
         } else {
             let (input, lr_unit_shift) = take_bool_bit(input)?;
             if lr_unit_shift {
-                let (input, lr_unit_extra_shift) = take_bool_bit(input)?;
+                let (input, _lr_unit_extra_shift) = take_bool_bit(input)?;
                 input
             } else {
                 input
             }
         };
         if subsampling.0 > 0 && subsampling.1 > 0 && uses_chroma_lr {
-            let (input, lr_uv_shift) = take_bool_bit(input)?;
+            let (input, _lr_uv_shift) = take_bool_bit(input)?;
             input
         } else {
             input
@@ -1157,7 +1143,7 @@ fn skip_mode_params<'a, 'b>(
     ref_order_hint: &'b [u64],
     ref_frame_idx: &'b [usize],
 ) -> IResult<BitInput<'a>, ()> {
-    let mut skip_mode_allowed = false;
+    let skip_mode_allowed;
     let mut forward_hint = -1;
     let mut backward_hint = -1;
     let mut second_forward_hint = -1;
@@ -1210,7 +1196,7 @@ fn skip_mode_params<'a, 'b>(
         }
     }
 
-    let (input, skip_mode_present) = if skip_mode_allowed {
+    let (input, _skip_mode_present) = if skip_mode_allowed {
         take_bool_bit(input)?
     } else {
         (input, false)
@@ -1219,7 +1205,7 @@ fn skip_mode_params<'a, 'b>(
     Ok((input, ()))
 }
 
-fn get_relative_dist(a: i64, b: i64, order_hint_bits: usize) -> i64 {
+const fn get_relative_dist(a: i64, b: i64, order_hint_bits: usize) -> i64 {
     if order_hint_bits == 0 {
         return 0;
     }
@@ -1243,7 +1229,7 @@ fn global_motion_params(input: BitInput, frame_is_intra: bool) -> IResult<BitInp
             if is_rot_zoom {
                 input
             } else {
-                let (input, is_translation) = take_bool_bit(input)?;
+                let (input, _is_translation) = take_bool_bit(input)?;
                 input
             }
         } else {
@@ -1256,6 +1242,7 @@ fn global_motion_params(input: BitInput, frame_is_intra: bool) -> IResult<BitInp
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[allow(dead_code)]
 enum RefType {
     Intra = 0,
     Last = 1,
@@ -1276,15 +1263,19 @@ fn get_qindex(
 ) -> u8 {
     if seg_feature_active_idx(segment_id, SEG_LVL_ALT_Q, feature_data) {
         let data = feature_data.unwrap()[segment_id][SEG_LVL_ALT_Q].unwrap();
-        let mut qindex = base_q_idx as i16 + data;
-        if !ignore_delta_q && current_q_index.is_some() {
-            qindex = current_q_index.unwrap() as i16 + data;
+        let mut qindex = i16::from(base_q_idx) + data;
+        if !ignore_delta_q {
+            if let Some(current_q_index) = current_q_index {
+                qindex = i16::from(current_q_index) + data;
+            }
         }
         return clamp(qindex, 0, 255) as u8;
     } else if !ignore_delta_q && current_q_index.is_some() {
-        return current_q_index.unwrap();
+        if let Some(current_q_index) = current_q_index {
+            return current_q_index;
+        }
     }
-    return base_q_idx;
+    base_q_idx
 }
 
 #[inline(always)]
@@ -1293,5 +1284,5 @@ fn seg_feature_active_idx(
     feature: usize,
     feature_data: Option<&SegmentationData>,
 ) -> bool {
-    feature_data.is_some() && feature_data.unwrap()[segment_id][SEG_LVL_ALT_Q].is_some()
+    feature_data.is_some() && feature_data.unwrap()[segment_id][feature].is_some()
 }
