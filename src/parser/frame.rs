@@ -71,7 +71,15 @@ pub fn parse_frame_obu<'a, 'b>(
         parse_frame_header(input, seen_frame_header, sequence_headers, obu_headers)?;
     // A reminder that obu size is in bits
     let size = size - (input_len - input.len()) * 8;
-    let (input, _) = parse_tile_group_obu(input, size, seen_frame_header)?;
+    let (input, _) = parse_tile_group_obu(
+        input,
+        size,
+        seen_frame_header,
+        sequence_headers.tile_cols,
+        sequence_headers.tile_rows,
+        sequence_headers.tile_cols_log2,
+        sequence_headers.tile_rows_log2,
+    )?;
     Ok((input, frame_header))
 }
 
