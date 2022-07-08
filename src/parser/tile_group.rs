@@ -9,10 +9,10 @@ pub fn parse_tile_group_obu<'a, 'b>(
     input: &'a [u8],
     size: usize,
     seen_frame_header: &'b mut bool,
-    tile_cols: usize,
-    tile_rows: usize,
-    tile_cols_log2: usize,
-    tile_rows_log2: usize,
+    tile_cols: u32,
+    tile_rows: u32,
+    tile_cols_log2: u32,
+    tile_rows_log2: u32,
 ) -> IResult<&'a [u8], ()> {
     // Tile group header--we only need to parse this part
     let (_, (num_tiles, tg_end)) = bits(|input| {
@@ -26,8 +26,8 @@ pub fn parse_tile_group_obu<'a, 'b>(
             Ok((input, (0, num_tiles - 1)))
         } else {
             let tile_bits = tile_cols_log2 + tile_rows_log2;
-            let (input, tg_start): (_, usize) = bit_parsers::take(tile_bits)(input)?;
-            let (input, tg_end): (_, usize) = bit_parsers::take(tile_bits)(input)?;
+            let (input, _tg_start): (_, u32) = bit_parsers::take(tile_bits)(input)?;
+            let (input, tg_end): (_, u32) = bit_parsers::take(tile_bits)(input)?;
             Ok((input, (num_tiles, tg_end)))
         }
     })(input)?;

@@ -54,7 +54,7 @@ use std::{env, path::PathBuf};
 
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
-use parser::grain::FilmGrainHeader;
+use parser::{frame::FrameHeader, grain::FilmGrainHeader, sequence::SequenceHeader};
 
 use crate::parser::{
     grain::FilmGrainParser,
@@ -82,9 +82,20 @@ pub fn main() -> Result<()> {
 
             let mut parser = FilmGrainParser::open(&input)?;
             let video_headers = parser.get_headers();
+            let mut size = 0usize;
+            let mut seen_frame_header = false;
+            let mut sequence_header = None;
+            let mut previous_frame_header = None;
             let mut grain_headers = Vec::new();
             while let Some(packet) = parser.read_packet()? {
-                grain_headers.push(get_grain_headers(&packet)?);
+                get_grain_headers(
+                    &packet,
+                    &mut size,
+                    &mut seen_frame_header,
+                    &mut sequence_header,
+                    &mut previous_frame_header,
+                    &mut grain_headers,
+                )?;
             }
 
             todo!("Aggregate the grain info and convert them to table format")
@@ -100,32 +111,40 @@ pub fn main() -> Result<()> {
     Ok(())
 }
 
-fn get_grain_headers(mut input: &[u8]) -> Result<FilmGrainHeader> {
-    let mut size = 0usize;
-    let mut seen_frame_header = false;
-    let mut sequence_header = None;
-    let mut grain_headers = vec![];
+fn get_grain_headers<'a, 'b>(
+    mut input: &'a [u8],
+    size: &'b mut usize,
+    seen_frame_header: &'b mut bool,
+    sequence_header: &'b mut Option<SequenceHeader>,
+    previous_frame_header: &'b mut Option<FrameHeader>,
+    grain_headers: &'b mut Vec<FilmGrainHeader>,
+) -> Result<()> {
     loop {
         let (inner_input, obu) = parse_obu(
             input,
             &mut size,
             &mut seen_frame_header,
             sequence_header.as_ref(),
+            previous_frame_header.as_ref(),
         )
         .map_err(|e| anyhow!("{}", e.to_string()))?;
         input = inner_input;
         match obu {
             Some(Obu::SequenceHeader(obu)) => {
-                sequence_header = Some(obu);
+                *sequence_header = Some(obu);
             }
             Some(Obu::FrameHeader(obu)) => {
-                grain_headers.push(obu.film_grain_params);
+                grain_headers.push(obu.film_grain_params.clone());
+                *previous_frame_header = Some(obu);
             }
-            None => todo!(),
+            None => (),
         };
+        if input.is_empty() {
+            break;
+        }
     }
 
-    todo!("Actually do something with the grain params we parsed");
+    Ok(())
 }
 
 #[derive(Parser, Debug)]

@@ -16,6 +16,7 @@ pub fn parse_obu<'a, 'b>(
     size: &'b mut usize,
     seen_frame_header: &'b mut bool,
     sequence_header: Option<&'b SequenceHeader>,
+    previous_frame_header: Option<&'b FrameHeader>,
 ) -> IResult<&'a [u8], Option<Obu>> {
     let (input, obu_header) = parse_obu_header(input)?;
     let (input, obu_size) = if obu_header.has_size_field {
@@ -58,6 +59,7 @@ pub fn parse_obu<'a, 'b>(
                 seen_frame_header,
                 sequence_header.unwrap(),
                 obu_header,
+                previous_frame_header,
             )?;
             Ok((input, header.map(Obu::FrameHeader)))
         }

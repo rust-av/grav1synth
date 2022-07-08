@@ -57,6 +57,7 @@ pub struct FrameHeader {
     pub show_frame: bool,
     pub show_existing_frame: bool,
     pub film_grain_params: FilmGrainHeader,
+    pub tile_info: TileInfo,
 }
 
 pub fn parse_frame_obu<'a, 'b>(
@@ -65,20 +66,27 @@ pub fn parse_frame_obu<'a, 'b>(
     seen_frame_header: &'b mut bool,
     sequence_headers: &'b SequenceHeader,
     obu_headers: ObuHeader,
+    previous_frame_header: Option<&'b FrameHeader>,
 ) -> IResult<&'a [u8], Option<FrameHeader>> {
     let input_len = input.len();
-    let (input, frame_header) =
-        parse_frame_header(input, seen_frame_header, sequence_headers, obu_headers)?;
+    let (input, frame_header) = parse_frame_header(
+        input,
+        seen_frame_header,
+        sequence_headers,
+        obu_headers,
+        previous_frame_header,
+    )?;
+    let ref_frame_header = frame_header.as_ref().or(previous_frame_header).unwrap();
     // A reminder that obu size is in bits
     let size = size - (input_len - input.len()) * 8;
     let (input, _) = parse_tile_group_obu(
         input,
         size,
         seen_frame_header,
-        sequence_headers.tile_cols,
-        sequence_headers.tile_rows,
-        sequence_headers.tile_cols_log2,
-        sequence_headers.tile_rows_log2,
+        ref_frame_header.tile_info.tile_cols,
+        ref_frame_header.tile_info.tile_rows,
+        ref_frame_header.tile_info.tile_cols_log2,
+        ref_frame_header.tile_info.tile_rows_log2,
     )?;
     Ok((input, frame_header))
 }
@@ -96,6 +104,7 @@ fn parse_frame_header<'a, 'b>(
     seen_frame_header: &'b mut bool,
     sequence_headers: &'b SequenceHeader,
     obu_headers: ObuHeader,
+    previous_frame_header: Option<&'b FrameHeader>,
 ) -> IResult<&'a [u8], Option<FrameHeader>> {
     if *seen_frame_header {
         return Ok((input, None));
@@ -103,7 +112,8 @@ fn parse_frame_header<'a, 'b>(
 
     *seen_frame_header = true;
     bits(|input| {
-        let (input, header) = uncompressed_header(input, sequence_headers, obu_headers)?;
+        let (input, header) =
+            uncompressed_header(input, sequence_headers, obu_headers, previous_frame_header)?;
         if header.show_existing_frame {
             let (input, _) = decode_frame_wrapup(input)?;
             *seen_frame_header = false;
@@ -122,6 +132,7 @@ fn uncompressed_header<'a, 'b>(
     input: BitInput<'a>,
     sequence_headers: &'b SequenceHeader,
     obu_headers: ObuHeader,
+    previous_frame_header: Option<&'b FrameHeader>,
 ) -> IResult<BitInput<'a>, FrameHeader> {
     let id_len = sequence_headers.frame_id_numbers_present.then(|| {
         sequence_headers.additional_frame_id_len_minus_1
@@ -146,6 +157,7 @@ fn uncompressed_header<'a, 'b>(
                     show_frame: true,
                     show_existing_frame,
                     film_grain_params: FilmGrainHeader::Disable,
+                    tile_info: previous_frame_header.unwrap().tile_info,
                 }));
             };
             let (input, frame_type): (_, u8) = bit_parsers::take(2usize)(input)?;
@@ -422,7 +434,7 @@ fn uncompressed_header<'a, 'b>(
     } else {
         input
     };
-    let (input, _) = tile_info(
+    let (input, tile_info) = tile_info(
         input,
         sequence_headers.use_128x128_superblock,
         mi_cols,
@@ -520,6 +532,7 @@ fn uncompressed_header<'a, 'b>(
         show_frame,
         show_existing_frame,
         film_grain_params,
+        tile_info,
     }))
 }
 
@@ -721,7 +734,7 @@ fn tile_info(
     use_128x128_superblock: bool,
     mi_cols: u32,
     mi_rows: u32,
-) -> IResult<BitInput, ()> {
+) -> IResult<BitInput, TileInfo> {
     let sb_cols = if use_128x128_superblock {
         (mi_cols + 31) >> 5u8
     } else {
@@ -820,7 +833,20 @@ fn tile_info(
         input
     };
 
-    Ok((input, ()))
+    Ok((input, TileInfo {
+        tile_cols,
+        tile_rows,
+        tile_cols_log2,
+        tile_rows_log2,
+    }))
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TileInfo {
+    pub tile_cols: u32,
+    pub tile_rows: u32,
+    pub tile_cols_log2: u32,
+    pub tile_rows_log2: u32,
 }
 
 /// Returns the smallest value for `k` such that `blk_size << k` is greater than

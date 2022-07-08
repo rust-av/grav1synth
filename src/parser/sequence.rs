@@ -2,7 +2,10 @@ use arrayvec::ArrayVec;
 use nom::{bits, bits::complete as bit_parsers, IResult};
 use num_enum::TryFromPrimitive;
 
-use super::util::{take_bool_bit, uvlc, BitInput};
+use super::{
+    frame::TileInfo,
+    util::{take_bool_bit, uvlc, BitInput},
+};
 
 pub const SELECT_SCREEN_CONTENT_TOOLS: u8 = 2;
 pub const SELECT_INTEGER_MV: u8 = 2;
