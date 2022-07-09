@@ -81,7 +81,6 @@ pub fn main() -> Result<()> {
             );
 
             let mut parser = FilmGrainParser::open(&input)?;
-            let video_headers = parser.get_headers();
             let mut size = 0usize;
             let mut seen_frame_header = false;
             let mut sequence_header = None;
@@ -97,6 +96,17 @@ pub fn main() -> Result<()> {
                     &mut grain_headers,
                 )?;
             }
+
+            if !grain_headers
+                .iter()
+                .any(|h| matches!(h, &FilmGrainHeader::UpdateGrain(_)))
+            {
+                eprintln!("No film grain headers found--this video does not use grain synthesis");
+                return Ok(());
+            }
+
+            let video_headers = parser.get_headers();
+            dbg!(&grain_headers);
 
             todo!("Aggregate the grain info and convert them to table format")
         }
@@ -122,8 +132,8 @@ fn get_grain_headers<'a, 'b>(
     loop {
         let (inner_input, obu) = parse_obu(
             input,
-            &mut size,
-            &mut seen_frame_header,
+            size,
+            seen_frame_header,
             sequence_header.as_ref(),
             previous_frame_header.as_ref(),
         )
