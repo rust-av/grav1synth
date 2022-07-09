@@ -49,6 +49,7 @@ pub mod parser {
     pub mod tile_group;
     pub mod util;
 }
+pub mod reader;
 
 use std::{env, path::PathBuf};
 
@@ -56,9 +57,9 @@ use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use parser::{frame::FrameHeader, grain::FilmGrainHeader, sequence::SequenceHeader};
 
-use crate::parser::{
-    grain::FilmGrainParser,
-    obu::{parse_obu, Obu},
+use crate::{
+    parser::obu::{parse_obu, Obu},
+    reader::BitstreamReader,
 };
 
 pub fn main() -> Result<()> {
@@ -71,24 +72,15 @@ pub fn main() -> Result<()> {
 
     match args.command {
         Commands::Inspect { input, output } => {
-            assert!(
-                input.extension().unwrap().to_ascii_lowercase() == "ivf",
-                "Currently, only .ivf input is supported"
-            );
-            assert!(
-                output.extension().unwrap().to_ascii_lowercase() == "ivf",
-                "Currently, only .ivf output is supported"
-            );
-
-            let mut parser = FilmGrainParser::open(&input)?;
+            let mut parser = BitstreamReader::open(&input)?;
             let mut size = 0usize;
             let mut seen_frame_header = false;
             let mut sequence_header = None;
             let mut previous_frame_header = None;
             let mut grain_headers = Vec::new();
-            while let Some(packet) = parser.read_packet()? {
+            while let Some(packet) = parser.read_packet() {
                 get_grain_headers(
-                    &packet,
+                    packet.data().unwrap(),
                     &mut size,
                     &mut seen_frame_header,
                     &mut sequence_header,
@@ -105,7 +97,6 @@ pub fn main() -> Result<()> {
                 return Ok(());
             }
 
-            let video_headers = parser.get_headers();
             dbg!(&grain_headers);
 
             todo!("Aggregate the grain info and convert them to table format")

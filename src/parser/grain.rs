@@ -1,61 +1,11 @@
-use std::path::Path;
-
-use anyhow::{bail, Result};
 use arrayvec::ArrayVec;
-use av_format::{
-    buffer::AccReader,
-    demuxer::{Context as DemuxerContext, Event},
-    stream::Stream,
-};
-use av_ivf::demuxer::IvfDemuxer;
 use nom::{bits::complete as bit_parsers, IResult};
 
 use super::{
     frame::FrameType,
     util::{take_bool_bit, BitInput},
 };
-
-pub struct FilmGrainParser {
-    demuxer: DemuxerContext,
-}
-
-impl FilmGrainParser {
-    pub fn open<P: AsRef<Path>>(input: P) -> Result<Self> {
-        let input = std::fs::File::open(input).unwrap();
-        let acc = AccReader::new(input);
-        let mut demuxer = DemuxerContext::new(Box::new(IvfDemuxer::new()), Box::new(acc));
-        demuxer.read_headers()?;
-
-        Ok(Self { demuxer })
-    }
-
-    #[must_use]
-    pub fn get_headers(&self) -> &Stream {
-        &self.demuxer.info.streams[0]
-    }
-
-    pub fn read_packet(&mut self) -> Result<Option<Vec<u8>>> {
-        loop {
-            match self.demuxer.read_event()? {
-                Event::NewPacket(packet) => {
-                    return Ok(Some(packet.data));
-                }
-                Event::Continue | Event::MoreDataNeeded(_) => {
-                    continue;
-                }
-                Event::Eof => {
-                    return Ok(None);
-                }
-                Event::NewStream(_) => {
-                    bail!("Only one stream per ivf file is supported");
-                }
-                _ => {
-                    unimplemented!("non-exhaustive enum");
-                }
-            }
-        }
-    }
-}
+use crate::parser::grain;
 
 /// The max number of luma scaling points for grain synthesis
 pub const GS_NUM_Y_POINTS: usize = 14;

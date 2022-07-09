@@ -12,9 +12,10 @@ categories = ["multimedia", "multimedia:video", "multimedia:encoding"]
 [dependencies]
 anyhow = "1.0.55"
 arrayvec = "0.7.2"
-av-format = "0.4.0"
-av-ivf = "0.3.0"
 clap = { version = "3.2.6", features = ["derive"] }
+ffmpeg = { version = "5.0.3", default-features = false, features = [
+    "format",
+], package = "ffmpeg-next" }
 log = "0.4.17"
 nom = "7.1.0"
 num-traits = "0.2.15"
