@@ -766,7 +766,7 @@ fn tile_info(
             let (inner_input, increment_tile_cols_log2) = take_bool_bit(input)?;
             input = inner_input;
             if increment_tile_cols_log2 {
-                tile_cols_log2 += 2;
+                tile_cols_log2 += 1;
             } else {
                 break;
             }
@@ -774,7 +774,7 @@ fn tile_info(
         let tile_width_sb = (sb_cols + (1 << tile_cols_log2) - 1) >> tile_cols_log2;
         for i in (0..sb_cols).step_by(tile_width_sb as usize) {
             // don't care about MiRowStarts
-            tile_cols = i;
+            tile_cols = i + 1;
         }
 
         let min_log2_tile_rows = max(min_log2_tiles - tile_cols_log2, 0);
@@ -783,7 +783,7 @@ fn tile_info(
             let (inner_input, increment_tile_rows_log2) = take_bool_bit(input)?;
             input = inner_input;
             if increment_tile_rows_log2 {
-                tile_rows_log2 += 2;
+                tile_rows_log2 += 1;
             } else {
                 break;
             }
@@ -791,7 +791,7 @@ fn tile_info(
         let tile_height_sb = (sb_rows + (1 << tile_rows_log2) - 1) >> tile_rows_log2;
         for i in (0..sb_rows).step_by(tile_height_sb as usize) {
             // don't care about MiRowStarts
-            tile_rows = i;
+            tile_rows = i + 1;
         }
     } else {
         let mut widest_tile_sb = 0;
@@ -821,6 +821,8 @@ fn tile_info(
         }
         tile_rows = i;
     }
+    assert!(tile_cols > 0);
+    assert!(tile_rows > 0);
 
     let tile_cols_log2 = tile_log2(1, tile_cols);
     let tile_rows_log2 = tile_log2(1, tile_rows);
