@@ -81,6 +81,8 @@ pub fn main() -> Result<()> {
             let mut seen_frame_header = false;
             let mut sequence_header = None;
             let mut previous_frame_header = None;
+            let mut ref_frame_idx = [0usize; REFS_PER_FRAME];
+            let mut ref_order_hint = [0u64; NUM_REF_FRAMES];
             let mut big_ref_order_hint = [0u64; NUM_REF_FRAMES];
             let mut big_ref_valid = [false; NUM_REF_FRAMES];
             let mut big_order_hints = [0u64; RefType::Last as usize + REFS_PER_FRAME];
@@ -96,6 +98,8 @@ pub fn main() -> Result<()> {
                     &mut sequence_header,
                     &mut previous_frame_header,
                     &mut grain_headers,
+                    &mut ref_frame_idx,
+                    &mut ref_order_hint,
                     &mut big_ref_order_hint,
                     &mut big_ref_valid,
                     &mut big_order_hints,
@@ -110,6 +114,7 @@ pub fn main() -> Result<()> {
                 return Ok(());
             }
 
+            dbg!(grain_headers.len());
             dbg!(&grain_headers);
 
             todo!("Aggregate the grain info and convert them to table format")
@@ -133,6 +138,8 @@ fn get_grain_headers<'a, 'b>(
     sequence_header: &'b mut Option<SequenceHeader>,
     previous_frame_header: &'b mut Option<FrameHeader>,
     grain_headers: &'b mut Vec<FilmGrainHeader>,
+    ref_frame_idx: &mut [usize; REFS_PER_FRAME],
+    ref_order_hint: &mut [u64; NUM_REF_FRAMES],
     big_ref_order_hint: &mut [u64; NUM_REF_FRAMES],
     big_ref_valid: &mut [bool; NUM_REF_FRAMES],
     big_order_hints: &mut [u64; RefType::Last as usize + REFS_PER_FRAME],
@@ -144,6 +151,8 @@ fn get_grain_headers<'a, 'b>(
             seen_frame_header,
             sequence_header.as_ref(),
             previous_frame_header.as_ref(),
+            ref_frame_idx,
+            ref_order_hint,
             big_ref_order_hint,
             big_ref_valid,
             big_order_hints,

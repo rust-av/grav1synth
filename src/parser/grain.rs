@@ -5,7 +5,6 @@ use super::{
     frame::FrameType,
     util::{take_bool_bit, BitInput},
 };
-use crate::parser::grain;
 
 /// The max number of luma scaling points for grain synthesis
 pub const GS_NUM_Y_POINTS: usize = 14;
@@ -16,16 +15,16 @@ pub const GS_NUM_Y_COEFFS: usize = 24;
 /// The max number of coefficients per chroma plane for grain synthesis
 pub const GS_NUM_UV_COEFFS: usize = 25;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum FilmGrainHeader {
     Disable,
-    CopyRefFrame(usize),
+    CopyRefFrame,
     UpdateGrain(FilmGrainParams),
 }
 
 /// Specifies parameters for enabling decoder-side grain synthesis for
 /// a segment of video from `start_time` to `end_time`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct FilmGrainParams {
     /// Random seed used for generating grain
     pub grain_seed: u16,
@@ -91,6 +90,31 @@ pub struct FilmGrainParams {
     pub clip_to_restricted_range: bool,
 }
 
+impl PartialEq for FilmGrainParams {
+    fn eq(&self, other: &Self) -> bool {
+        // We do not want to consider grain seed when comparing if these are equal
+        self.scaling_points_y == other.scaling_points_y
+            && self.scaling_points_cb == other.scaling_points_cb
+            && self.scaling_points_cr == other.scaling_points_cr
+            && self.scaling_shift == other.scaling_shift
+            && self.ar_coeff_lag == other.ar_coeff_lag
+            && self.ar_coeffs_y == other.ar_coeffs_y
+            && self.ar_coeffs_cb == other.ar_coeffs_cb
+            && self.ar_coeffs_cr == other.ar_coeffs_cr
+            && self.ar_coeff_shift == other.ar_coeff_shift
+            && self.cb_mult == other.cb_mult
+            && self.cb_luma_mult == other.cb_luma_mult
+            && self.cb_offset == other.cb_offset
+            && self.cr_mult == other.cr_mult
+            && self.cr_luma_mult == other.cr_luma_mult
+            && self.cr_offset == other.cr_offset
+            && self.chroma_scaling_from_luma == other.chroma_scaling_from_luma
+            && self.grain_scale_shift == other.grain_scale_shift
+            && self.overlap_flag == other.overlap_flag
+            && self.clip_to_restricted_range == other.clip_to_restricted_range
+    }
+}
+
 #[allow(clippy::fn_params_excessive_bools)]
 #[allow(clippy::too_many_lines)]
 pub fn film_grain_params(
@@ -118,11 +142,8 @@ pub fn film_grain_params(
         (input, true)
     };
     if !update_grain {
-        let (input, film_grain_params_ref_idx) = bit_parsers::take(3usize)(input)?;
-        return Ok((
-            input,
-            FilmGrainHeader::CopyRefFrame(film_grain_params_ref_idx),
-        ));
+        let (input, _film_grain_params_ref_idx): (_, u8) = bit_parsers::take(3usize)(input)?;
+        return Ok((input, FilmGrainHeader::CopyRefFrame));
     }
 
     let (mut input, num_y_points) = bit_parsers::take(4usize)(input)?;
