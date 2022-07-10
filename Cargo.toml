@@ -7,7 +7,7 @@ license = "MIT"
 repository = "https://git.bluefalcon.cc/soichiro/grav1synth"
 description = "Grain Synth analyzer and editor for AV1 files"
 keywords = ["video", "multimedia", "av1"]
-categories = ["multimedia", "multimedia:video", "multimedia:encoding"]
+categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 
 [dependencies]
 anyhow = "1.0.55"
