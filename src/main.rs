@@ -138,9 +138,10 @@ pub fn main() -> Result<()> {
             let frame_rate = parser.get_video_stream()?.avg_frame_rate();
             let grain_tables = aggregate_grain_headers(grain_headers, frame_rate);
 
-            let mut output_file = BufWriter::new(File::open(&output)?);
+            let mut output_file = BufWriter::new(File::create(&output)?);
+            writeln!(&mut output_file, "filmgrn1")?;
             for segment in grain_tables {
-                todo!("Write");
+                write_film_grain_segment(&segment, &mut output_file)?;
             }
             output_file.flush()?;
 
@@ -153,6 +154,73 @@ pub fn main() -> Result<()> {
         } => todo!(),
         Commands::Remove { input, output } => todo!(),
     }
+
+    Ok(())
+}
+
+fn write_film_grain_segment(
+    segment: &GrainTableSegment,
+    output: &mut BufWriter<File>,
+) -> anyhow::Result<()> {
+    let params = &segment.grain_params;
+
+    writeln!(
+        output,
+        "E {} {} 1 {} 1",
+        segment.start_time, segment.end_time, params.grain_seed,
+    )?;
+    writeln!(
+        output,
+        "\tp {} {} {} {} {} {} {} {} {} {} {} {}",
+        params.ar_coeff_lag,
+        params.ar_coeff_shift,
+        params.grain_scale_shift,
+        params.scaling_shift,
+        u8::from(params.chroma_scaling_from_luma),
+        u8::from(params.overlap_flag),
+        params.cb_mult,
+        params.cb_luma_mult,
+        params.cb_offset,
+        params.cr_mult,
+        params.cr_luma_mult,
+        params.cr_offset
+    )?;
+
+    write!(output, "\tsY {} ", params.scaling_points_y.len())?;
+    for point in &params.scaling_points_y {
+        write!(output, " {} {}", point[0], point[1])?;
+    }
+    writeln!(output)?;
+
+    write!(output, "\tsCb {}", params.scaling_points_cb.len())?;
+    for point in &params.scaling_points_cb {
+        write!(output, " {} {}", point[0], point[1])?;
+    }
+    writeln!(output)?;
+
+    write!(output, "\tsCr {}", params.scaling_points_cr.len())?;
+    for point in &params.scaling_points_cr {
+        write!(output, " {} {}", point[0], point[1])?;
+    }
+    writeln!(output)?;
+
+    write!(output, "\tcY")?;
+    for coeff in &params.ar_coeffs_y {
+        write!(output, " {}", *coeff)?;
+    }
+    writeln!(output)?;
+
+    write!(output, "\tcCb")?;
+    for coeff in &params.ar_coeffs_cb {
+        write!(output, " {}", *coeff)?;
+    }
+    writeln!(output)?;
+
+    write!(output, "\tcCr")?;
+    for coeff in &params.ar_coeffs_cr {
+        write!(output, " {}", *coeff)?;
+    }
+    writeln!(output)?;
 
     Ok(())
 }

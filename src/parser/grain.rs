@@ -208,6 +208,8 @@ pub fn film_grain_params(
             ar_coeffs_cb.push((coeff_plus_128 - 128) as i8);
             input = inner_input;
         }
+    } else {
+        ar_coeffs_cb.push(0);
     }
     if chroma_scaling_from_luma || num_cr_points > 0 {
         for _ in 0..num_pos_chroma {
@@ -215,6 +217,8 @@ pub fn film_grain_params(
             ar_coeffs_cr.push((coeff_plus_128 - 128) as i8);
             input = inner_input;
         }
+    } else {
+        ar_coeffs_cr.push(0);
     }
 
     let (input, ar_coeff_shift_minus_6): (_, u8) = bit_parsers::take(2usize)(input)?;
