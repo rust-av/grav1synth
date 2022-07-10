@@ -77,8 +77,8 @@ pub fn parse_frame_obu<'a, 'b>(
         previous_frame_header,
     )?;
     let ref_frame_header = frame_header.as_ref().or(previous_frame_header).unwrap();
-    // A reminder that obu size is in bits
-    let size = size - (input_len - input.len()) * 8;
+    // A reminder that obu size is in bytes
+    let size = size - (input_len - input.len());
     let (input, _) = parse_tile_group_obu(
         input,
         size,
@@ -729,6 +729,7 @@ const fn motion_field_estimation(input: BitInput) -> IResult<BitInput, ()> {
     Ok((input, ()))
 }
 
+#[allow(clippy::too_many_lines)]
 fn tile_info(
     input: BitInput,
     use_128x128_superblock: bool,
@@ -751,7 +752,7 @@ fn tile_info(
     let max_tile_area_sb = MAX_TILE_AREA >> (2u8 * sb_size);
     let min_log2_tile_cols = tile_log2(max_tile_width_sb, sb_cols);
     let max_log2_tile_cols = tile_log2(1, min(sb_cols, MAX_TILE_COLS));
-    let _max_log2_tile_rows = tile_log2(1, min(sb_rows, MAX_TILE_ROWS));
+    let max_log2_tile_rows = tile_log2(1, min(sb_rows, MAX_TILE_ROWS));
     let min_log2_tiles = max(
         min_log2_tile_cols,
         tile_log2(max_tile_area_sb, sb_rows * sb_cols),
@@ -760,7 +761,7 @@ fn tile_info(
     let mut tile_cols = 0;
 
     let (mut input, uniform_tile_spacing_flag) = take_bool_bit(input)?;
-    if uniform_tile_spacing_flag {
+    let (tile_cols_log2, tile_rows_log2) = if uniform_tile_spacing_flag {
         let mut tile_cols_log2 = min_log2_tile_cols;
         while tile_cols_log2 < max_log2_tile_cols {
             let (inner_input, increment_tile_cols_log2) = take_bool_bit(input)?;
@@ -777,9 +778,9 @@ fn tile_info(
             tile_cols = i + 1;
         }
 
-        let min_log2_tile_rows = max(min_log2_tiles - tile_cols_log2, 0);
+        let min_log2_tile_rows = max(min_log2_tiles as i32 - tile_cols_log2 as i32, 0i32) as u32;
         let mut tile_rows_log2 = min_log2_tile_rows;
-        while tile_rows_log2 < min_log2_tile_rows {
+        while tile_rows_log2 < max_log2_tile_rows {
             let (inner_input, increment_tile_rows_log2) = take_bool_bit(input)?;
             input = inner_input;
             if increment_tile_rows_log2 {
@@ -793,6 +794,8 @@ fn tile_info(
             // don't care about MiRowStarts
             tile_rows = i + 1;
         }
+
+        (tile_cols_log2, tile_rows_log2)
     } else {
         let mut widest_tile_sb = 0;
         let mut start_sb = 0;
@@ -820,12 +823,15 @@ fn tile_info(
             i += 1;
         }
         tile_rows = i;
-    }
+
+        let tile_cols_log2 = tile_log2(1, tile_cols);
+        let tile_rows_log2 = tile_log2(1, tile_rows);
+
+        (tile_cols_log2, tile_rows_log2)
+    };
     assert!(tile_cols > 0);
     assert!(tile_rows > 0);
 
-    let tile_cols_log2 = tile_log2(1, tile_cols);
-    let tile_rows_log2 = tile_log2(1, tile_rows);
     let input = if tile_cols_log2 > 0 || tile_rows_log2 > 0 {
         let (input, _context_update_tile_id): (_, u64) =
             bit_parsers::take(tile_rows_log2 + tile_cols_log2)(input)?;
@@ -899,6 +905,7 @@ fn quantization_params(
         } else {
             (input, qm_u)
         };
+
         input
     } else {
         input
@@ -1059,9 +1066,10 @@ fn loop_filter_params(
         input
     };
     let (input, _loop_filter_sharpness): (_, u8) = bit_parsers::take(3usize)(input)?;
-    let (input, loop_filter_delta_enabled) = take_bool_bit(input)?;
+    let (mut input, loop_filter_delta_enabled) = take_bool_bit(input)?;
     if loop_filter_delta_enabled {
-        let (mut input, loop_filter_delta_update) = take_bool_bit(input)?;
+        let (inner_input, loop_filter_delta_update) = take_bool_bit(input)?;
+        input = inner_input;
         if loop_filter_delta_update {
             for _ in 0..TOTAL_REFS_PER_FRAME {
                 let (inner_input, update_ref_delta) = take_bool_bit(input)?;
@@ -1098,7 +1106,7 @@ fn cdef_params(
         return Ok((input, ()));
     }
 
-    let (input, _cdef_damping_minus_1): (_, u8) = bit_parsers::take(2usize)(input)?;
+    let (input, _cdef_damping_minus_3): (_, u8) = bit_parsers::take(2usize)(input)?;
     let (mut input, cdef_bits): (_, u8) = bit_parsers::take(2usize)(input)?;
     for _ in 0..(1usize << cdef_bits) {
         let (inner_input, _cdef_y_pri_str): (_, u8) = bit_parsers::take(4usize)(input)?;

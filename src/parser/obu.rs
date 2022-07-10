@@ -29,6 +29,7 @@ pub fn parse_obu<'a, 'b>(
             *size - 1 - if obu_header.extension.is_some() { 1 } else { 0 },
         )
     };
+    *size = obu_size;
 
     if obu_header.obu_type != ObuType::SequenceHeader
         && obu_header.obu_type != ObuType::TemporalDelimiter
@@ -55,7 +56,7 @@ pub fn parse_obu<'a, 'b>(
         ObuType::Frame => {
             let (input, header) = parse_frame_obu(
                 input,
-                *size,
+                obu_size,
                 seen_frame_header,
                 sequence_header.unwrap(),
                 obu_header,

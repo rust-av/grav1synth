@@ -134,8 +134,8 @@ pub fn film_grain_params(
         input = inner_input;
     }
 
-    let mut scaling_points_cb = ArrayVec::new();
-    let mut scaling_points_cr = ArrayVec::new();
+    let mut scaling_points_cb: ArrayVec<_, GS_NUM_UV_POINTS> = ArrayVec::new();
+    let mut scaling_points_cr: ArrayVec<_, GS_NUM_UV_POINTS> = ArrayVec::new();
     let (input, chroma_scaling_from_luma) = if monochrome {
         (input, false)
     } else {

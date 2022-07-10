@@ -23,7 +23,7 @@ pub fn parse_tile_group_obu<'a, 'b>(
             (input, false)
         };
         if num_tiles == 1 || !tile_start_and_end_present {
-            Ok((input, (0, num_tiles - 1)))
+            Ok((input, (num_tiles, num_tiles - 1)))
         } else {
             let tile_bits = tile_cols_log2 + tile_rows_log2;
             let (input, _tg_start): (_, u32) = bit_parsers::take(tile_bits)(input)?;
