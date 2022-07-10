@@ -1,10 +1,10 @@
 [package]
 name = "grav1synth"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2021"
 rust-version = "1.59.0"
 license = "MIT"
-repository = "https://gitlab.com/shssoichiro/grav1synth"
+repository = "https://git.bluefalcon.cc/soichiro/grav1synth"
 description = "Grain Synth analyzer and editor for AV1 files"
 keywords = ["video", "multimedia", "av1"]
 categories = ["multimedia", "multimedia:video", "multimedia:encoding"]
