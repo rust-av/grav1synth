@@ -51,13 +51,20 @@ pub mod parser {
 }
 pub mod reader;
 
-use std::{env, path::PathBuf};
+use std::{
+    env,
+    fs::File,
+    io::{BufWriter, Write},
+    path::PathBuf,
+};
 
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
+use dialoguer::Confirm;
+use ffmpeg::Rational;
 use parser::{
     frame::{FrameHeader, RefType, NUM_REF_FRAMES, REFS_PER_FRAME},
-    grain::FilmGrainHeader,
+    grain::{FilmGrainHeader, FilmGrainParams},
     sequence::SequenceHeader,
 };
 
@@ -76,6 +83,18 @@ pub fn main() -> Result<()> {
 
     match args.command {
         Commands::Inspect { input, output } => {
+            if output.exists()
+                && !Confirm::new()
+                    .with_prompt(format!(
+                        "File {} exists. Overwrite?",
+                        output.to_string_lossy()
+                    ))
+                    .interact()?
+            {
+                eprintln!("Not overwriting existing file. Exiting.");
+                return Ok(());
+            }
+
             let mut parser = BitstreamReader::open(&input)?;
             let mut size = 0usize;
             let mut seen_frame_header = false;
@@ -114,10 +133,18 @@ pub fn main() -> Result<()> {
                 return Ok(());
             }
 
-            dbg!(grain_headers.len());
-            dbg!(&grain_headers);
+            // As you can expect, this may lead to odd behaviors with VFR.
+            // VFR is cursed.
+            let frame_rate = parser.get_video_stream()?.avg_frame_rate();
+            let grain_tables = aggregate_grain_headers(grain_headers, frame_rate);
 
-            todo!("Aggregate the grain info and convert them to table format")
+            let mut output_file = BufWriter::new(File::open(&output)?);
+            for segment in grain_tables {
+                todo!("Write");
+            }
+            output_file.flush()?;
+
+            eprintln!("Done, wrote grain table to {}", output.to_string_lossy());
         }
         Commands::Apply {
             input,
@@ -128,6 +155,13 @@ pub fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct GrainTableSegment {
+    pub start_time: u64,
+    pub end_time: u64,
+    pub grain_params: FilmGrainParams,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -175,6 +209,60 @@ fn get_grain_headers<'a, 'b>(
     }
 
     Ok(())
+}
+
+fn aggregate_grain_headers(
+    grain_headers: Vec<FilmGrainHeader>,
+    frame_rate: Rational,
+) -> Vec<GrainTableSegment> {
+    let time_per_packet: f64 = frame_rate.invert().into();
+    let mut cur_packet_start: u64 = 0;
+    let mut cur_packet_end_f: f64 = time_per_packet;
+    let mut cur_packet_end: u64 = cur_packet_end_f.ceil() as u64;
+
+    grain_headers.into_iter().fold(Vec::new(), |mut acc, elem| {
+        let prev_packet_has_grain = acc.last().map_or(false, |last: &GrainTableSegment| {
+            last.end_time == cur_packet_start
+        });
+        if prev_packet_has_grain {
+            match elem {
+                FilmGrainHeader::Disable => {
+                    // Do nothing. This will disable film grain for this
+                    // and future frames.
+                }
+                FilmGrainHeader::CopyRefFrame => {
+                    // Increment the end time of the current table segment.
+                    let cur_segment = acc.last_mut().expect("prev_packet_has_grain is true");
+                    cur_segment.end_time = cur_packet_end;
+                }
+                FilmGrainHeader::UpdateGrain(grain_params) => {
+                    let cur_segment = acc.last_mut().expect("prev_packet_has_grain is true");
+                    if grain_params == cur_segment.grain_params {
+                        // Increment the end time of the current table segment.
+                        cur_segment.end_time = cur_packet_end;
+                    } else {
+                        // The grain params changed, so we have to make a new segment.
+                        acc.push(GrainTableSegment {
+                            start_time: cur_packet_start,
+                            end_time: cur_packet_end,
+                            grain_params,
+                        });
+                    }
+                }
+            };
+        } else if let FilmGrainHeader::UpdateGrain(grain_params) = elem {
+            acc.push(GrainTableSegment {
+                start_time: cur_packet_start,
+                end_time: cur_packet_end,
+                grain_params,
+            });
+        }
+
+        cur_packet_start = cur_packet_end;
+        cur_packet_end_f += time_per_packet;
+        cur_packet_end = cur_packet_end_f.ceil() as u64;
+        acc
+    })
 }
 
 #[derive(Parser, Debug)]
