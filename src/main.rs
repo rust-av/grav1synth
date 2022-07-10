@@ -344,6 +344,10 @@ fn get_grain_headers<'a, 'b>(
     Ok(())
 }
 
+// I don't know why this is the base unit for a timestamp but it is. 1/10000000
+// of a second.
+const TIMESTAMP_BASE_UNIT: u64 = 10_000_000;
+
 fn aggregate_grain_headers(
     grain_headers: Vec<FilmGrainHeader>,
     frame_rate: Rational,
@@ -351,7 +355,7 @@ fn aggregate_grain_headers(
     let time_per_packet: f64 = frame_rate.invert().into();
     let mut cur_packet_start: u64 = 0;
     let mut cur_packet_end_f: f64 = time_per_packet;
-    let mut cur_packet_end: u64 = cur_packet_end_f.ceil() as u64;
+    let mut cur_packet_end: u64 = cur_packet_end_f.ceil() as u64 * TIMESTAMP_BASE_UNIT;
 
     grain_headers.into_iter().fold(Vec::new(), |mut acc, elem| {
         let prev_packet_has_grain = acc.last().map_or(false, |last: &GrainTableSegment| {
@@ -393,7 +397,7 @@ fn aggregate_grain_headers(
 
         cur_packet_start = cur_packet_end;
         cur_packet_end_f += time_per_packet;
-        cur_packet_end = cur_packet_end_f.ceil() as u64;
+        cur_packet_end = cur_packet_end_f.ceil() as u64 * TIMESTAMP_BASE_UNIT;
         acc
     })
 }
