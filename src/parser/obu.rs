@@ -6,17 +6,21 @@ use nom::{
 use num_enum::TryFromPrimitive;
 
 use super::{
-    frame::{parse_frame_obu, FrameHeader},
+    frame::{parse_frame_obu, FrameHeader, RefType, NUM_REF_FRAMES, REFS_PER_FRAME},
     sequence::{parse_sequence_header, SequenceHeader},
     util::{leb128, take_bool_bit, take_zero_bit, BitInput},
 };
 
+#[allow(clippy::too_many_arguments)]
 pub fn parse_obu<'a, 'b>(
     input: &'a [u8],
     size: &'b mut usize,
     seen_frame_header: &'b mut bool,
     sequence_header: Option<&'b SequenceHeader>,
     previous_frame_header: Option<&'b FrameHeader>,
+    big_ref_order_hint: &mut [u64; NUM_REF_FRAMES],
+    big_ref_valid: &mut [bool; NUM_REF_FRAMES],
+    big_order_hints: &mut [u64; RefType::Last as usize + REFS_PER_FRAME],
 ) -> IResult<&'a [u8], Option<Obu>> {
     let (input, obu_header) = parse_obu_header(input)?;
     let (input, obu_size) = if obu_header.has_size_field {
@@ -61,6 +65,9 @@ pub fn parse_obu<'a, 'b>(
                 sequence_header.unwrap(),
                 obu_header,
                 previous_frame_header,
+                big_ref_order_hint,
+                big_ref_valid,
+                big_order_hints,
             )?;
             Ok((input, header.map(Obu::FrameHeader)))
         }

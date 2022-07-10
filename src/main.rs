@@ -55,7 +55,11 @@ use std::{env, path::PathBuf};
 
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
-use parser::{frame::FrameHeader, grain::FilmGrainHeader, sequence::SequenceHeader};
+use parser::{
+    frame::{FrameHeader, RefType, NUM_REF_FRAMES, REFS_PER_FRAME},
+    grain::FilmGrainHeader,
+    sequence::SequenceHeader,
+};
 
 use crate::{
     parser::obu::{parse_obu, Obu},
@@ -77,6 +81,9 @@ pub fn main() -> Result<()> {
             let mut seen_frame_header = false;
             let mut sequence_header = None;
             let mut previous_frame_header = None;
+            let mut big_ref_order_hint = [0u64; NUM_REF_FRAMES];
+            let mut big_ref_valid = [false; NUM_REF_FRAMES];
+            let mut big_order_hints = [0u64; RefType::Last as usize + REFS_PER_FRAME];
             let mut grain_headers = Vec::new();
             while let Some(packet) = parser.read_packet() {
                 get_grain_headers(
@@ -86,6 +93,9 @@ pub fn main() -> Result<()> {
                     &mut sequence_header,
                     &mut previous_frame_header,
                     &mut grain_headers,
+                    &mut big_ref_order_hint,
+                    &mut big_ref_valid,
+                    &mut big_order_hints,
                 )?;
             }
 
@@ -112,6 +122,7 @@ pub fn main() -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn get_grain_headers<'a, 'b>(
     mut input: &'a [u8],
     size: &'b mut usize,
@@ -119,6 +130,9 @@ fn get_grain_headers<'a, 'b>(
     sequence_header: &'b mut Option<SequenceHeader>,
     previous_frame_header: &'b mut Option<FrameHeader>,
     grain_headers: &'b mut Vec<FilmGrainHeader>,
+    big_ref_order_hint: &mut [u64; NUM_REF_FRAMES],
+    big_ref_valid: &mut [bool; NUM_REF_FRAMES],
+    big_order_hints: &mut [u64; RefType::Last as usize + REFS_PER_FRAME],
 ) -> Result<()> {
     loop {
         let (inner_input, obu) = parse_obu(
@@ -127,6 +141,9 @@ fn get_grain_headers<'a, 'b>(
             seen_frame_header,
             sequence_header.as_ref(),
             previous_frame_header.as_ref(),
+            big_ref_order_hint,
+            big_ref_valid,
+            big_order_hints,
         )
         .map_err(|e| anyhow!("{}", e.to_string()))?;
         input = inner_input;

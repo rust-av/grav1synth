@@ -16,9 +16,9 @@ use super::{
     util::{ns, su, take_bool_bit, BitInput},
 };
 
-const REFS_PER_FRAME: usize = 7;
+pub const REFS_PER_FRAME: usize = 7;
 const TOTAL_REFS_PER_FRAME: usize = 8;
-const NUM_REF_FRAMES: usize = 8;
+pub const NUM_REF_FRAMES: usize = 8;
 const REFRESH_ALL_FRAMES: u8 = 0b1111_1111;
 const PRIMARY_REF_NONE: u8 = 7;
 
@@ -60,6 +60,7 @@ pub struct FrameHeader {
     pub tile_info: TileInfo,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn parse_frame_obu<'a, 'b>(
     input: &'a [u8],
     size: usize,
@@ -67,6 +68,9 @@ pub fn parse_frame_obu<'a, 'b>(
     sequence_headers: &'b SequenceHeader,
     obu_headers: ObuHeader,
     previous_frame_header: Option<&'b FrameHeader>,
+    big_ref_order_hint: &mut [u64; NUM_REF_FRAMES],
+    big_ref_valid: &mut [bool; NUM_REF_FRAMES],
+    big_order_hints: &mut [u64; RefType::Last as usize + REFS_PER_FRAME],
 ) -> IResult<&'a [u8], Option<FrameHeader>> {
     let input_len = input.len();
     let (input, frame_header) = parse_frame_header(
@@ -75,6 +79,9 @@ pub fn parse_frame_obu<'a, 'b>(
         sequence_headers,
         obu_headers,
         previous_frame_header,
+        big_ref_order_hint,
+        big_ref_valid,
+        big_order_hints,
     )?;
     let ref_frame_header = frame_header.as_ref().or(previous_frame_header).unwrap();
     // A reminder that obu size is in bytes
@@ -99,12 +106,16 @@ pub fn parse_frame_obu<'a, 'b>(
 /// but the film grain params are of course the very last item,
 /// and we don't know how many bits precede it, so we have to parse
 /// THE WHOLE THING before we get the film grain params.
+#[allow(clippy::too_many_arguments)]
 fn parse_frame_header<'a, 'b>(
     input: &'a [u8],
     seen_frame_header: &'b mut bool,
     sequence_headers: &'b SequenceHeader,
     obu_headers: ObuHeader,
     previous_frame_header: Option<&'b FrameHeader>,
+    big_ref_order_hint: &mut [u64; NUM_REF_FRAMES],
+    big_ref_valid: &mut [bool; NUM_REF_FRAMES],
+    big_order_hints: &mut [u64; RefType::Last as usize + REFS_PER_FRAME],
 ) -> IResult<&'a [u8], Option<FrameHeader>> {
     if *seen_frame_header {
         return Ok((input, None));
@@ -112,8 +123,15 @@ fn parse_frame_header<'a, 'b>(
 
     *seen_frame_header = true;
     bits(|input| {
-        let (input, header) =
-            uncompressed_header(input, sequence_headers, obu_headers, previous_frame_header)?;
+        let (input, header) = uncompressed_header(
+            input,
+            sequence_headers,
+            obu_headers,
+            previous_frame_header,
+            big_ref_order_hint,
+            big_ref_valid,
+            big_order_hints,
+        )?;
         if header.show_existing_frame {
             let (input, _) = decode_frame_wrapup(input)?;
             *seen_frame_header = false;
@@ -133,6 +151,9 @@ fn uncompressed_header<'a, 'b>(
     sequence_headers: &'b SequenceHeader,
     obu_headers: ObuHeader,
     previous_frame_header: Option<&'b FrameHeader>,
+    big_ref_order_hint: &mut [u64; NUM_REF_FRAMES],
+    big_ref_valid: &mut [bool; NUM_REF_FRAMES],
+    big_order_hints: &mut [u64; RefType::Last as usize + REFS_PER_FRAME],
 ) -> IResult<BitInput<'a>, FrameHeader> {
     let id_len = sequence_headers.frame_id_numbers_present.then(|| {
         sequence_headers.additional_frame_id_len_minus_1
@@ -203,18 +224,13 @@ fn uncompressed_header<'a, 'b>(
             )
         };
 
-    let mut big_ref_order_hint: ArrayVec<u64, NUM_REF_FRAMES> = ArrayVec::new();
-    let mut big_ref_valid: ArrayVec<bool, NUM_REF_FRAMES> = ArrayVec::new();
-    let mut big_order_hints: ArrayVec<u64, { RefType::Last as usize + REFS_PER_FRAME }> =
-        ArrayVec::new();
     if frame_type == FrameType::Key && show_frame {
-        for _ in 0..NUM_REF_FRAMES {
-            big_ref_valid.push(false);
-            big_ref_order_hint.push(0);
+        for i in 0..NUM_REF_FRAMES {
+            big_ref_valid[i] = false;
+            big_ref_order_hint[i] = 0;
         }
-        big_order_hints.push(0);
-        for _ in 0..REFS_PER_FRAME {
-            big_order_hints.push(0);
+        for i in 0..REFS_PER_FRAME {
+            big_order_hints[i + RefType::Last as usize] = 0;
         }
     }
 
@@ -505,7 +521,7 @@ fn uncompressed_header<'a, 'b>(
         reference_select,
         sequence_headers.order_hint_bits,
         order_hint,
-        &big_ref_order_hint,
+        big_ref_order_hint,
         &ref_frame_idx,
     )?;
     let (input, _allow_warped_motion) = if frame_type.is_intra()
@@ -1304,7 +1320,7 @@ fn global_motion_params(input: BitInput, frame_is_intra: bool) -> IResult<BitInp
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 #[allow(dead_code)]
-enum RefType {
+pub enum RefType {
     Intra = 0,
     Last = 1,
     Last2 = 2,
