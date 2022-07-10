@@ -73,6 +73,7 @@ use crate::{
     reader::BitstreamReader,
 };
 
+#[allow(clippy::too_many_lines)]
 pub fn main() -> Result<()> {
     if env::var("RUST_LOG").is_err() {
         env::set_var("RUST_LOG", "error,grav1synth=info");
@@ -82,8 +83,21 @@ pub fn main() -> Result<()> {
     let args = Args::parse();
 
     match args.command {
-        Commands::Inspect { input, output } => {
+        Commands::Inspect {
+            input,
+            output,
+            overwrite,
+        } => {
+            if input == output {
+                eprintln!(
+                    "Input and output paths are the same. This is probably a typo, because this \
+                     would overwrite your input. Exiting."
+                );
+                return Ok(());
+            }
+
             if output.exists()
+                && !overwrite
                 && !Confirm::new()
                     .with_prompt(format!(
                         "File {} exists. Overwrite?",
@@ -150,9 +164,60 @@ pub fn main() -> Result<()> {
         Commands::Apply {
             input,
             output,
+            overwrite,
             grain,
-        } => todo!(),
-        Commands::Remove { input, output } => todo!(),
+        } => {
+            if input == output {
+                eprintln!(
+                    "Input and output paths are the same. This is probably a typo, because this \
+                     would overwrite your input. Exiting."
+                );
+                return Ok(());
+            }
+
+            if output.exists()
+                && !overwrite
+                && !Confirm::new()
+                    .with_prompt(format!(
+                        "File {} exists. Overwrite?",
+                        output.to_string_lossy()
+                    ))
+                    .interact()?
+            {
+                eprintln!("Not overwriting existing file. Exiting.");
+                return Ok(());
+            }
+
+            todo!()
+        }
+        Commands::Remove {
+            input,
+            output,
+            overwrite,
+        } => {
+            if input == output {
+                eprintln!(
+                    "Input and output paths are the same. This is probably a typo, because this \
+                     would overwrite your input. Exiting."
+                );
+                return Ok(());
+            }
+
+            if output.exists()
+                && !overwrite
+                && !Confirm::new()
+                    .with_prompt(format!(
+                        "File {} exists. Overwrite?",
+                        output.to_string_lossy()
+                    ))
+                    .interact()?
+            {
+                eprintln!("Not overwriting existing file. Exiting.");
+                return Ok(());
+            }
+
+            todo!()
+        }
     }
 
     Ok(())
@@ -350,6 +415,9 @@ pub enum Commands {
         /// The path to the output film grain table.
         #[clap(long, short, value_parser)]
         output: PathBuf,
+        /// Overwrite the output file without prompting.
+        #[clap(long, short = 'y')]
+        overwrite: bool,
     },
     /// Applies film grain from a table file to a given AV1 video,
     /// and outputs it at a given `output` path.
@@ -360,6 +428,9 @@ pub enum Commands {
         /// The path to write the grain-synthed AV1 file to.
         #[clap(long, short, value_parser)]
         output: PathBuf,
+        /// Overwrite the output file without prompting.
+        #[clap(long, short = 'y')]
+        overwrite: bool,
         /// The path to the input film grain table.
         #[clap(long, short, value_parser)]
         grain: PathBuf,
@@ -373,5 +444,8 @@ pub enum Commands {
         /// The path to write the non-grain-synthed AV1 file to.
         #[clap(long, short, value_parser)]
         output: PathBuf,
+        /// Overwrite the output file without prompting.
+        #[clap(long, short = 'y')]
+        overwrite: bool,
     },
 }
