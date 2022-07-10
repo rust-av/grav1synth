@@ -6,7 +6,14 @@ use nom::{
 use num_enum::TryFromPrimitive;
 
 use super::{
-    frame::{parse_frame_obu, FrameHeader, RefType, NUM_REF_FRAMES, REFS_PER_FRAME},
+    frame::{
+        parse_frame_header,
+        parse_frame_obu,
+        FrameHeader,
+        RefType,
+        NUM_REF_FRAMES,
+        REFS_PER_FRAME,
+    },
     sequence::{parse_sequence_header, SequenceHeader},
     util::{leb128, take_bool_bit, take_zero_bit, BitInput},
 };
@@ -71,7 +78,20 @@ pub fn parse_obu<'a, 'b>(
             )?;
             Ok((input, header.map(Obu::FrameHeader)))
         }
-        ObuType::FrameHeader | ObuType::TileGroup => {
+        ObuType::FrameHeader => {
+            let (input, header) = parse_frame_header(
+                input,
+                seen_frame_header,
+                sequence_header.unwrap(),
+                obu_header,
+                previous_frame_header,
+                big_ref_order_hint,
+                big_ref_valid,
+                big_order_hints,
+            )?;
+            Ok((input, header.map(Obu::FrameHeader)))
+        }
+        ObuType::TileGroup => {
             // I'm adding an assert here explicitly because I'm not sure if the spec
             // actually requires this. I think it does. But it's 681 pages.
             unreachable!("This should only be called from within a frame OBU.");

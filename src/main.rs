@@ -86,6 +86,9 @@ pub fn main() -> Result<()> {
             let mut big_order_hints = [0u64; RefType::Last as usize + REFS_PER_FRAME];
             let mut grain_headers = Vec::new();
             while let Some(packet) = parser.read_packet() {
+                if packet.data().is_none() {
+                    break;
+                }
                 get_grain_headers(
                     packet.data().unwrap(),
                     &mut size,

@@ -107,7 +107,7 @@ pub fn parse_frame_obu<'a, 'b>(
 /// and we don't know how many bits precede it, so we have to parse
 /// THE WHOLE THING before we get the film grain params.
 #[allow(clippy::too_many_arguments)]
-fn parse_frame_header<'a, 'b>(
+pub fn parse_frame_header<'a, 'b>(
     input: &'a [u8],
     seen_frame_header: &'b mut bool,
     sequence_headers: &'b SequenceHeader,
