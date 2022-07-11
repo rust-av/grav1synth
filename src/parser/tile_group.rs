@@ -1,5 +1,6 @@
 use nom::{
     bits::{bits, complete as bit_parsers},
+    error::VerboseError,
     IResult,
 };
 
@@ -13,7 +14,7 @@ pub fn parse_tile_group_obu<'a, 'b>(
     tile_rows: u32,
     tile_cols_log2: u32,
     tile_rows_log2: u32,
-) -> IResult<&'a [u8], ()> {
+) -> IResult<&'a [u8], (), VerboseError<&'a [u8]>> {
     // Tile group header--we only need to parse this part
     let (_, (num_tiles, tg_end)) = bits(|input| {
         let num_tiles = tile_cols * tile_rows;

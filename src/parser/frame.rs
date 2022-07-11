@@ -2,6 +2,7 @@ use std::cmp::{max, min};
 
 use nom::{
     bits::{bits, complete as bit_parsers},
+    error::{context, VerboseError},
     IResult,
 };
 use num_enum::TryFromPrimitive;
@@ -72,32 +73,36 @@ pub fn parse_frame_obu<'a, 'b>(
     big_ref_order_hint: &mut [u64; NUM_REF_FRAMES],
     big_ref_valid: &mut [bool; NUM_REF_FRAMES],
     big_order_hints: &mut [u64; RefType::Last as usize + REFS_PER_FRAME],
-) -> IResult<&'a [u8], Option<FrameHeader>> {
+) -> IResult<&'a [u8], Option<FrameHeader>, VerboseError<&'a [u8]>> {
     let input_len = input.len();
-    let (input, frame_header) = parse_frame_header(
-        input,
-        seen_frame_header,
-        sequence_headers,
-        obu_headers,
-        previous_frame_header,
-        ref_frame_idx,
-        ref_order_hint,
-        big_ref_order_hint,
-        big_ref_valid,
-        big_order_hints,
-    )?;
+    let (input, frame_header) = context("Failed parsing frame header", |input| {
+        parse_frame_header(
+            input,
+            seen_frame_header,
+            sequence_headers,
+            obu_headers,
+            previous_frame_header,
+            ref_frame_idx,
+            ref_order_hint,
+            big_ref_order_hint,
+            big_ref_valid,
+            big_order_hints,
+        )
+    })(input)?;
     let ref_frame_header = frame_header.as_ref().or(previous_frame_header).unwrap();
     // A reminder that obu size is in bytes
     let size = size - (input_len - input.len());
-    let (input, _) = parse_tile_group_obu(
-        input,
-        size,
-        seen_frame_header,
-        ref_frame_header.tile_info.tile_cols,
-        ref_frame_header.tile_info.tile_rows,
-        ref_frame_header.tile_info.tile_cols_log2,
-        ref_frame_header.tile_info.tile_rows_log2,
-    )?;
+    let (input, _) = context("Failed parsing tile group obu", |input| {
+        parse_tile_group_obu(
+            input,
+            size,
+            seen_frame_header,
+            ref_frame_header.tile_info.tile_cols,
+            ref_frame_header.tile_info.tile_rows,
+            ref_frame_header.tile_info.tile_cols_log2,
+            ref_frame_header.tile_info.tile_rows_log2,
+        )
+    })(input)?;
     Ok((input, frame_header))
 }
 
@@ -121,7 +126,7 @@ pub fn parse_frame_header<'a, 'b>(
     big_ref_order_hint: &mut [u64; NUM_REF_FRAMES],
     big_ref_valid: &mut [bool; NUM_REF_FRAMES],
     big_order_hints: &mut [u64; RefType::Last as usize + REFS_PER_FRAME],
-) -> IResult<&'a [u8], Option<FrameHeader>> {
+) -> IResult<&'a [u8], Option<FrameHeader>, VerboseError<&'a [u8]>> {
     if *seen_frame_header {
         return Ok((input, None));
     }
@@ -164,7 +169,7 @@ fn uncompressed_header<'a, 'b>(
     big_ref_order_hint: &mut [u64; NUM_REF_FRAMES],
     big_ref_valid: &mut [bool; NUM_REF_FRAMES],
     big_order_hints: &mut [u64; RefType::Last as usize + REFS_PER_FRAME],
-) -> IResult<BitInput<'a>, FrameHeader> {
+) -> IResult<BitInput<'a>, FrameHeader, VerboseError<BitInput<'a>>> {
     let id_len = sequence_headers.frame_id_numbers_present.then(|| {
         sequence_headers.additional_frame_id_len_minus_1
             + sequence_headers.delta_frame_id_len_minus_2
@@ -579,7 +584,7 @@ impl FrameType {
 
 #[inline(always)]
 #[allow(clippy::unnecessary_wraps)]
-const fn decode_frame_wrapup(input: BitInput) -> IResult<BitInput, ()> {
+const fn decode_frame_wrapup(input: BitInput) -> IResult<BitInput, (), VerboseError<BitInput>> {
     // I don't believe this actually parses anything
     // or does anything relevant to us...
     Ok((input, ()))
@@ -588,7 +593,7 @@ const fn decode_frame_wrapup(input: BitInput) -> IResult<BitInput, ()> {
 fn temporal_point_info(
     input: BitInput,
     frame_presentation_time_length: usize,
-) -> IResult<BitInput, ()> {
+) -> IResult<BitInput, (), VerboseError<BitInput>> {
     let (input, _frame_presentation_time): (_, u64) =
         bit_parsers::take(frame_presentation_time_length)(input)?;
     Ok((input, ()))
@@ -607,7 +612,7 @@ fn frame_size(
     frame_width_bits: usize,
     frame_height_bits: usize,
     max_frame_size: Dimensions,
-) -> IResult<BitInput, Dimensions> {
+) -> IResult<BitInput, Dimensions, VerboseError<BitInput>> {
     let (input, width, height) = if frame_size_override {
         let (input, width_minus_1): (_, u32) = bit_parsers::take(frame_width_bits)(input)?;
         let (input, height_minus_1): (_, u32) = bit_parsers::take(frame_height_bits)(input)?;
@@ -625,7 +630,7 @@ fn render_size<'a, 'b>(
     input: BitInput<'a>,
     frame_size: Dimensions,
     upscaled_size: &'b mut Dimensions,
-) -> IResult<BitInput<'a>, Dimensions> {
+) -> IResult<BitInput<'a>, Dimensions, VerboseError<BitInput<'a>>> {
     let (input, render_and_frame_size_different) = take_bool_bit(input)?;
     let (input, width, height) = if render_and_frame_size_different {
         let (input, render_width_minus_1): (_, u32) = bit_parsers::take(16usize)(input)?;
@@ -639,7 +644,7 @@ fn render_size<'a, 'b>(
 
 #[inline(always)]
 #[allow(clippy::unnecessary_wraps)]
-const fn set_frame_refs(input: BitInput) -> IResult<BitInput, ()> {
+const fn set_frame_refs(input: BitInput) -> IResult<BitInput, (), VerboseError<BitInput>> {
     // Does nothing that we care about
     Ok((input, ()))
 }
@@ -654,7 +659,7 @@ fn frame_size_with_refs<'a, 'b>(
     max_frame_size: Dimensions,
     ref_frame_size: &'b mut Dimensions,
     ref_upscaled_size: &'b mut Dimensions,
-) -> IResult<BitInput<'a>, Dimensions> {
+) -> IResult<BitInput<'a>, Dimensions, VerboseError<BitInput<'a>>> {
     let mut found_ref = false;
     let mut input = input;
     for _ in 0..REFS_PER_FRAME {
@@ -691,7 +696,7 @@ fn superres_params<'a, 'b>(
     enable_superres: bool,
     frame_size: &'b mut Dimensions,
     upscaled_size: &'b mut Dimensions,
-) -> IResult<BitInput<'a>, ()> {
+) -> IResult<BitInput<'a>, (), VerboseError<BitInput<'a>>> {
     let (input, use_superres) = if enable_superres {
         take_bool_bit(input)?
     } else {
@@ -714,42 +719,42 @@ const fn compute_image_size(frame_size: Dimensions) -> (u32, u32) {
     (mi_cols, mi_rows)
 }
 
-fn read_interpolation_filter(input: BitInput) -> IResult<BitInput, ()> {
+fn read_interpolation_filter(input: BitInput) -> IResult<BitInput, (), VerboseError<BitInput>> {
     let (input, _is_filter_switchable) = take_bool_bit(input)?;
     Ok((input, ()))
 }
 
 #[inline(always)]
 #[allow(clippy::unnecessary_wraps)]
-const fn init_non_coeff_cdfs(input: BitInput) -> IResult<BitInput, ()> {
+const fn init_non_coeff_cdfs(input: BitInput) -> IResult<BitInput, (), VerboseError<BitInput>> {
     // We don't care about this
     Ok((input, ()))
 }
 
 #[inline(always)]
 #[allow(clippy::unnecessary_wraps)]
-const fn setup_past_independence(input: BitInput) -> IResult<BitInput, ()> {
+const fn setup_past_independence(input: BitInput) -> IResult<BitInput, (), VerboseError<BitInput>> {
     // We don't care about this
     Ok((input, ()))
 }
 
 #[inline(always)]
 #[allow(clippy::unnecessary_wraps)]
-const fn load_cdfs(input: BitInput) -> IResult<BitInput, ()> {
+const fn load_cdfs(input: BitInput) -> IResult<BitInput, (), VerboseError<BitInput>> {
     // We don't care about this
     Ok((input, ()))
 }
 
 #[inline(always)]
 #[allow(clippy::unnecessary_wraps)]
-const fn load_previous(input: BitInput) -> IResult<BitInput, ()> {
+const fn load_previous(input: BitInput) -> IResult<BitInput, (), VerboseError<BitInput>> {
     // We don't care about this
     Ok((input, ()))
 }
 
 #[inline(always)]
 #[allow(clippy::unnecessary_wraps)]
-const fn motion_field_estimation(input: BitInput) -> IResult<BitInput, ()> {
+const fn motion_field_estimation(input: BitInput) -> IResult<BitInput, (), VerboseError<BitInput>> {
     // We don't care about this
     Ok((input, ()))
 }
@@ -760,7 +765,7 @@ fn tile_info(
     use_128x128_superblock: bool,
     mi_cols: u32,
     mi_rows: u32,
-) -> IResult<BitInput, TileInfo> {
+) -> IResult<BitInput, TileInfo, VerboseError<BitInput>> {
     let sb_cols = if use_128x128_superblock {
         (mi_cols + 31) >> 5u8
     } else {
@@ -899,7 +904,7 @@ fn quantization_params(
     input: BitInput,
     num_planes: u8,
     separate_uv_delta_q: bool,
-) -> IResult<BitInput, QuantizationParams> {
+) -> IResult<BitInput, QuantizationParams, VerboseError<BitInput>> {
     let (input, base_q_idx) = bit_parsers::take(8usize)(input)?;
     let (input, deltaq_y_dc) = read_delta_q(input)?;
     let (input, deltaq_u_dc, deltaq_u_ac, deltaq_v_dc, deltaq_v_ac) = if num_planes > 1 {
@@ -946,7 +951,7 @@ fn quantization_params(
     }))
 }
 
-fn read_delta_q(input: BitInput) -> IResult<BitInput, i64> {
+fn read_delta_q(input: BitInput) -> IResult<BitInput, i64, VerboseError<BitInput>> {
     let (input, delta_coded) = take_bool_bit(input)?;
     if delta_coded {
         su(input, 1 + 6)
@@ -968,7 +973,7 @@ pub struct QuantizationParams {
 fn segmentation_params(
     input: BitInput,
     primary_ref_frame: u8,
-) -> IResult<BitInput, Option<SegmentationData>> {
+) -> IResult<BitInput, Option<SegmentationData>, VerboseError<BitInput>> {
     let mut segmentation_data: SegmentationData = Default::default();
     let (input, segmentation_enabled) = take_bool_bit(input)?;
     let input = if segmentation_enabled {
@@ -1019,7 +1024,10 @@ fn segmentation_params(
     Ok((input, segmentation_enabled.then(|| segmentation_data)))
 }
 
-fn delta_q_params(input: BitInput, base_q_idx: u8) -> IResult<BitInput, bool> {
+fn delta_q_params(
+    input: BitInput,
+    base_q_idx: u8,
+) -> IResult<BitInput, bool, VerboseError<BitInput>> {
     let (input, delta_q_present) = if base_q_idx > 0 {
         take_bool_bit(input)?
     } else {
@@ -1037,7 +1045,7 @@ fn delta_lf_params(
     input: BitInput,
     delta_q_present: bool,
     allow_intrabc: bool,
-) -> IResult<BitInput, ()> {
+) -> IResult<BitInput, (), VerboseError<BitInput>> {
     let input = if delta_q_present {
         let (input, delta_lf_present) = if allow_intrabc {
             (input, false)
@@ -1059,14 +1067,16 @@ fn delta_lf_params(
 
 #[inline(always)]
 #[allow(clippy::unnecessary_wraps)]
-const fn init_coeff_cdfs(input: BitInput) -> IResult<BitInput, ()> {
+const fn init_coeff_cdfs(input: BitInput) -> IResult<BitInput, (), VerboseError<BitInput>> {
     // We don't care about this
     Ok((input, ()))
 }
 
 #[inline(always)]
 #[allow(clippy::unnecessary_wraps)]
-const fn load_previous_segment_ids(input: BitInput) -> IResult<BitInput, ()> {
+const fn load_previous_segment_ids(
+    input: BitInput,
+) -> IResult<BitInput, (), VerboseError<BitInput>> {
     // We don't care about this
     Ok((input, ()))
 }
@@ -1076,7 +1086,7 @@ fn loop_filter_params(
     coded_lossless: bool,
     allow_intrabc: bool,
     num_planes: u8,
-) -> IResult<BitInput, ()> {
+) -> IResult<BitInput, (), VerboseError<BitInput>> {
     if coded_lossless || allow_intrabc {
         return Ok((input, ()));
     }
@@ -1126,7 +1136,7 @@ fn cdef_params(
     allow_intrabc: bool,
     enable_cdef: bool,
     num_planes: u8,
-) -> IResult<BitInput, ()> {
+) -> IResult<BitInput, (), VerboseError<BitInput>> {
     if coded_lossless || allow_intrabc || !enable_cdef {
         return Ok((input, ()));
     }
@@ -1157,7 +1167,7 @@ fn lr_params(
     use_128x128_superblock: bool,
     num_planes: u8,
     subsampling: (u8, u8),
-) -> IResult<BitInput, ()> {
+) -> IResult<BitInput, (), VerboseError<BitInput>> {
     if all_lossless || allow_intrabc || !enable_restoration {
         return Ok((input, ()));
     }
@@ -1202,7 +1212,10 @@ fn lr_params(
     Ok((input, ()))
 }
 
-fn read_tx_mode(input: BitInput, coded_lossless: bool) -> IResult<BitInput, ()> {
+fn read_tx_mode(
+    input: BitInput,
+    coded_lossless: bool,
+) -> IResult<BitInput, (), VerboseError<BitInput>> {
     let input = if coded_lossless {
         input
     } else {
@@ -1212,7 +1225,10 @@ fn read_tx_mode(input: BitInput, coded_lossless: bool) -> IResult<BitInput, ()> 
     Ok((input, ()))
 }
 
-fn frame_reference_mode(input: BitInput, frame_is_intra: bool) -> IResult<BitInput, bool> {
+fn frame_reference_mode(
+    input: BitInput,
+    frame_is_intra: bool,
+) -> IResult<BitInput, bool, VerboseError<BitInput>> {
     Ok(if frame_is_intra {
         (input, false)
     } else {
@@ -1228,7 +1244,7 @@ fn skip_mode_params<'a, 'b>(
     order_hint: u64,
     ref_order_hint: &'b [u64],
     ref_frame_idx: &'b [usize],
-) -> IResult<BitInput<'a>, ()> {
+) -> IResult<BitInput<'a>, (), VerboseError<BitInput<'a>>> {
     let skip_mode_allowed;
     let mut forward_hint = -1;
     let mut backward_hint = -1;
@@ -1301,7 +1317,10 @@ const fn get_relative_dist(a: i64, b: i64, order_hint_bits: usize) -> i64 {
     (diff & (m - 1)) - (diff & m)
 }
 
-fn global_motion_params(input: BitInput, frame_is_intra: bool) -> IResult<BitInput, ()> {
+fn global_motion_params(
+    input: BitInput,
+    frame_is_intra: bool,
+) -> IResult<BitInput, (), VerboseError<BitInput>> {
     if frame_is_intra {
         return Ok((input, ()));
     }

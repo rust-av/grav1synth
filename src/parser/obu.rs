@@ -1,6 +1,7 @@
 use nom::{
     bits::{bits, complete as bit_parsers},
     combinator::map_res,
+    error::{context, VerboseError},
     IResult,
 };
 use num_enum::TryFromPrimitive;
@@ -30,10 +31,10 @@ pub fn parse_obu<'a, 'b>(
     big_ref_order_hint: &mut [u64; NUM_REF_FRAMES],
     big_ref_valid: &mut [bool; NUM_REF_FRAMES],
     big_order_hints: &mut [u64; RefType::Last as usize + REFS_PER_FRAME],
-) -> IResult<&'a [u8], Option<Obu>> {
-    let (input, obu_header) = parse_obu_header(input)?;
+) -> IResult<&'a [u8], Option<Obu>, VerboseError<&'a [u8]>> {
+    let (input, obu_header) = context("Failed parsing obu header", parse_obu_header)(input)?;
     let (input, obu_size) = if obu_header.has_size_field {
-        let (input, result) = leb128(input)?;
+        let (input, result) = context("Failed parsing obu size", leb128)(input)?;
         (input, result.value as usize)
     } else {
         debug_assert!(*size > 0);
@@ -63,38 +64,43 @@ pub fn parse_obu<'a, 'b>(
 
     match obu_header.obu_type {
         ObuType::SequenceHeader => {
-            let (input, header) = parse_sequence_header(input)?;
+            let (input, header) =
+                context("Failed parsing sequence header", parse_sequence_header)(input)?;
             Ok((input, Some(Obu::SequenceHeader(header))))
         }
         ObuType::Frame => {
-            let (input, header) = parse_frame_obu(
-                input,
-                obu_size,
-                seen_frame_header,
-                sequence_header.unwrap(),
-                obu_header,
-                previous_frame_header,
-                ref_frame_idx,
-                ref_order_hint,
-                big_ref_order_hint,
-                big_ref_valid,
-                big_order_hints,
-            )?;
+            let (input, header) = context("Failed parsing frame obu", |input| {
+                parse_frame_obu(
+                    input,
+                    obu_size,
+                    seen_frame_header,
+                    sequence_header.unwrap(),
+                    obu_header,
+                    previous_frame_header,
+                    ref_frame_idx,
+                    ref_order_hint,
+                    big_ref_order_hint,
+                    big_ref_valid,
+                    big_order_hints,
+                )
+            })(input)?;
             Ok((input, header.map(Obu::FrameHeader)))
         }
         ObuType::FrameHeader => {
-            let (input, header) = parse_frame_header(
-                input,
-                seen_frame_header,
-                sequence_header.unwrap(),
-                obu_header,
-                previous_frame_header,
-                ref_frame_idx,
-                ref_order_hint,
-                big_ref_order_hint,
-                big_ref_valid,
-                big_order_hints,
-            )?;
+            let (input, header) = context("Failed parsing frame header", |input| {
+                parse_frame_header(
+                    input,
+                    seen_frame_header,
+                    sequence_header.unwrap(),
+                    obu_header,
+                    previous_frame_header,
+                    ref_frame_idx,
+                    ref_order_hint,
+                    big_ref_order_hint,
+                    big_ref_valid,
+                    big_order_hints,
+                )
+            })(input)?;
             Ok((input, header.map(Obu::FrameHeader)))
         }
         ObuType::TileGroup => {
@@ -129,16 +135,20 @@ pub struct ObuExtension {
     pub spatial_id: u8,
 }
 
-pub fn parse_obu_header(input: &[u8]) -> IResult<&[u8], ObuHeader> {
+pub fn parse_obu_header(input: &[u8]) -> IResult<&[u8], ObuHeader, VerboseError<&[u8]>> {
     let (input, obu_header) = bits(|input| {
-        let (input, _forbidden_bit) = take_zero_bit(input)?;
-        let (input, obu_type) = obu_type(input)?;
-        let (input, extension_flag) = take_bool_bit(input)?;
-        let (input, has_size_field) = take_bool_bit(input)?;
-        let (input, _reserved_1bit) = take_zero_bit(input)?;
+        let (input, _forbidden_bit) =
+            context("Failed parsing forbidden_bit", take_zero_bit)(input)?;
+        let (input, obu_type) = context("Failed parsing obu_type", obu_type)(input)?;
+        let (input, extension_flag) =
+            context("Failed parsing extension_flag", take_bool_bit)(input)?;
+        let (input, has_size_field) =
+            context("Failed parsing has_size_field", take_bool_bit)(input)?;
+        let (input, _reserved_1bit) =
+            context("Failed parsing reserved_1bit", take_zero_bit)(input)?;
 
         let (input, extension) = if extension_flag {
-            let (input, extension) = obu_extension(input)?;
+            let (input, extension) = context("Failed parsing obu extension", obu_extension)(input)?;
             (input, Some(extension))
         } else {
             (input, None)
@@ -154,7 +164,7 @@ pub fn parse_obu_header(input: &[u8]) -> IResult<&[u8], ObuHeader> {
     Ok((input, obu_header))
 }
 
-fn obu_extension(input: BitInput) -> IResult<BitInput, ObuExtension> {
+fn obu_extension(input: BitInput) -> IResult<BitInput, ObuExtension, VerboseError<BitInput>> {
     let (input, temporal_id) = bit_parsers::take(3usize)(input)?;
     let (input, spatial_id) = bit_parsers::take(2usize)(input)?;
     let (input, _reserved): (_, u8) = bit_parsers::take(3usize)(input)?;
@@ -185,7 +195,7 @@ pub enum ObuType {
     Padding = 15,
 }
 
-fn obu_type(input: BitInput) -> IResult<BitInput, ObuType> {
+fn obu_type(input: BitInput) -> IResult<BitInput, ObuType, VerboseError<BitInput>> {
     map_res(bit_parsers::take(4usize), |output: u8| {
         ObuType::try_from(output)
     })(input)

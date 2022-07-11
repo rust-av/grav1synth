@@ -53,6 +53,7 @@ pub mod reader;
 
 use std::{
     env,
+    error::Error,
     fs::File,
     io::{BufWriter, Write},
     path::PathBuf,
@@ -62,6 +63,7 @@ use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use dialoguer::Confirm;
 use ffmpeg::Rational;
+use nom::Finish;
 use parser::{
     frame::{FrameHeader, RefType, NUM_REF_FRAMES, REFS_PER_FRAME},
     grain::{FilmGrainHeader, FilmGrainParams},
@@ -324,7 +326,8 @@ fn get_grain_headers<'a, 'b>(
             big_ref_valid,
             big_order_hints,
         )
-        .map_err(|e| anyhow!("{}", e.to_string()))?;
+        .finish()
+        .map_err(|e| anyhow!("{:?}", e))?;
         input = inner_input;
         match obu {
             Some(Obu::SequenceHeader(obu)) => {

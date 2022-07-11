@@ -1,5 +1,5 @@
 use arrayvec::ArrayVec;
-use nom::{bits, bits::complete as bit_parsers, IResult};
+use nom::{bits, bits::complete as bit_parsers, error::VerboseError, IResult};
 use num_enum::TryFromPrimitive;
 
 use super::util::{take_bool_bit, uvlc, BitInput};
@@ -44,7 +44,7 @@ impl SequenceHeader {
 }
 
 #[allow(clippy::too_many_lines)]
-pub fn parse_sequence_header(input: &[u8]) -> IResult<&[u8], SequenceHeader> {
+pub fn parse_sequence_header(input: &[u8]) -> IResult<&[u8], SequenceHeader, VerboseError<&[u8]>> {
     bits(|input| {
         let (input, seq_profile): (_, u8) = bit_parsers::take(3usize)(input)?;
         let (input, _still_picture) = take_bool_bit(input)?;
@@ -264,7 +264,7 @@ pub fn parse_sequence_header(input: &[u8]) -> IResult<&[u8], SequenceHeader> {
     })(input)
 }
 
-fn timing_info(input: BitInput) -> IResult<BitInput, TimingInfo> {
+fn timing_info(input: BitInput) -> IResult<BitInput, TimingInfo, VerboseError<BitInput>> {
     let (input, _num_units_in_display_tick): (_, u32) = bit_parsers::take(32usize)(input)?;
     let (input, _time_scale): (_, u32) = bit_parsers::take(32usize)(input)?;
     let (input, equal_picture_interval) = take_bool_bit(input)?;
@@ -284,7 +284,9 @@ pub struct TimingInfo {
     pub equal_picture_interval: bool,
 }
 
-fn decoder_model_info(input: BitInput) -> IResult<BitInput, DecoderModelInfo> {
+fn decoder_model_info(
+    input: BitInput,
+) -> IResult<BitInput, DecoderModelInfo, VerboseError<BitInput>> {
     let (input, buffer_delay_length_minus_1) = bit_parsers::take(5usize)(input)?;
     let (input, _num_units_in_decoding_tick): (_, u32) = bit_parsers::take(32usize)(input)?;
     let (input, buffer_removal_time_length_minus_1) = bit_parsers::take(5usize)(input)?;
@@ -303,14 +305,20 @@ pub struct DecoderModelInfo {
     pub frame_presentation_time_length_minus_1: u8,
 }
 
-fn operating_parameters_info(input: BitInput, buffer_delay_length: usize) -> IResult<BitInput, ()> {
+fn operating_parameters_info(
+    input: BitInput,
+    buffer_delay_length: usize,
+) -> IResult<BitInput, (), VerboseError<BitInput>> {
     let (input, _decoder_buffer_delay): (_, u64) = bit_parsers::take(buffer_delay_length)(input)?;
     let (input, _encoder_buffer_delay): (_, u64) = bit_parsers::take(buffer_delay_length)(input)?;
     let (input, _low_delay_mode_flag) = take_bool_bit(input)?;
     Ok((input, ()))
 }
 
-fn color_config(input: BitInput, seq_profile: u8) -> IResult<BitInput, ColorConfig> {
+fn color_config(
+    input: BitInput,
+    seq_profile: u8,
+) -> IResult<BitInput, ColorConfig, VerboseError<BitInput>> {
     let bit_depth: u8;
     let (input, high_bitdepth) = take_bool_bit(input)?;
     let input = if seq_profile == 2 && high_bitdepth {

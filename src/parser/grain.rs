@@ -1,5 +1,5 @@
 use arrayvec::ArrayVec;
-use nom::{bits::complete as bit_parsers, IResult};
+use nom::{bits::complete as bit_parsers, error::VerboseError, IResult};
 
 use super::{
     frame::FrameType,
@@ -125,7 +125,7 @@ pub fn film_grain_params(
     frame_type: FrameType,
     monochrome: bool,
     subsampling: (u8, u8),
-) -> IResult<BitInput, FilmGrainHeader> {
+) -> IResult<BitInput, FilmGrainHeader, VerboseError<BitInput>> {
     if !film_grain_params_present || (!show_frame && !showable_frame) {
         return Ok((input, FilmGrainHeader::Disable));
     }
