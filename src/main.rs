@@ -53,7 +53,6 @@ pub mod reader;
 
 use std::{
     env,
-    error::Error,
     fs::File,
     io::{BufWriter, Write},
     path::PathBuf,
