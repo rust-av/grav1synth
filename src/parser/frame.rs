@@ -49,6 +49,7 @@ const SEGMENTATION_FEATURE_MAX: [u8; SEG_LVL_MAX] = [
 ];
 type SegmentationData = [[Option<i16>; SEG_LVL_MAX]; MAX_SEGMENTS];
 
+const INTERP_FILTER_SWITCHABLE: u8 = 4;
 const MAX_LOOP_FILTER: u8 = 63;
 const RESTORE_NONE: u8 = 0;
 
@@ -218,7 +219,7 @@ fn uncompressed_header<'a, 'b>(
                 input
             };
             let (input, showable_frame) = if show_frame {
-                (input, true)
+                (input, frame_type != FrameType::Key)
             } else {
                 take_bool_bit(input)?
             };
@@ -720,7 +721,12 @@ const fn compute_image_size(frame_size: Dimensions) -> (u32, u32) {
 }
 
 fn read_interpolation_filter(input: BitInput) -> IResult<BitInput, (), VerboseError<BitInput>> {
-    let (input, _is_filter_switchable) = take_bool_bit(input)?;
+    let (input, is_filter_switchable) = take_bool_bit(input)?;
+    let (input, _interpolation_filter) = if is_filter_switchable {
+        (input, INTERP_FILTER_SWITCHABLE)
+    } else {
+        bit_parsers::take(2usize)(input)?
+    };
     Ok((input, ()))
 }
 
