@@ -5,6 +5,7 @@
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::cast_sign_loss)]
+#![allow(clippy::default_trait_access)]
 #![allow(clippy::inconsistent_struct_constructor)]
 #![allow(clippy::inline_always)]
 #![allow(clippy::module_name_repetitions)]
@@ -23,13 +24,13 @@
 #![warn(clippy::lossy_float_literal)]
 #![warn(clippy::map_err_ignore)]
 #![warn(clippy::mem_forget)]
+#![warn(clippy::mod_module_files)]
 #![warn(clippy::multiple_inherent_impl)]
 #![warn(clippy::pattern_type_mismatch)]
 #![warn(clippy::rc_buffer)]
 #![warn(clippy::rc_mutex)]
 #![warn(clippy::rest_pat_in_fully_bound_structs)]
 #![warn(clippy::same_name_method)]
-#![warn(clippy::self_named_module_files)]
 #![warn(clippy::str_to_string)]
 #![warn(clippy::string_to_string)]
 #![warn(clippy::undocumented_unsafe_blocks)]
@@ -41,14 +42,7 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::missing_panics_doc)]
 
-pub mod parser {
-    pub mod frame;
-    pub mod grain;
-    pub mod obu;
-    pub mod sequence;
-    pub mod tile_group;
-    pub mod util;
-}
+pub mod parser;
 pub mod reader;
 
 use std::{
@@ -58,21 +52,13 @@ use std::{
     path::PathBuf,
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use dialoguer::Confirm;
 use ffmpeg::Rational;
-use nom::Finish;
-use parser::{
-    frame::{FrameHeader, RefType, NUM_REF_FRAMES, REFS_PER_FRAME},
-    grain::{FilmGrainHeader, FilmGrainParams},
-    sequence::SequenceHeader,
-};
+use parser::grain::{FilmGrainHeader, FilmGrainParams};
 
-use crate::{
-    parser::obu::{parse_obu, Obu},
-    reader::BitstreamReader,
-};
+use crate::{parser::BitstreamParser, reader::BitstreamReader};
 
 #[allow(clippy::too_many_lines)]
 pub fn main() -> Result<()> {
@@ -110,35 +96,10 @@ pub fn main() -> Result<()> {
                 return Ok(());
             }
 
-            let mut parser = BitstreamReader::open(&input)?;
-            let mut size = 0usize;
-            let mut seen_frame_header = false;
-            let mut sequence_header = None;
-            let mut previous_frame_header = None;
-            let mut ref_frame_idx = [0usize; REFS_PER_FRAME];
-            let mut ref_order_hint = [0u64; NUM_REF_FRAMES];
-            let mut big_ref_order_hint = [0u64; NUM_REF_FRAMES];
-            let mut big_ref_valid = [false; NUM_REF_FRAMES];
-            let mut big_order_hints = [0u64; RefType::Last as usize + REFS_PER_FRAME];
-            let mut grain_headers = Vec::new();
-            while let Some(packet) = parser.read_packet() {
-                if packet.data().is_none() {
-                    break;
-                }
-                get_grain_headers(
-                    packet.data().unwrap(),
-                    &mut size,
-                    &mut seen_frame_header,
-                    &mut sequence_header,
-                    &mut previous_frame_header,
-                    &mut grain_headers,
-                    &mut ref_frame_idx,
-                    &mut ref_order_hint,
-                    &mut big_ref_order_hint,
-                    &mut big_ref_valid,
-                    &mut big_order_hints,
-                )?;
-            }
+            let reader = BitstreamReader::open(&input)?;
+            let mut parser: BitstreamParser<false> = BitstreamParser::new(reader);
+            let frame_rate = parser.get_frame_rate()?;
+            let grain_headers = parser.get_grain_headers()?;
 
             if !grain_headers
                 .iter()
@@ -150,7 +111,6 @@ pub fn main() -> Result<()> {
 
             // As you can expect, this may lead to odd behaviors with VFR.
             // VFR is cursed.
-            let frame_rate = parser.get_video_stream()?.avg_frame_rate();
             let grain_tables = aggregate_grain_headers(grain_headers, frame_rate);
 
             let mut output_file = BufWriter::new(File::create(&output)?);
@@ -298,60 +258,12 @@ struct GrainTableSegment {
     pub grain_params: FilmGrainParams,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn get_grain_headers<'a, 'b>(
-    mut input: &'a [u8],
-    size: &'b mut usize,
-    seen_frame_header: &'b mut bool,
-    sequence_header: &'b mut Option<SequenceHeader>,
-    previous_frame_header: &'b mut Option<FrameHeader>,
-    grain_headers: &'b mut Vec<FilmGrainHeader>,
-    ref_frame_idx: &mut [usize; REFS_PER_FRAME],
-    ref_order_hint: &mut [u64; NUM_REF_FRAMES],
-    big_ref_order_hint: &mut [u64; NUM_REF_FRAMES],
-    big_ref_valid: &mut [bool; NUM_REF_FRAMES],
-    big_order_hints: &mut [u64; RefType::Last as usize + REFS_PER_FRAME],
-) -> Result<()> {
-    loop {
-        let (inner_input, obu) = parse_obu(
-            input,
-            size,
-            seen_frame_header,
-            sequence_header.as_ref(),
-            previous_frame_header.as_ref(),
-            ref_frame_idx,
-            ref_order_hint,
-            big_ref_order_hint,
-            big_ref_valid,
-            big_order_hints,
-        )
-        .finish()
-        .map_err(|e| anyhow!("{:?}", e))?;
-        input = inner_input;
-        match obu {
-            Some(Obu::SequenceHeader(obu)) => {
-                *sequence_header = Some(obu);
-            }
-            Some(Obu::FrameHeader(obu)) => {
-                grain_headers.push(obu.film_grain_params.clone());
-                *previous_frame_header = Some(obu);
-            }
-            None => (),
-        };
-        if input.is_empty() {
-            break;
-        }
-    }
-
-    Ok(())
-}
-
 // I don't know why this is the base unit for a timestamp but it is. 1/10000000
 // of a second.
 const TIMESTAMP_BASE_UNIT: u64 = 10_000_000;
 
 fn aggregate_grain_headers(
-    grain_headers: Vec<FilmGrainHeader>,
+    grain_headers: &[FilmGrainHeader],
     frame_rate: Rational,
 ) -> Vec<GrainTableSegment> {
     let time_per_packet: f64 = frame_rate.invert().into();
@@ -359,12 +271,12 @@ fn aggregate_grain_headers(
     let mut cur_packet_end_f: f64 = time_per_packet;
     let mut cur_packet_end: u64 = cur_packet_end_f.ceil() as u64 * TIMESTAMP_BASE_UNIT;
 
-    grain_headers.into_iter().fold(Vec::new(), |mut acc, elem| {
+    grain_headers.iter().fold(Vec::new(), |mut acc, elem| {
         let prev_packet_has_grain = acc.last().map_or(false, |last: &GrainTableSegment| {
             last.end_time == cur_packet_start
         });
         if prev_packet_has_grain {
-            match elem {
+            match *elem {
                 FilmGrainHeader::Disable => {
                     // Do nothing. This will disable film grain for this
                     // and future frames.
@@ -374,9 +286,9 @@ fn aggregate_grain_headers(
                     let cur_segment = acc.last_mut().expect("prev_packet_has_grain is true");
                     cur_segment.end_time = cur_packet_end;
                 }
-                FilmGrainHeader::UpdateGrain(grain_params) => {
+                FilmGrainHeader::UpdateGrain(ref grain_params) => {
                     let cur_segment = acc.last_mut().expect("prev_packet_has_grain is true");
-                    if grain_params == cur_segment.grain_params {
+                    if grain_params == &cur_segment.grain_params {
                         // Increment the end time of the current table segment.
                         cur_segment.end_time = cur_packet_end;
                     } else {
@@ -384,16 +296,16 @@ fn aggregate_grain_headers(
                         acc.push(GrainTableSegment {
                             start_time: cur_packet_start,
                             end_time: cur_packet_end,
-                            grain_params,
+                            grain_params: grain_params.clone(),
                         });
                     }
                 }
             };
-        } else if let FilmGrainHeader::UpdateGrain(grain_params) = elem {
+        } else if let &FilmGrainHeader::UpdateGrain(ref grain_params) = elem {
             acc.push(GrainTableSegment {
                 start_time: cur_packet_start,
                 end_time: cur_packet_end,
-                grain_params,
+                grain_params: grain_params.clone(),
             });
         }
 

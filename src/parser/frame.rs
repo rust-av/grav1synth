@@ -11,9 +11,9 @@ use num_traits::{clamp, PrimInt};
 use super::{
     grain::{film_grain_params, FilmGrainHeader},
     obu::ObuHeader,
-    sequence::{SequenceHeader, SELECT_INTEGER_MV, SELECT_SCREEN_CONTENT_TOOLS},
-    tile_group::parse_tile_group_obu,
+    sequence::{SELECT_INTEGER_MV, SELECT_SCREEN_CONTENT_TOOLS},
     util::{ns, su, take_bool_bit, BitInput},
+    BitstreamParser,
 };
 
 pub const REFS_PER_FRAME: usize = 7;
@@ -61,124 +61,81 @@ pub struct FrameHeader {
     pub tile_info: TileInfo,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn parse_frame_obu<'a, 'b>(
-    input: &'a [u8],
-    size: usize,
-    seen_frame_header: &'b mut bool,
-    sequence_headers: &'b SequenceHeader,
-    obu_headers: ObuHeader,
-    previous_frame_header: Option<&'b FrameHeader>,
-    ref_frame_idx: &mut [usize; REFS_PER_FRAME],
-    ref_order_hint: &mut [u64; NUM_REF_FRAMES],
-    big_ref_order_hint: &mut [u64; NUM_REF_FRAMES],
-    big_ref_valid: &mut [bool; NUM_REF_FRAMES],
-    big_order_hints: &mut [u64; RefType::Last as usize + REFS_PER_FRAME],
-) -> IResult<&'a [u8], Option<FrameHeader>, VerboseError<&'a [u8]>> {
-    let input_len = input.len();
-    let (input, frame_header) = context("Failed parsing frame header", |input| {
-        parse_frame_header(
-            input,
-            seen_frame_header,
-            sequence_headers,
-            obu_headers,
-            previous_frame_header,
-            ref_frame_idx,
-            ref_order_hint,
-            big_ref_order_hint,
-            big_ref_valid,
-            big_order_hints,
-        )
-    })(input)?;
-    let ref_frame_header = frame_header.as_ref().or(previous_frame_header).unwrap();
-    // A reminder that obu size is in bytes
-    let size = size - (input_len - input.len());
-    let (input, _) = context("Failed parsing tile group obu", |input| {
-        parse_tile_group_obu(
-            input,
-            size,
-            seen_frame_header,
-            ref_frame_header.tile_info.tile_cols,
-            ref_frame_header.tile_info.tile_rows,
-            ref_frame_header.tile_info.tile_cols_log2,
-            ref_frame_header.tile_info.tile_rows_log2,
-        )
-    })(input)?;
-    Ok((input, frame_header))
-}
-
-/// This will return `None` for a show-existing frame. We don't need to apply
-/// film grain params to those packets, because they are inherited from the ref
-/// frame.
-///
-/// I wish we didn't have to parse the whole frame header,
-/// but the film grain params are of course the very last item,
-/// and we don't know how many bits precede it, so we have to parse
-/// THE WHOLE THING before we get the film grain params.
-#[allow(clippy::too_many_arguments)]
-pub fn parse_frame_header<'a, 'b>(
-    input: &'a [u8],
-    seen_frame_header: &'b mut bool,
-    sequence_headers: &'b SequenceHeader,
-    obu_headers: ObuHeader,
-    previous_frame_header: Option<&'b FrameHeader>,
-    ref_frame_idx: &mut [usize; REFS_PER_FRAME],
-    ref_order_hint: &mut [u64; NUM_REF_FRAMES],
-    big_ref_order_hint: &mut [u64; NUM_REF_FRAMES],
-    big_ref_valid: &mut [bool; NUM_REF_FRAMES],
-    big_order_hints: &mut [u64; RefType::Last as usize + REFS_PER_FRAME],
-) -> IResult<&'a [u8], Option<FrameHeader>, VerboseError<&'a [u8]>> {
-    if *seen_frame_header {
-        return Ok((input, None));
+impl<const WRITE: bool> BitstreamParser<WRITE> {
+    pub fn parse_frame_obu<'a>(
+        &mut self,
+        input: &'a [u8],
+        obu_header: ObuHeader,
+    ) -> IResult<&'a [u8], Option<FrameHeader>, VerboseError<&'a [u8]>> {
+        let input_len = input.len();
+        let (input, frame_header) = context("Failed parsing frame header", |input| {
+            self.parse_frame_header(input, obu_header)
+        })(input)?;
+        let ref_frame_header = frame_header
+            .clone()
+            .or_else(|| self.previous_frame_header.clone())
+            .unwrap();
+        // A reminder that obu size is in bytes
+        let tile_group_obu_size = self.size - (input_len - input.len());
+        let (input, _) = context("Failed parsing tile group obu", |input| {
+            self.parse_tile_group_obu(input, tile_group_obu_size, ref_frame_header.tile_info)
+        })(input)?;
+        Ok((input, frame_header))
     }
 
-    *seen_frame_header = true;
-    bits(|input| {
-        let (input, header) = uncompressed_header(
-            input,
-            sequence_headers,
-            obu_headers,
-            previous_frame_header,
-            ref_frame_idx,
-            ref_order_hint,
-            big_ref_order_hint,
-            big_ref_valid,
-            big_order_hints,
-        )?;
-        if header.show_existing_frame {
-            let (input, _) = decode_frame_wrapup(input)?;
-            *seen_frame_header = false;
-            Ok((input, header.show_frame.then(|| header)))
-        } else {
-            *seen_frame_header = true;
-            Ok((input, header.show_frame.then(|| header)))
+    /// This will return `None` for a show-existing frame. We don't need to
+    /// apply film grain params to those packets, because they are inherited
+    /// from the ref frame.
+    ///
+    /// I wish we didn't have to parse the whole frame header,
+    /// but the film grain params are of course the very last item,
+    /// and we don't know how many bits precede it, so we have to parse
+    /// THE WHOLE THING before we get the film grain params.
+    pub fn parse_frame_header<'a>(
+        &mut self,
+        input: &'a [u8],
+        obu_header: ObuHeader,
+    ) -> IResult<&'a [u8], Option<FrameHeader>, VerboseError<&'a [u8]>> {
+        if self.seen_frame_header {
+            return Ok((input, None));
         }
-    })(input)
-}
 
-#[allow(clippy::fn_params_excessive_bools)]
-#[allow(clippy::cognitive_complexity)]
-#[allow(clippy::too_many_lines)]
-#[allow(clippy::too_many_arguments)]
-fn uncompressed_header<'a, 'b>(
-    input: BitInput<'a>,
-    sequence_headers: &'b SequenceHeader,
-    obu_headers: ObuHeader,
-    previous_frame_header: Option<&'b FrameHeader>,
-    ref_frame_idx: &mut [usize; REFS_PER_FRAME],
-    ref_order_hint: &mut [u64; NUM_REF_FRAMES],
-    big_ref_order_hint: &mut [u64; NUM_REF_FRAMES],
-    big_ref_valid: &mut [bool; NUM_REF_FRAMES],
-    big_order_hints: &mut [u64; RefType::Last as usize + REFS_PER_FRAME],
-) -> IResult<BitInput<'a>, FrameHeader, VerboseError<BitInput<'a>>> {
-    let id_len = sequence_headers.frame_id_numbers_present.then(|| {
-        sequence_headers.additional_frame_id_len_minus_1
-            + sequence_headers.delta_frame_id_len_minus_2
-            + 3
-    });
+        self.seen_frame_header = true;
+        bits(|input| {
+            let (input, header) = self.uncompressed_header(input, obu_header)?;
+            if header.show_existing_frame {
+                let (input, _) = decode_frame_wrapup(input)?;
+                self.seen_frame_header = false;
+                Ok((input, header.show_frame.then(|| header)))
+            } else {
+                self.seen_frame_header = true;
+                Ok((input, header.show_frame.then(|| header)))
+            }
+        })(input)
+    }
 
-    let (input, frame_type, show_frame, showable_frame, show_existing_frame, error_resilient_mode) =
-        if sequence_headers.reduced_still_picture_header {
+    #[allow(clippy::cognitive_complexity)]
+    #[allow(clippy::too_many_lines)]
+    fn uncompressed_header<'a>(
+        &mut self,
+        input: BitInput<'a>,
+        obu_headers: ObuHeader,
+    ) -> IResult<BitInput<'a>, FrameHeader, VerboseError<BitInput<'a>>> {
+        let sequence_header = self.sequence_header.as_ref().unwrap();
+        let id_len = sequence_header.frame_id_numbers_present.then(|| {
+            sequence_header.additional_frame_id_len_minus_1
+                + sequence_header.delta_frame_id_len_minus_2
+                + 3
+        });
+
+        let (
+            input,
+            frame_type,
+            show_frame,
+            showable_frame,
+            show_existing_frame,
+            error_resilient_mode,
+        ) = if sequence_header.reduced_still_picture_header {
             (input, FrameType::Inter, true, true, false, false)
         } else {
             let (input, show_existing_frame) = take_bool_bit(input)?;
@@ -194,21 +151,21 @@ fn uncompressed_header<'a, 'b>(
                     show_frame: true,
                     show_existing_frame,
                     film_grain_params: FilmGrainHeader::CopyRefFrame,
-                    tile_info: previous_frame_header.unwrap().tile_info,
+                    tile_info: self.previous_frame_header.as_ref().unwrap().tile_info,
                 }));
             };
             let (input, frame_type): (_, u8) = bit_parsers::take(2usize)(input)?;
             let frame_type = FrameType::try_from(frame_type).unwrap();
             let (input, show_frame) = take_bool_bit(input)?;
             let input = if show_frame
-                && sequence_headers.decoder_model_info.is_some()
-                && !sequence_headers
+                && sequence_header.decoder_model_info.is_some()
+                && !sequence_header
                     .timing_info
                     .map_or(false, |ti| ti.equal_picture_interval)
             {
                 temporal_point_info(
                     input,
-                    sequence_headers
+                    sequence_header
                         .decoder_model_info
                         .unwrap()
                         .frame_presentation_time_length_minus_1 as usize
@@ -240,331 +197,334 @@ fn uncompressed_header<'a, 'b>(
             )
         };
 
-    if frame_type == FrameType::Key && show_frame {
-        for i in 0..NUM_REF_FRAMES {
-            big_ref_valid[i] = false;
-            big_ref_order_hint[i] = 0;
+        if frame_type == FrameType::Key && show_frame {
+            for i in 0..NUM_REF_FRAMES {
+                self.big_ref_valid[i] = false;
+                self.big_ref_order_hint[i] = 0;
+            }
+            for i in 0..REFS_PER_FRAME {
+                self.big_order_hints[i + RefType::Last as usize] = 0;
+            }
         }
-        for i in 0..REFS_PER_FRAME {
-            big_order_hints[i + RefType::Last as usize] = 0;
-        }
-    }
 
-    let (input, disable_cdf_update) = take_bool_bit(input)?;
-    let (input, allow_screen_content_tools) =
-        if sequence_headers.force_screen_content_tools == SELECT_SCREEN_CONTENT_TOOLS {
-            take_bool_bit(input)?
-        } else {
-            (input, sequence_headers.force_screen_content_tools == 1)
-        };
-    let input =
-        if allow_screen_content_tools && sequence_headers.force_integer_mv == SELECT_INTEGER_MV {
+        let (input, disable_cdf_update) = take_bool_bit(input)?;
+        let (input, allow_screen_content_tools) =
+            if sequence_header.force_screen_content_tools == SELECT_SCREEN_CONTENT_TOOLS {
+                take_bool_bit(input)?
+            } else {
+                (input, sequence_header.force_screen_content_tools == 1)
+            };
+        let input = if allow_screen_content_tools
+            && sequence_header.force_integer_mv == SELECT_INTEGER_MV
+        {
             take_bool_bit(input)?.0
         } else {
             input
         };
-    let input = if sequence_headers.frame_id_numbers_present {
-        let (input, _current_frame_id): (_, usize) = bit_parsers::take(id_len.unwrap())(input)?;
-        input
-    } else {
-        input
-    };
-    let (input, frame_size_override_flag) = if frame_type == FrameType::Switch {
-        (input, true)
-    } else if sequence_headers.reduced_still_picture_header {
-        (input, false)
-    } else {
-        take_bool_bit(input)?
-    };
-    let (input, order_hint): (_, u64) = bit_parsers::take(sequence_headers.order_hint_bits)(input)?;
-    let (input, primary_ref_frame) = if frame_type.is_intra() || error_resilient_mode {
-        (input, PRIMARY_REF_NONE)
-    } else {
-        bit_parsers::take(3usize)(input)?
-    };
+        let input = if sequence_header.frame_id_numbers_present {
+            let (input, _current_frame_id): (_, usize) = bit_parsers::take(id_len.unwrap())(input)?;
+            input
+        } else {
+            input
+        };
+        let (input, frame_size_override_flag) = if frame_type == FrameType::Switch {
+            (input, true)
+        } else if sequence_header.reduced_still_picture_header {
+            (input, false)
+        } else {
+            take_bool_bit(input)?
+        };
+        let (input, order_hint): (_, u64) =
+            bit_parsers::take(sequence_header.order_hint_bits)(input)?;
+        let (input, primary_ref_frame) = if frame_type.is_intra() || error_resilient_mode {
+            (input, PRIMARY_REF_NONE)
+        } else {
+            bit_parsers::take(3usize)(input)?
+        };
 
-    let mut input = input;
-    if let Some(decoder_model_info) = sequence_headers.decoder_model_info {
-        let (inner_input, buffer_removal_time_present_flag) = take_bool_bit(input)?;
-        if buffer_removal_time_present_flag {
-            for op_num in 0..=sequence_headers.operating_points_cnt_minus_1 {
-                if sequence_headers.decoder_model_present_for_op[op_num] {
-                    let op_pt_idc = sequence_headers.operating_point_idc[op_num];
-                    let temporal_id = obu_headers.extension.map_or(0, |ext| ext.temporal_id);
-                    let spatial_id = obu_headers.extension.map_or(0, |ext| ext.spatial_id);
-                    let in_temporal_layer = (op_pt_idc >> temporal_id) & 1 > 0;
-                    let in_spatial_layer = (op_pt_idc >> (spatial_id + 8)) & 1 > 0;
-                    if op_pt_idc == 0 || (in_temporal_layer && in_spatial_layer) {
-                        let n = decoder_model_info.buffer_removal_time_length_minus_1 + 1;
-                        let (inner_input, _buffer_removal_time): (_, u64) =
-                            bit_parsers::take(n)(inner_input)?;
-                        input = inner_input;
+        let mut input = input;
+        if let Some(decoder_model_info) = sequence_header.decoder_model_info {
+            let (inner_input, buffer_removal_time_present_flag) = take_bool_bit(input)?;
+            if buffer_removal_time_present_flag {
+                for op_num in 0..=sequence_header.operating_points_cnt_minus_1 {
+                    if sequence_header.decoder_model_present_for_op[op_num] {
+                        let op_pt_idc = sequence_header.operating_point_idc[op_num];
+                        let temporal_id = obu_headers.extension.map_or(0, |ext| ext.temporal_id);
+                        let spatial_id = obu_headers.extension.map_or(0, |ext| ext.spatial_id);
+                        let in_temporal_layer = (op_pt_idc >> temporal_id) & 1 > 0;
+                        let in_spatial_layer = (op_pt_idc >> (spatial_id + 8)) & 1 > 0;
+                        if op_pt_idc == 0 || (in_temporal_layer && in_spatial_layer) {
+                            let n = decoder_model_info.buffer_removal_time_length_minus_1 + 1;
+                            let (inner_input, _buffer_removal_time): (_, u64) =
+                                bit_parsers::take(n)(inner_input)?;
+                            input = inner_input;
+                        }
                     }
                 }
             }
         }
-    }
 
-    let mut allow_intrabc = false;
-    let (input, refresh_frame_flags): (_, u8) =
-        if frame_type == FrameType::Switch || (frame_type == FrameType::Key && show_frame) {
-            (input, REFRESH_ALL_FRAMES)
-        } else {
-            bit_parsers::take(8usize)(input)?
-        };
-
-    let mut input = input;
-    if (!frame_type.is_intra() || refresh_frame_flags != REFRESH_ALL_FRAMES)
-        && error_resilient_mode
-        && sequence_headers.enable_order_hint()
-    {
-        for i in 0..NUM_REF_FRAMES {
-            let (inner_input, cur_ref_order_hint): (_, u64) =
-                bit_parsers::take(sequence_headers.order_hint_bits)(input)?;
-            big_ref_order_hint[i] = ref_order_hint[i];
-            ref_order_hint[i] = cur_ref_order_hint;
-            if ref_order_hint[i] != big_ref_order_hint[i] {
-                big_ref_valid[i] = false;
-            }
-            input = inner_input;
-        }
-    }
-
-    let max_frame_size = Dimensions {
-        width: sequence_headers.max_frame_width_minus_1 + 1,
-        height: sequence_headers.max_frame_height_minus_1 + 1,
-    };
-    let (input, use_ref_frame_mvs, frame_size, upscaled_size) = if frame_type.is_intra() {
-        let (input, frame_size) = frame_size(
-            input,
-            frame_size_override_flag,
-            sequence_headers.enable_superres,
-            sequence_headers.frame_width_bits_minus_1 + 1,
-            sequence_headers.frame_height_bits_minus_1 + 1,
-            max_frame_size,
-        )?;
-        let mut upscaled_size = frame_size;
-        let (input, _render_size) = render_size(input, frame_size, &mut upscaled_size)?;
-        (
-            if allow_screen_content_tools && upscaled_size.width == frame_size.width {
-                let (input, allow_intrabc_inner) = take_bool_bit(input)?;
-                allow_intrabc = allow_intrabc_inner;
-                input
+        let mut allow_intrabc = false;
+        let (input, refresh_frame_flags): (_, u8) =
+            if frame_type == FrameType::Switch || (frame_type == FrameType::Key && show_frame) {
+                (input, REFRESH_ALL_FRAMES)
             } else {
-                input
-            },
-            false,
-            frame_size,
-            upscaled_size,
-        )
-    } else {
-        let (mut input, frame_refs_short_signaling) = if sequence_headers.enable_order_hint() {
-            let (input, frame_refs_short_signaling) = take_bool_bit(input)?;
-            if frame_refs_short_signaling {
-                let (input, _last_frame_idx): (_, u8) = bit_parsers::take(3usize)(input)?;
-                let (input, _gold_frame_idx): (_, u8) = bit_parsers::take(3usize)(input)?;
-                let (input, _) = set_frame_refs(input)?;
-                (input, frame_refs_short_signaling)
-            } else {
-                (input, frame_refs_short_signaling)
-            }
-        } else {
-            (input, false)
-        };
+                bit_parsers::take(8usize)(input)?
+            };
 
-        for ref_frame_idx in ref_frame_idx.iter_mut() {
-            if frame_refs_short_signaling {
-                *ref_frame_idx = 0;
-            } else {
-                let (inner_input, this_ref_frame_idx) = bit_parsers::take(3usize)(input)?;
+        let mut input = input;
+        if (!frame_type.is_intra() || refresh_frame_flags != REFRESH_ALL_FRAMES)
+            && error_resilient_mode
+            && sequence_header.enable_order_hint()
+        {
+            for i in 0..NUM_REF_FRAMES {
+                let (inner_input, cur_ref_order_hint): (_, u64) =
+                    bit_parsers::take(sequence_header.order_hint_bits)(input)?;
+                self.big_ref_order_hint[i] = self.ref_order_hint[i];
+                self.ref_order_hint[i] = cur_ref_order_hint;
+                if self.ref_order_hint[i] != self.big_ref_order_hint[i] {
+                    self.big_ref_valid[i] = false;
+                }
                 input = inner_input;
-                *ref_frame_idx = this_ref_frame_idx;
-                if sequence_headers.frame_id_numbers_present {
-                    let n = sequence_headers.delta_frame_id_len_minus_2 + 2;
-                    let (inner_input, _delta_frame_id_minus_1): (_, u64) =
-                        bit_parsers::take(n)(input)?;
+            }
+        }
+
+        let max_frame_size = Dimensions {
+            width: sequence_header.max_frame_width_minus_1 + 1,
+            height: sequence_header.max_frame_height_minus_1 + 1,
+        };
+        let (input, use_ref_frame_mvs, frame_size, upscaled_size) = if frame_type.is_intra() {
+            let (input, frame_size) = frame_size(
+                input,
+                frame_size_override_flag,
+                sequence_header.enable_superres,
+                sequence_header.frame_width_bits_minus_1 + 1,
+                sequence_header.frame_height_bits_minus_1 + 1,
+                max_frame_size,
+            )?;
+            let mut upscaled_size = frame_size;
+            let (input, _render_size) = render_size(input, frame_size, &mut upscaled_size)?;
+            (
+                if allow_screen_content_tools && upscaled_size.width == frame_size.width {
+                    let (input, allow_intrabc_inner) = take_bool_bit(input)?;
+                    allow_intrabc = allow_intrabc_inner;
+                    input
+                } else {
+                    input
+                },
+                false,
+                frame_size,
+                upscaled_size,
+            )
+        } else {
+            let (mut input, frame_refs_short_signaling) = if sequence_header.enable_order_hint() {
+                let (input, frame_refs_short_signaling) = take_bool_bit(input)?;
+                if frame_refs_short_signaling {
+                    let (input, _last_frame_idx): (_, u8) = bit_parsers::take(3usize)(input)?;
+                    let (input, _gold_frame_idx): (_, u8) = bit_parsers::take(3usize)(input)?;
+                    let (input, _) = set_frame_refs(input)?;
+                    (input, frame_refs_short_signaling)
+                } else {
+                    (input, frame_refs_short_signaling)
+                }
+            } else {
+                (input, false)
+            };
+
+            for ref_frame_idx in &mut self.ref_frame_idx {
+                if frame_refs_short_signaling {
+                    *ref_frame_idx = 0;
+                } else {
+                    let (inner_input, this_ref_frame_idx) = bit_parsers::take(3usize)(input)?;
                     input = inner_input;
+                    *ref_frame_idx = this_ref_frame_idx;
+                    if sequence_header.frame_id_numbers_present {
+                        let n = sequence_header.delta_frame_id_len_minus_2 + 2;
+                        let (inner_input, _delta_frame_id_minus_1): (_, u64) =
+                            bit_parsers::take(n)(input)?;
+                        input = inner_input;
+                    }
                 }
             }
-        }
-        let (input, frame_size, upscaled_size) =
-            if frame_size_override_flag && !error_resilient_mode {
-                let mut frame_size = max_frame_size;
-                let mut upscaled_size = frame_size;
-                let (input, frame_size) = frame_size_with_refs(
-                    input,
-                    sequence_headers.enable_superres,
-                    frame_size_override_flag,
-                    sequence_headers.frame_width_bits_minus_1 + 1,
-                    sequence_headers.frame_height_bits_minus_1 + 1,
-                    max_frame_size,
-                    &mut frame_size,
-                    &mut upscaled_size,
-                )?;
-                (input, frame_size, upscaled_size)
-            } else {
-                let (input, frame_size) = frame_size(
-                    input,
-                    frame_size_override_flag,
-                    sequence_headers.enable_superres,
-                    sequence_headers.frame_width_bits_minus_1 + 1,
-                    sequence_headers.frame_height_bits_minus_1 + 1,
-                    max_frame_size,
-                )?;
-                let mut upscaled_size = frame_size;
-                let (input, _render_size) = render_size(input, frame_size, &mut upscaled_size)?;
-                (input, frame_size, upscaled_size)
-            };
-        let (input, _allow_high_precision_mv) = if sequence_headers.force_integer_mv == 1 {
-            (input, false)
-        } else {
-            take_bool_bit(input)?
-        };
-        let (input, _) = read_interpolation_filter(input)?;
-        let (input, _is_motion_mode_switchable) = take_bool_bit(input)?;
-        let (input, use_ref_frame_mvs) =
-            if error_resilient_mode || !sequence_headers.enable_ref_frame_mvs {
+            let (input, frame_size, upscaled_size) =
+                if frame_size_override_flag && !error_resilient_mode {
+                    let mut frame_size = max_frame_size;
+                    let mut upscaled_size = frame_size;
+                    let (input, frame_size) = frame_size_with_refs(
+                        input,
+                        sequence_header.enable_superres,
+                        frame_size_override_flag,
+                        sequence_header.frame_width_bits_minus_1 + 1,
+                        sequence_header.frame_height_bits_minus_1 + 1,
+                        max_frame_size,
+                        &mut frame_size,
+                        &mut upscaled_size,
+                    )?;
+                    (input, frame_size, upscaled_size)
+                } else {
+                    let (input, frame_size) = frame_size(
+                        input,
+                        frame_size_override_flag,
+                        sequence_header.enable_superres,
+                        sequence_header.frame_width_bits_minus_1 + 1,
+                        sequence_header.frame_height_bits_minus_1 + 1,
+                        max_frame_size,
+                    )?;
+                    let mut upscaled_size = frame_size;
+                    let (input, _render_size) = render_size(input, frame_size, &mut upscaled_size)?;
+                    (input, frame_size, upscaled_size)
+                };
+            let (input, _allow_high_precision_mv) = if sequence_header.force_integer_mv == 1 {
                 (input, false)
             } else {
                 take_bool_bit(input)?
             };
-        for i in 0..REFS_PER_FRAME {
-            let ref_frame = RefType::Last as usize + i;
-            let hint = big_ref_order_hint[ref_frame_idx[i]];
-            big_order_hints[ref_frame] = hint;
-            // don't think we care about ref frame sign bias
-        }
-        (input, use_ref_frame_mvs, frame_size, upscaled_size)
-    };
-    let (mi_cols, mi_rows) = compute_image_size(frame_size);
+            let (input, _) = read_interpolation_filter(input)?;
+            let (input, _is_motion_mode_switchable) = take_bool_bit(input)?;
+            let (input, use_ref_frame_mvs) =
+                if error_resilient_mode || !sequence_header.enable_ref_frame_mvs {
+                    (input, false)
+                } else {
+                    take_bool_bit(input)?
+                };
+            for i in 0..REFS_PER_FRAME {
+                let ref_frame = RefType::Last as usize + i;
+                let hint = self.big_ref_order_hint[self.ref_frame_idx[i]];
+                self.big_order_hints[ref_frame] = hint;
+                // don't think we care about ref frame sign bias
+            }
+            (input, use_ref_frame_mvs, frame_size, upscaled_size)
+        };
+        let (mi_cols, mi_rows) = compute_image_size(frame_size);
 
-    let (input, _disable_frame_end_update_cdf) =
-        if sequence_headers.reduced_still_picture_header || disable_cdf_update {
-            (input, true)
+        let (input, _disable_frame_end_update_cdf) =
+            if sequence_header.reduced_still_picture_header || disable_cdf_update {
+                (input, true)
+            } else {
+                take_bool_bit(input)?
+            };
+        let input = if primary_ref_frame == PRIMARY_REF_NONE {
+            let (input, _) = init_non_coeff_cdfs(input)?;
+            let (input, _) = setup_past_independence(input)?;
+            input
+        } else {
+            let (input, _) = load_cdfs(input)?;
+            let (input, _) = load_previous(input)?;
+            input
+        };
+        let input = if use_ref_frame_mvs {
+            motion_field_estimation(input)?.0
+        } else {
+            input
+        };
+        let (input, tile_info) = tile_info(
+            input,
+            sequence_header.use_128x128_superblock,
+            mi_cols,
+            mi_rows,
+        )?;
+        let (input, q_params) = quantization_params(
+            input,
+            sequence_header.color_config.num_planes,
+            sequence_header.color_config.separate_uv_delta_q,
+        )?;
+        let (input, segmentation_data) = segmentation_params(input, primary_ref_frame)?;
+        let (input, delta_q_present) = delta_q_params(input, q_params.base_q_idx)?;
+        let (input, _) = delta_lf_params(input, delta_q_present, allow_intrabc)?;
+        let input = if primary_ref_frame == PRIMARY_REF_NONE {
+            init_coeff_cdfs(input)?.0
+        } else {
+            load_previous_segment_ids(input)?.0
+        };
+
+        let mut coded_lossless = true;
+        for segment_id in 0..MAX_SEGMENTS {
+            let qindex = get_qindex(
+                true,
+                segment_id,
+                q_params.base_q_idx,
+                None,
+                segmentation_data.as_ref(),
+            );
+            let lossless = qindex == 0
+                && q_params.deltaq_y_dc == 0
+                && q_params.deltaq_u_ac == 0
+                && q_params.deltaq_u_dc == 0
+                && q_params.deltaq_v_ac == 0
+                && q_params.deltaq_v_dc == 0;
+            if !lossless {
+                coded_lossless = false;
+                break;
+            }
+        }
+        let all_losslesss = coded_lossless && frame_size.width == upscaled_size.width;
+        let (input, _) = loop_filter_params(
+            input,
+            coded_lossless,
+            allow_intrabc,
+            sequence_header.color_config.num_planes,
+        )?;
+        let (input, _) = cdef_params(
+            input,
+            coded_lossless,
+            allow_intrabc,
+            sequence_header.enable_cdef,
+            sequence_header.color_config.num_planes,
+        )?;
+        let (input, _) = lr_params(
+            input,
+            all_losslesss,
+            allow_intrabc,
+            sequence_header.enable_restoration,
+            sequence_header.use_128x128_superblock,
+            sequence_header.color_config.num_planes,
+            sequence_header.color_config.subsampling,
+        )?;
+        let (input, _) = read_tx_mode(input, coded_lossless)?;
+        let (input, reference_select) = frame_reference_mode(input, frame_type.is_intra())?;
+        let (input, _) = skip_mode_params(
+            input,
+            frame_type.is_intra(),
+            reference_select,
+            sequence_header.order_hint_bits,
+            order_hint,
+            &self.big_ref_order_hint,
+            &self.ref_frame_idx,
+        )?;
+        let (input, _allow_warped_motion) = if frame_type.is_intra()
+            || error_resilient_mode
+            || !sequence_header.enable_warped_motion
+        {
+            (input, false)
         } else {
             take_bool_bit(input)?
         };
-    let input = if primary_ref_frame == PRIMARY_REF_NONE {
-        let (input, _) = init_non_coeff_cdfs(input)?;
-        let (input, _) = setup_past_independence(input)?;
-        input
-    } else {
-        let (input, _) = load_cdfs(input)?;
-        let (input, _) = load_previous(input)?;
-        input
-    };
-    let input = if use_ref_frame_mvs {
-        motion_field_estimation(input)?.0
-    } else {
-        input
-    };
-    let (input, tile_info) = tile_info(
-        input,
-        sequence_headers.use_128x128_superblock,
-        mi_cols,
-        mi_rows,
-    )?;
-    let (input, q_params) = quantization_params(
-        input,
-        sequence_headers.color_config.num_planes,
-        sequence_headers.color_config.separate_uv_delta_q,
-    )?;
-    let (input, segmentation_data) = segmentation_params(input, primary_ref_frame)?;
-    let (input, delta_q_present) = delta_q_params(input, q_params.base_q_idx)?;
-    let (input, _) = delta_lf_params(input, delta_q_present, allow_intrabc)?;
-    let input = if primary_ref_frame == PRIMARY_REF_NONE {
-        init_coeff_cdfs(input)?.0
-    } else {
-        load_previous_segment_ids(input)?.0
-    };
+        let (input, _reduced_tx_set) = take_bool_bit(input)?;
+        let (input, _) = global_motion_params(input, frame_type.is_intra())?;
+        let (input, film_grain_params) = film_grain_params(
+            input,
+            sequence_header.film_grain_params_present,
+            show_frame,
+            showable_frame,
+            frame_type,
+            sequence_header.color_config.num_planes == 1,
+            sequence_header.color_config.subsampling,
+        )?;
 
-    let mut coded_lossless = true;
-    for segment_id in 0..MAX_SEGMENTS {
-        let qindex = get_qindex(
-            true,
-            segment_id,
-            q_params.base_q_idx,
-            None,
-            segmentation_data.as_ref(),
-        );
-        let lossless = qindex == 0
-            && q_params.deltaq_y_dc == 0
-            && q_params.deltaq_u_ac == 0
-            && q_params.deltaq_u_dc == 0
-            && q_params.deltaq_v_ac == 0
-            && q_params.deltaq_v_dc == 0;
-        if !lossless {
-            coded_lossless = false;
-            break;
+        for i in 0..NUM_REF_FRAMES {
+            if (refresh_frame_flags >> i) & 1 == 1 {
+                self.big_ref_valid[i] = true;
+                self.big_ref_order_hint[i] = order_hint;
+            }
         }
-    }
-    let all_losslesss = coded_lossless && frame_size.width == upscaled_size.width;
-    let (input, _) = loop_filter_params(
-        input,
-        coded_lossless,
-        allow_intrabc,
-        sequence_headers.color_config.num_planes,
-    )?;
-    let (input, _) = cdef_params(
-        input,
-        coded_lossless,
-        allow_intrabc,
-        sequence_headers.enable_cdef,
-        sequence_headers.color_config.num_planes,
-    )?;
-    let (input, _) = lr_params(
-        input,
-        all_losslesss,
-        allow_intrabc,
-        sequence_headers.enable_restoration,
-        sequence_headers.use_128x128_superblock,
-        sequence_headers.color_config.num_planes,
-        sequence_headers.color_config.subsampling,
-    )?;
-    let (input, _) = read_tx_mode(input, coded_lossless)?;
-    let (input, reference_select) = frame_reference_mode(input, frame_type.is_intra())?;
-    let (input, _) = skip_mode_params(
-        input,
-        frame_type.is_intra(),
-        reference_select,
-        sequence_headers.order_hint_bits,
-        order_hint,
-        big_ref_order_hint,
-        ref_frame_idx,
-    )?;
-    let (input, _allow_warped_motion) = if frame_type.is_intra()
-        || error_resilient_mode
-        || !sequence_headers.enable_warped_motion
-    {
-        (input, false)
-    } else {
-        take_bool_bit(input)?
-    };
-    let (input, _reduced_tx_set) = take_bool_bit(input)?;
-    let (input, _) = global_motion_params(input, frame_type.is_intra())?;
-    let (input, film_grain_params) = film_grain_params(
-        input,
-        sequence_headers.film_grain_params_present,
-        show_frame,
-        showable_frame,
-        frame_type,
-        sequence_headers.color_config.num_planes == 1,
-        sequence_headers.color_config.subsampling,
-    )?;
 
-    for i in 0..NUM_REF_FRAMES {
-        if (refresh_frame_flags >> i) & 1 == 1 {
-            big_ref_valid[i] = true;
-            big_ref_order_hint[i] = order_hint;
-        }
+        Ok((input, FrameHeader {
+            show_frame,
+            show_existing_frame,
+            film_grain_params,
+            tile_info,
+        }))
     }
-
-    Ok((input, FrameHeader {
-        show_frame,
-        show_existing_frame,
-        film_grain_params,
-        tile_info,
-    }))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
