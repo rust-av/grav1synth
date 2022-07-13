@@ -18,6 +18,7 @@ dialoguer = "0.10.1"
 ffmpeg = { version = "5.0.3", default-features = false, features = [
     "format",
 ], package = "ffmpeg-next" }
+log = "0.4.17"
 nom = "7.1.0"
 num-traits = "0.2.15"
 num_enum = "0.5.7"

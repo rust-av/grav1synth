@@ -56,6 +56,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use dialoguer::Confirm;
 use ffmpeg::{format, Rational};
+use log::{error, info, warn};
 use parser::grain::{FilmGrainHeader, FilmGrainParams};
 
 use crate::{parser::BitstreamParser, reader::BitstreamReader};
@@ -76,7 +77,7 @@ pub fn main() -> Result<()> {
             overwrite,
         } => {
             if input == output {
-                eprintln!(
+                error!(
                     "Input and output paths are the same. This is probably a typo, because this \
                      would overwrite your input. Exiting."
                 );
@@ -92,7 +93,7 @@ pub fn main() -> Result<()> {
                     ))
                     .interact()?
             {
-                eprintln!("Not overwriting existing file. Exiting.");
+                warn!("Not overwriting existing file. Exiting.");
                 return Ok(());
             }
 
@@ -105,7 +106,7 @@ pub fn main() -> Result<()> {
                 .iter()
                 .any(|h| matches!(h, &FilmGrainHeader::UpdateGrain(_)))
             {
-                eprintln!("No film grain headers found--this video does not use grain synthesis");
+                info!("No film grain headers found--this video does not use grain synthesis");
                 return Ok(());
             }
 
@@ -120,7 +121,7 @@ pub fn main() -> Result<()> {
             }
             output_file.flush()?;
 
-            eprintln!("Done, wrote grain table to {}", output.to_string_lossy());
+            info!("Done, wrote grain table to {}", output.to_string_lossy());
         }
         Commands::Apply {
             input,
@@ -129,7 +130,7 @@ pub fn main() -> Result<()> {
             grain,
         } => {
             if input == output {
-                eprintln!(
+                error!(
                     "Input and output paths are the same. This is probably a typo, because this \
                      would overwrite your input. Exiting."
                 );
@@ -145,7 +146,7 @@ pub fn main() -> Result<()> {
                     ))
                     .interact()?
             {
-                eprintln!("Not overwriting existing file. Exiting.");
+                warn!("Not overwriting existing file. Exiting.");
                 return Ok(());
             }
 
@@ -157,7 +158,7 @@ pub fn main() -> Result<()> {
             overwrite,
         } => {
             if input == output {
-                eprintln!(
+                error!(
                     "Input and output paths are the same. This is probably a typo, because this \
                      would overwrite your input. Exiting."
                 );
@@ -173,7 +174,7 @@ pub fn main() -> Result<()> {
                     ))
                     .interact()?
             {
-                eprintln!("Not overwriting existing file. Exiting.");
+                warn!("Not overwriting existing file. Exiting.");
                 return Ok(());
             }
 
@@ -183,7 +184,7 @@ pub fn main() -> Result<()> {
                 BitstreamParser::with_writer(reader, writer, None);
             parser.remove_grain_headers()?;
 
-            eprintln!("Done, wrote output file to {}", output.to_string_lossy());
+            info!("Done, wrote output file to {}", output.to_string_lossy());
         }
     }
 

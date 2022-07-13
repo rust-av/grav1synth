@@ -6,6 +6,7 @@ use ffmpeg::{
     Packet,
     Rational,
 };
+use log::warn;
 use nom::Finish;
 
 use self::{
@@ -150,7 +151,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         );
 
         if self.parsed {
-            eprintln!("Already called remove_grain_headers--calling it again does nothing");
+            warn!("Already called remove_grain_headers--calling it again does nothing");
             return Ok(());
         }
 
