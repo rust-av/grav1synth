@@ -67,6 +67,10 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         input: &'a [u8],
         obu_header: ObuHeader,
     ) -> IResult<&'a [u8], Option<FrameHeader>, VerboseError<&'a [u8]>> {
+        if WRITE {
+            todo!("Handle writing");
+        }
+
         let input_len = input.len();
         let (input, frame_header) = context("Failed parsing frame header", |input| {
             self.parse_frame_header(input, obu_header)
@@ -98,6 +102,10 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
     ) -> IResult<&'a [u8], Option<FrameHeader>, VerboseError<&'a [u8]>> {
         if self.seen_frame_header {
             return Ok((input, None));
+        }
+
+        if WRITE {
+            todo!("Handle writing");
         }
 
         self.seen_frame_header = true;

@@ -18,6 +18,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         &mut self,
         input: &'a [u8],
     ) -> IResult<&'a [u8], Option<Obu>, VerboseError<&'a [u8]>> {
+        let pre_input = input;
         let (input, obu_header) = context("Failed parsing obu header", parse_obu_header)(input)?;
         let (input, obu_size) = if obu_header.has_size_field {
             let (input, result) = context("Failed parsing obu size", leb128)(input)?;
@@ -30,6 +31,10 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             )
         };
         self.size = obu_size;
+        if WRITE {
+            let header_size = pre_input.len() - input.len();
+            self.packet_out.extend_from_slice(&pre_input[..header_size]);
+        }
 
         if obu_header.obu_type != ObuType::SequenceHeader
             && obu_header.obu_type != ObuType::TemporalDelimiter
@@ -41,6 +46,9 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                         let in_temporal_layer = (op_pt_idc >> obu_ext.temporal_id) & 1 > 0;
                         let in_spatial_layer = (op_pt_idc >> (obu_ext.spatial_id + 8)) & 1 > 0;
                         if !in_temporal_layer || !in_spatial_layer {
+                            if WRITE {
+                                self.packet_out.extend_from_slice(&input[..obu_size]);
+                            }
                             return Ok((&input[obu_size..], None));
                         }
                     }
@@ -50,20 +58,22 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
 
         match obu_header.obu_type {
             ObuType::SequenceHeader => {
-                let (input, header) = context(
-                    "Failed parsing sequence header",
-                    Self::parse_sequence_header,
-                )(input)?;
+                let (input, header) = context("Failed parsing sequence header", |input| {
+                    // Writing handled within this function
+                    self.parse_sequence_header(input)
+                })(input)?;
                 Ok((input, Some(Obu::SequenceHeader(header))))
             }
             ObuType::Frame => {
                 let (input, header) = context("Failed parsing frame obu", |input| {
+                    // Writing handled within this function
                     self.parse_frame_obu(input, obu_header)
                 })(input)?;
                 Ok((input, header.map(Obu::FrameHeader)))
             }
             ObuType::FrameHeader => {
                 let (input, header) = context("Failed parsing frame header", |input| {
+                    // Writing handled within this function
                     self.parse_frame_header(input, obu_header)
                 })(input)?;
                 Ok((input, header.map(Obu::FrameHeader)))
@@ -75,9 +85,17 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             }
             ObuType::TemporalDelimiter => {
                 self.seen_frame_header = false;
+                if WRITE {
+                    self.packet_out.extend_from_slice(&input[..obu_size]);
+                }
                 Ok((&input[obu_size..], None))
             }
-            _ => Ok((&input[obu_size..], None)),
+            _ => {
+                if WRITE {
+                    self.packet_out.extend_from_slice(&input[..obu_size]);
+                }
+                Ok((&input[obu_size..], None))
+            }
         }
     }
 }

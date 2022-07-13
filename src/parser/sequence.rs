@@ -1,4 +1,5 @@
 use arrayvec::ArrayVec;
+use bit::BitIndex;
 use nom::{bits, bits::complete as bit_parsers, error::VerboseError, IResult};
 use num_enum::TryFromPrimitive;
 
@@ -139,10 +140,12 @@ pub enum MatrixCoefficients {
 
 impl<const WRITE: bool> BitstreamParser<WRITE> {
     #[allow(clippy::too_many_lines)]
-    pub fn parse_sequence_header(
-        input: &[u8],
-    ) -> IResult<&[u8], SequenceHeader, VerboseError<&[u8]>> {
-        bits(|input| {
+    pub fn parse_sequence_header<'a>(
+        &mut self,
+        input: &'a [u8],
+    ) -> IResult<&'a [u8], SequenceHeader, VerboseError<&'a [u8]>> {
+        let mut packet_out = if WRITE { input.to_owned() } else { Vec::new() };
+        bits(move |input| {
             let (input, seq_profile): (_, u8) = bit_parsers::take(3usize)(input)?;
             let (input, _still_picture) = take_bool_bit(input)?;
             let (input, reduced_still_picture_header) = take_bool_bit(input)?;
@@ -331,6 +334,17 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             let (input, enable_cdef) = take_bool_bit(input)?;
             let (input, enable_restoration) = take_bool_bit(input)?;
             let (input, color_config) = color_config(input, seq_profile)?;
+
+            if WRITE {
+                // Toggle the film grain params present flag
+                // based on whether we are adding or removing film grain.
+                let byte_pos = packet_out.len() - (input.0.len() + input.1 / 8);
+                let bit_offset = input.1 % 8;
+                packet_out[byte_pos] =
+                    *packet_out[byte_pos].set_bit(bit_offset, self.incoming_frame_header.is_some());
+                self.packet_out.extend_from_slice(&packet_out);
+            }
+
             let (input, film_grain_params_present) = take_bool_bit(input)?;
 
             Ok((input, SequenceHeader {

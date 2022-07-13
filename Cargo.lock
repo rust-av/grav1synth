@@ -60,6 +60,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "bit"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b645c5c09a7d4035949cfce1a915785aaad6f17800c35fda8a8c311c491f284"
+
+[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -227,6 +233,7 @@ version = "0.1.0-alpha.3"
 dependencies = [
  "anyhow",
  "arrayvec",
+ "bit",
  "clap",
  "dialoguer",
  "ffmpeg-next",

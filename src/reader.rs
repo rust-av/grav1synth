@@ -39,6 +39,10 @@ impl BitstreamReader {
             .ok_or(ffmpeg::Error::StreamNotFound)?)
     }
 
+    pub fn input(&mut self) -> &mut Input {
+        &mut self.input_ctx
+    }
+
     pub fn read_packet(&mut self) -> Option<Packet> {
         // For some reason there's a crap ton of work needed to get ffmpeg to do
         // something simple, because each codec has it's own stupid way of doing

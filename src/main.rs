@@ -55,7 +55,7 @@ use std::{
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use dialoguer::Confirm;
-use ffmpeg::Rational;
+use ffmpeg::{format, Rational};
 use parser::grain::{FilmGrainHeader, FilmGrainParams};
 
 use crate::{parser::BitstreamParser, reader::BitstreamReader};
@@ -177,7 +177,13 @@ pub fn main() -> Result<()> {
                 return Ok(());
             }
 
-            todo!()
+            let reader = BitstreamReader::open(&input)?;
+            let writer = format::output(&output)?;
+            let mut parser: BitstreamParser<true> =
+                BitstreamParser::with_writer(reader, writer, None);
+            parser.remove_grain_headers()?;
+
+            eprintln!("Done, wrote output file to {}", output.to_string_lossy());
         }
     }
 
@@ -252,7 +258,7 @@ fn write_film_grain_segment(
 }
 
 #[derive(Debug, Clone)]
-struct GrainTableSegment {
+pub struct GrainTableSegment {
     pub start_time: u64,
     pub end_time: u64,
     pub grain_params: FilmGrainParams,
