@@ -119,14 +119,12 @@ impl PartialEq for FilmGrainParams {
 #[allow(clippy::too_many_lines)]
 pub fn film_grain_params(
     input: BitInput,
-    film_grain_params_present: bool,
-    show_frame: bool,
-    showable_frame: bool,
+    film_grain_allowed: bool,
     frame_type: FrameType,
     monochrome: bool,
     subsampling: (u8, u8),
 ) -> IResult<BitInput, FilmGrainHeader, VerboseError<BitInput>> {
-    if !film_grain_params_present || (!show_frame && !showable_frame) {
+    if film_grain_allowed {
         return Ok((input, FilmGrainHeader::Disable));
     }
 

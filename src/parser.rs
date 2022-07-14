@@ -1,11 +1,5 @@
 use anyhow::{anyhow, Result};
-use ffmpeg::{
-    format::context::Output,
-    packet::Ref,
-    sys::av_interleaved_write_frame,
-    Packet,
-    Rational,
-};
+use ffmpeg::{codec, encoder, format::context::Output, media, Packet, Rational, Stream};
 use log::warn;
 use nom::Finish;
 
@@ -25,7 +19,8 @@ pub mod tile_group;
 pub mod util;
 
 pub struct BitstreamParser<const WRITE: bool> {
-    reader: BitstreamReader,
+    // Borrow checker REEEE
+    reader: Option<BitstreamReader>,
     writer: Option<Output>,
     packet_out: Vec<u8>,
     incoming_frame_header: Option<Vec<GrainTableSegment>>,
@@ -52,7 +47,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         );
 
         Self {
-            reader,
+            reader: Some(reader),
             writer: None,
             packet_out: Vec::new(),
             parsed: Default::default(),
@@ -72,8 +67,8 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
 
     #[must_use]
     pub fn with_writer(
-        mut reader: BitstreamReader,
-        mut writer: Output,
+        reader: BitstreamReader,
+        writer: Output,
         incoming_frame_header: Option<Vec<GrainTableSegment>>,
     ) -> Self {
         assert!(
@@ -81,11 +76,8 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             "Can only create a BitstreamParser with writer if the WRITE generic is true"
         );
 
-        writer.set_metadata(reader.input().metadata().to_owned());
-        writer.write_header().unwrap();
-
         Self {
-            reader,
+            reader: Some(reader),
             writer: Some(writer),
             incoming_frame_header,
             packet_out: Vec::new(),
@@ -104,7 +96,12 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
     }
 
     pub fn get_frame_rate(&mut self) -> Result<Rational> {
-        Ok(self.reader.get_video_stream()?.avg_frame_rate())
+        Ok(self
+            .reader
+            .as_ref()
+            .unwrap()
+            .get_video_stream()?
+            .avg_frame_rate())
     }
 
     pub fn get_grain_headers(&mut self) -> Result<&[FilmGrainHeader]> {
@@ -112,8 +109,13 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             return Ok(&self.grain_headers);
         }
 
-        while let Some(packet) = self.reader.read_packet() {
+        let mut reader = self.reader.take().unwrap();
+        let stream_idx = reader.get_video_stream()?.index();
+        for (stream, packet) in reader.input().packets() {
             if let Some(mut input) = packet.data() {
+                if stream.index() != stream_idx {
+                    continue;
+                }
                 loop {
                     let (inner_input, obu) = self
                         .parse_obu(input)
@@ -155,8 +157,51 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             return Ok(());
         }
 
-        while let Some(packet) = self.reader.read_packet() {
+        let mut reader = self.reader.take().unwrap();
+        let stream_idx = reader.get_video_stream()?.index();
+        let ictx = reader.input();
+        let mut stream_mapping = vec![0; ictx.nb_streams() as _];
+        let mut ist_time_bases = vec![Rational(0, 1); ictx.nb_streams() as _];
+        let mut ost_index = 0;
+        for (ist_index, ist) in ictx.streams().enumerate() {
+            let ist_medium = ist.parameters().medium();
+            if ist_medium != media::Type::Audio
+                && ist_medium != media::Type::Video
+                && ist_medium != media::Type::Subtitle
+            {
+                stream_mapping[ist_index] = -1;
+                continue;
+            }
+            stream_mapping[ist_index] = ost_index;
+            ist_time_bases[ist_index] = ist.time_base();
+            ost_index += 1isize;
+            let mut ost = self
+                .writer
+                .as_mut()
+                .unwrap()
+                .add_stream(encoder::find(codec::Id::None))
+                .unwrap();
+            ost.set_parameters(ist.parameters());
+            // SAFETY: We need to set codec_tag to 0 lest we run into incompatible codec tag
+            // issues when muxing into a different container format. Unfortunately
+            // there's no high level API to do this (yet).
+            unsafe {
+                (*ost.parameters().as_mut_ptr()).codec_tag = 0;
+            }
+        }
+
+        self.writer
+            .as_mut()
+            .unwrap()
+            .set_metadata(ictx.metadata().to_owned());
+        self.writer.as_mut().unwrap().write_header().unwrap();
+
+        for (stream, packet) in ictx.packets() {
             if let Some(mut input) = packet.data() {
+                if stream.index() != stream_idx {
+                    self.write_packet(packet, &stream, &stream_mapping, &ist_time_bases)?;
+                    continue;
+                }
                 loop {
                     let (inner_input, obu) = self
                         .parse_obu(input)
@@ -177,33 +222,42 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     }
                 }
 
-                {
-                    let packet = Packet::borrow(&self.packet_out);
-                    // SAFETY: Performs FFI. This is the same code used by
-                    // `Packet::write_interleaved`, but we can't use that directly
-                    // without using `Packet::copy` (which, of course, involves copying data)
-                    // because the `Borrow` interface only lets us access a raw `AVPacket` and not
-                    // the Rustified `Packet` struct.
-                    unsafe {
-                        match av_interleaved_write_frame(
-                            self.writer.as_mut().unwrap().as_mut_ptr(),
-                            packet.as_ptr() as *mut _,
-                        ) {
-                            0i32 => Ok(()),
-                            e => Err(ffmpeg::Error::from(e)),
-                        }?;
-                    }
-                }
+                let packet = Packet::copy(&self.packet_out);
+                self.write_packet(packet, &stream, &stream_mapping, &ist_time_bases)?;
                 self.packet_out.clear();
             } else {
                 break;
             }
         }
 
+        self.writer.as_mut().unwrap().write_trailer().unwrap();
         self.parsed = true;
 
-        todo!("Remux the video into the container");
+        Ok(())
+    }
 
+    fn write_packet(
+        &mut self,
+        mut packet: Packet,
+        stream: &Stream,
+        stream_mapping: &[isize],
+        ist_time_bases: &[Rational],
+    ) -> Result<()> {
+        let ist_index = stream.index();
+        let ost_index = stream_mapping[ist_index];
+        if ost_index < 0 {
+            return Ok(());
+        }
+        let ost = self
+            .writer
+            .as_mut()
+            .unwrap()
+            .stream(ost_index as _)
+            .unwrap();
+        packet.rescale_ts(ist_time_bases[ist_index], ost.time_base());
+        packet.set_position(-1);
+        packet.set_stream(ost_index as _);
+        packet.write_interleaved(self.writer.as_mut().unwrap())?;
         Ok(())
     }
 }

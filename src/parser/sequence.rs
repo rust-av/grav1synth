@@ -144,7 +144,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         &mut self,
         input: &'a [u8],
     ) -> IResult<&'a [u8], SequenceHeader, VerboseError<&'a [u8]>> {
-        let mut packet_out = if WRITE { input.to_owned() } else { Vec::new() };
+        let mut obu_out = if WRITE { input.to_owned() } else { Vec::new() };
         bits(move |input| {
             let (input, seq_profile): (_, u8) = bit_parsers::take(3usize)(input)?;
             let (input, _still_picture) = take_bool_bit(input)?;
@@ -338,11 +338,11 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             if WRITE {
                 // Toggle the film grain params present flag
                 // based on whether we are adding or removing film grain.
-                let byte_pos = packet_out.len() - (input.0.len() + input.1 / 8);
+                let byte_pos = obu_out.len() - (input.0.len() + input.1 / 8);
                 let bit_offset = input.1 % 8;
-                packet_out[byte_pos] =
-                    *packet_out[byte_pos].set_bit(bit_offset, self.incoming_frame_header.is_some());
-                self.packet_out.extend_from_slice(&packet_out);
+                obu_out[byte_pos] =
+                    *obu_out[byte_pos].set_bit(bit_offset, self.incoming_frame_header.is_some());
+                self.packet_out.extend_from_slice(&obu_out);
             }
 
             let (input, film_grain_params_present) = take_bool_bit(input)?;

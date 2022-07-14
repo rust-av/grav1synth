@@ -182,6 +182,7 @@ pub fn main() -> Result<()> {
             let writer = format::output(&output)?;
             let mut parser: BitstreamParser<true> =
                 BitstreamParser::with_writer(reader, writer, None);
+
             parser.remove_grain_headers()?;
 
             info!("Done, wrote output file to {}", output.to_string_lossy());

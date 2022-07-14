@@ -36,6 +36,9 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             self.seen_frame_header = false;
         }
 
+        if WRITE {
+            self.packet_out.extend_from_slice(&input[..size]);
+        }
         Ok((&input[size..], ()))
     }
 }
