@@ -1,5 +1,6 @@
 use std::fmt::Debug;
 
+use arrayvec::ArrayVec;
 use nom::{
     bits::complete as bit_parsers,
     bytes::complete::take,
@@ -56,6 +57,36 @@ pub fn leb128(mut input: &[u8]) -> IResult<&[u8], ReadResult<u64>, VerboseError<
     }))
 }
 
+/// Unsigned integer represented by a variable number of little-endian bytes.
+///
+/// NOTE from libaom:
+/// Disallow values larger than 32-bits to ensure consistent behavior on 32 and
+/// 64 bit targets: value is typically used to determine buffer allocation size
+/// when decoded.
+#[must_use]
+pub fn leb128_write(value: u32) -> ArrayVec<u8, 8> {
+    let mut coded_value = ArrayVec::new();
+
+    let mut value = value;
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7u8;
+        if value != 0 {
+            // Signal that more bytes follow.
+            byte |= 0x80;
+        }
+        coded_value.push(byte);
+
+        if value == 0 {
+            // We have to break at the end of the loop
+            // because there must be at least one byte written.
+            break;
+        }
+    }
+
+    coded_value
+}
+
 /// Variable length unsigned n-bit number appearing directly in the bitstream.
 pub fn uvlc(mut input: BitInput) -> IResult<BitInput, u32, VerboseError<BitInput>> {
     let mut leading_zeros = 0usize;
@@ -109,4 +140,18 @@ pub fn floor_log2<T: PrimInt>(mut x: T) -> T {
         s = s + one;
     }
     s - one
+}
+
+#[cfg(test)]
+mod tests {
+    use quickcheck_macros::quickcheck;
+
+    use super::{leb128, leb128_write};
+
+    #[quickcheck]
+    pub fn validate_leb128_write(val: u32) -> bool {
+        let encoded = leb128_write(val);
+        let result = leb128(&encoded).unwrap();
+        u64::from(val) == result.1.value && result.0.is_empty()
+    }
 }

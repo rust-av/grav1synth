@@ -9,19 +9,24 @@ use num_enum::TryFromPrimitive;
 use super::{
     frame::FrameHeader,
     sequence::SequenceHeader,
-    util::{leb128, take_bool_bit, take_zero_bit, BitInput},
+    util::{leb128, leb128_write, take_bool_bit, take_zero_bit, BitInput},
     BitstreamParser,
 };
 
 impl<const WRITE: bool> BitstreamParser<WRITE> {
+    #[allow(clippy::too_many_lines)]
     pub fn parse_obu<'a>(
         &mut self,
         input: &'a [u8],
     ) -> IResult<&'a [u8], Option<Obu>, VerboseError<&'a [u8]>> {
         let pre_input = input;
+        let packet_start_len = self.packet_out.len();
         let (input, obu_header) = context("Failed parsing obu header", parse_obu_header)(input)?;
+        let obu_size_pos = packet_start_len + pre_input.len() - input.len();
+        let mut leb_size = 0;
         let (input, obu_size) = if obu_header.has_size_field {
             let (input, result) = context("Failed parsing obu size", leb128)(input)?;
+            leb_size = result.bytes_read;
             (input, result.value as usize)
         } else {
             debug_assert!(self.size > 0);
@@ -62,6 +67,17 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     // Writing handled within this function
                     self.parse_sequence_header(input)
                 })(input)?;
+                if WRITE && obu_header.has_size_field {
+                    let obu_size_change = (self.packet_out.len() - packet_start_len) as isize
+                        - (pre_input.len() - input.len()) as isize;
+                    if obu_size_change != 0 {
+                        self.adjust_obu_size(
+                            obu_size_pos,
+                            leb_size,
+                            (obu_size as isize + obu_size_change) as usize,
+                        );
+                    }
+                }
                 Ok((input, Some(Obu::SequenceHeader(header))))
             }
             ObuType::Frame => {
@@ -69,6 +85,17 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     // Writing handled within this function
                     self.parse_frame_obu(input, obu_header)
                 })(input)?;
+                if WRITE && obu_header.has_size_field {
+                    let obu_size_change = (self.packet_out.len() - packet_start_len) as isize
+                        - (pre_input.len() - input.len()) as isize;
+                    if obu_size_change != 0 {
+                        self.adjust_obu_size(
+                            obu_size_pos,
+                            leb_size,
+                            (obu_size as isize + obu_size_change) as usize,
+                        );
+                    }
+                }
                 Ok((input, header.map(Obu::FrameHeader)))
             }
             ObuType::FrameHeader => {
@@ -76,6 +103,17 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     // Writing handled within this function
                     self.parse_frame_header(input, obu_header)
                 })(input)?;
+                if WRITE && obu_header.has_size_field {
+                    let obu_size_change = (self.packet_out.len() - packet_start_len) as isize
+                        - (pre_input.len() - input.len()) as isize;
+                    if obu_size_change != 0 {
+                        self.adjust_obu_size(
+                            obu_size_pos,
+                            leb_size,
+                            (obu_size as isize + obu_size_change) as usize,
+                        );
+                    }
+                }
                 Ok((input, header.map(Obu::FrameHeader)))
             }
             ObuType::TileGroup => {
@@ -97,6 +135,16 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 Ok((&input[obu_size..], None))
             }
         }
+    }
+
+    fn adjust_obu_size(&mut self, pos: usize, leb_size: usize, new_obu_size: usize) {
+        let encoded_size = leb128_write(new_obu_size as u32);
+        // Add a little padding just in case the leb grew
+        let mut new_obu = Vec::with_capacity(self.packet_out.len() + 8);
+        new_obu.extend_from_slice(&self.packet_out[..pos]);
+        new_obu.extend_from_slice(&encoded_size);
+        new_obu.extend_from_slice(&self.packet_out[(pos + leb_size)..]);
+        self.packet_out = new_obu;
     }
 }
 

@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use anyhow::{anyhow, Result};
 use ffmpeg::{codec, encoder, format::context::Output, media, Packet, Rational, Stream};
 use log::warn;
@@ -194,9 +196,9 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             .as_mut()
             .unwrap()
             .set_metadata(ictx.metadata().to_owned());
-        self.writer.as_mut().unwrap().write_header().unwrap();
+        self.writer.as_mut().unwrap().write_header()?;
 
-        for (stream, packet) in ictx.packets() {
+        for (stream, mut packet) in ictx.packets() {
             if let Some(mut input) = packet.data() {
                 if stream.index() != stream_idx {
                     self.write_packet(packet, &stream, &stream_mapping, &ist_time_bases)?;
@@ -222,7 +224,20 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     }
                 }
 
-                let packet = Packet::copy(&self.packet_out);
+                let orig_size = packet.size();
+                match self.packet_out.len().cmp(&orig_size) {
+                    Ordering::Greater => {
+                        // `av_grow_packet` takes the number of bytes to grow by.
+                        packet.grow(self.packet_out.len() - orig_size);
+                    }
+                    Ordering::Less => {
+                        // `av_shrink_packet` takes the new size of the packet.
+                        // because consistency.
+                        packet.shrink(self.packet_out.len());
+                    }
+                    Ordering::Equal => (),
+                }
+                packet.data_mut().unwrap().copy_from_slice(&self.packet_out);
                 self.write_packet(packet, &stream, &stream_mapping, &ist_time_bases)?;
                 self.packet_out.clear();
             } else {
