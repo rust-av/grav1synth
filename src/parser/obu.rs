@@ -22,7 +22,8 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         let pre_input = input;
         let packet_start_len = self.packet_out.len();
         let (input, obu_header) = context("Failed parsing obu header", parse_obu_header)(input)?;
-        let obu_size_pos = packet_start_len + pre_input.len() - input.len();
+        let obu_header_size = if obu_header.extension.is_some() { 2 } else { 1 };
+        let obu_size_pos = packet_start_len + obu_header_size;
         let mut leb_size = 0;
         let (input, obu_size) = if obu_header.has_size_field {
             let (input, result) = context("Failed parsing obu size", leb128)(input)?;
@@ -37,8 +38,9 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         };
         self.size = obu_size;
         if WRITE {
-            let header_size = pre_input.len() - input.len();
-            self.packet_out.extend_from_slice(&pre_input[..header_size]);
+            let total_header_size = pre_input.len() - input.len();
+            self.packet_out
+                .extend_from_slice(&pre_input[..total_header_size]);
         }
 
         if obu_header.obu_type != ObuType::SequenceHeader
@@ -68,8 +70,9 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     self.parse_sequence_header(input)
                 })(input)?;
                 if WRITE && obu_header.has_size_field {
-                    let obu_size_change = (self.packet_out.len() - packet_start_len) as isize
-                        - (pre_input.len() - input.len()) as isize;
+                    let bytes_written = self.packet_out.len() - packet_start_len;
+                    let bytes_taken = pre_input.len() - input.len();
+                    let obu_size_change = bytes_written as isize - bytes_taken as isize;
                     if obu_size_change != 0 {
                         self.adjust_obu_size(
                             obu_size_pos,
@@ -78,6 +81,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                         );
                     }
                 }
+
                 Ok((input, Some(Obu::SequenceHeader(header))))
             }
             ObuType::Frame => {
@@ -86,8 +90,9 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     self.parse_frame_obu(input, obu_header)
                 })(input)?;
                 if WRITE && obu_header.has_size_field {
-                    let obu_size_change = (self.packet_out.len() - packet_start_len) as isize
-                        - (pre_input.len() - input.len()) as isize;
+                    let bytes_written = self.packet_out.len() - packet_start_len;
+                    let bytes_taken = pre_input.len() - input.len();
+                    let obu_size_change = bytes_written as isize - bytes_taken as isize;
                     if obu_size_change != 0 {
                         self.adjust_obu_size(
                             obu_size_pos,
@@ -96,6 +101,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                         );
                     }
                 }
+
                 Ok((input, header.map(Obu::FrameHeader)))
             }
             ObuType::FrameHeader => {
@@ -104,8 +110,9 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     self.parse_frame_header(input, obu_header)
                 })(input)?;
                 if WRITE && obu_header.has_size_field {
-                    let obu_size_change = (self.packet_out.len() - packet_start_len) as isize
-                        - (pre_input.len() - input.len()) as isize;
+                    let bytes_written = self.packet_out.len() - packet_start_len;
+                    let bytes_taken = pre_input.len() - input.len();
+                    let obu_size_change = bytes_written as isize - bytes_taken as isize;
                     if obu_size_change != 0 {
                         self.adjust_obu_size(
                             obu_size_pos,
@@ -114,6 +121,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                         );
                     }
                 }
+
                 Ok((input, header.map(Obu::FrameHeader)))
             }
             ObuType::TileGroup => {

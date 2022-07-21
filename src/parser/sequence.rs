@@ -18,6 +18,7 @@ pub struct SequenceHeader {
     pub additional_frame_id_len_minus_1: usize,
     pub delta_frame_id_len_minus_2: usize,
     pub film_grain_params_present: bool,
+    pub new_film_grain_state: bool,
     pub force_screen_content_tools: u8,
     pub force_integer_mv: u8,
     pub order_hint_bits: usize,
@@ -144,7 +145,11 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         &mut self,
         input: &'a [u8],
     ) -> IResult<&'a [u8], SequenceHeader, VerboseError<&'a [u8]>> {
-        let mut obu_out = if WRITE { input.to_owned() } else { Vec::new() };
+        let mut obu_out = if WRITE {
+            input[..self.size].to_owned()
+        } else {
+            Vec::new()
+        };
         bits(move |input| {
             let (input, seq_profile): (_, u8) = bit_parsers::take(3usize)(input)?;
             let (input, _still_picture) = take_bool_bit(input)?;
@@ -338,10 +343,11 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             if WRITE {
                 // Toggle the film grain params present flag
                 // based on whether we are adding or removing film grain.
-                let byte_pos = obu_out.len() - (input.0.len() + input.1 / 8);
-                let bit_offset = input.1 % 8;
-                obu_out[byte_pos] =
-                    *obu_out[byte_pos].set_bit(bit_offset, self.incoming_frame_header.is_some());
+                let bit_offset = input.1;
+                obu_out
+                    .last_mut()
+                    .unwrap()
+                    .set_bit(7 - bit_offset, self.incoming_frame_header.is_some());
                 self.packet_out.extend_from_slice(&obu_out);
             }
 
@@ -353,6 +359,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 additional_frame_id_len_minus_1,
                 delta_frame_id_len_minus_2,
                 film_grain_params_present,
+                new_film_grain_state: self.incoming_frame_header.is_some(),
                 force_screen_content_tools,
                 force_integer_mv,
                 order_hint_bits,

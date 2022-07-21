@@ -520,32 +520,37 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             let (input, _) = global_motion_params(input, frame_type.is_intra())?;
 
             let film_grain_allowed =
-                !sequence_header.film_grain_params_present || (!show_frame && !showable_frame);
-            if WRITE {
-                if film_grain_allowed {
-                    let len = orig_input.len() - input.0.len();
-                    self.packet_out.extend_from_slice(&orig_input[..len]);
+                sequence_header.film_grain_params_present && (show_frame || showable_frame);
+            let written_film_grain_params = if WRITE {
+                let len = orig_input.len() - input.0.len();
+                self.packet_out.extend_from_slice(&orig_input[..len]);
+                if film_grain_allowed && sequence_header.new_film_grain_state {
                     // There will always be at least 1 bit left that we can read
                     let mut extra_byte = orig_input[len];
                     let mut extra_bits_used = input.1;
                     if let Some(new_headers) = self.incoming_frame_header.as_ref() {
-                        extra_byte.set_bit(extra_bits_used, true);
+                        extra_byte.set_bit(7 - extra_bits_used, true);
                         extra_bits_used += 1;
                         todo!("Write new headers");
                     } else {
                         // Sets "apply_grain" to false. We don't need to do anything else.
-                        extra_byte.set_bit(extra_bits_used, false);
+                        extra_byte.set_bit(7 - extra_bits_used, false);
                         self.packet_out.push(extra_byte);
+                        FilmGrainHeader::Disable
                     }
                 } else {
                     // There won't be any bits remaining, and we don't need to append any bits,
                     // so we have to handle this separately.
-                    let len = orig_input.len() - input.0.len() + if input.1 > 0 { 1 } else { 0 };
-                    self.packet_out.extend_from_slice(&orig_input[..len]);
-                };
+                    if input.1 > 0 {
+                        self.packet_out.push(orig_input[len]);
+                    };
+                    FilmGrainHeader::Disable
+                }
+            } else {
+                FilmGrainHeader::Disable
             };
 
-            let (input, film_grain_params) = film_grain_params(
+            let (input, parsed_film_grain_params) = film_grain_params(
                 input,
                 film_grain_allowed,
                 frame_type,
@@ -563,7 +568,11 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             Ok((input, FrameHeader {
                 show_frame,
                 show_existing_frame,
-                film_grain_params,
+                film_grain_params: if WRITE {
+                    written_film_grain_params
+                } else {
+                    parsed_film_grain_params
+                },
                 tile_info,
             }))
         })(input)
@@ -796,8 +805,8 @@ fn tile_info(
         min_log2_tile_cols,
         tile_log2(max_tile_area_sb, sb_rows * sb_cols),
     );
-    let mut tile_rows = 0;
-    let mut tile_cols = 0;
+    let tile_rows;
+    let tile_cols;
 
     let (mut input, uniform_tile_spacing_flag) = take_bool_bit(input)?;
     let (tile_cols_log2, tile_rows_log2) = if uniform_tile_spacing_flag {
@@ -812,10 +821,7 @@ fn tile_info(
             }
         }
         let tile_width_sb = (sb_cols + (1 << tile_cols_log2) - 1) >> tile_cols_log2;
-        for i in (0..sb_cols).step_by(tile_width_sb as usize) {
-            // don't care about MiRowStarts
-            tile_cols = i + 1;
-        }
+        tile_cols = sb_cols / tile_width_sb;
 
         let min_log2_tile_rows = max(min_log2_tiles as i32 - tile_cols_log2 as i32, 0i32) as u32;
         let mut tile_rows_log2 = min_log2_tile_rows;
@@ -829,10 +835,7 @@ fn tile_info(
             }
         }
         let tile_height_sb = (sb_rows + (1 << tile_rows_log2) - 1) >> tile_rows_log2;
-        for i in (0..sb_rows).step_by(tile_height_sb as usize) {
-            // don't care about MiRowStarts
-            tile_rows = i + 1;
-        }
+        tile_rows = sb_rows / tile_height_sb;
 
         (tile_cols_log2, tile_rows_log2)
     } else {
