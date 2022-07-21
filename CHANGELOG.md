@@ -1,3 +1,7 @@
+## Version 0.1.0-alpha.4
+
+- Implement the "remove" command, which removes all grain synthesis from a video
+
 ## Version 0.1.0-alpha.3
 
 - Fix parsing bugs affecting some videos
