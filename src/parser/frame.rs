@@ -542,7 +542,12 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     // There won't be any bits remaining, and we don't need to append any bits,
                     // so we have to handle this separately.
                     if input.1 > 0 {
-                        self.packet_out.push(orig_input[len]);
+                        let mut extra_byte = orig_input[len];
+                        let start_bit = 7 - input.1;
+                        for i in 0..=start_bit {
+                            extra_byte.set_bit(i, false);
+                        }
+                        self.packet_out.push(extra_byte);
                     };
                     FilmGrainHeader::Disable
                 }
