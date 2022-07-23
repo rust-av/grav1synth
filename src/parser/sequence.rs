@@ -347,7 +347,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 obu_out
                     .last_mut()
                     .unwrap()
-                    .set_bit(7 - bit_offset, self.incoming_frame_header.is_some());
+                    .set_bit(7 - bit_offset, self.incoming_grain_header.is_some());
                 self.packet_out.extend_from_slice(&obu_out);
             }
 
@@ -359,7 +359,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 additional_frame_id_len_minus_1,
                 delta_frame_id_len_minus_2,
                 film_grain_params_present,
-                new_film_grain_state: self.incoming_frame_header.is_some(),
+                new_film_grain_state: self.incoming_grain_header.is_some(),
                 force_screen_content_tools,
                 force_integer_mv,
                 order_hint_bits,

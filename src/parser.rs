@@ -27,7 +27,7 @@ pub struct BitstreamParser<const WRITE: bool> {
     reader: Option<BitstreamReader>,
     writer: Option<Output>,
     packet_out: Vec<u8>,
-    incoming_frame_header: Option<Vec<GrainTableSegment>>,
+    incoming_grain_header: Option<Vec<GrainTableSegment>>,
     parsed: bool,
     size: usize,
     seen_frame_header: bool,
@@ -65,7 +65,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             big_ref_valid: Default::default(),
             big_order_hints: Default::default(),
             grain_headers: Default::default(),
-            incoming_frame_header: None,
+            incoming_grain_header: None,
         }
     }
 
@@ -83,7 +83,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         Self {
             reader: Some(reader),
             writer: Some(writer),
-            incoming_frame_header,
+            incoming_grain_header: incoming_frame_header,
             packet_out: Vec::new(),
             parsed: Default::default(),
             size: Default::default(),

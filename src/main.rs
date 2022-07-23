@@ -462,6 +462,7 @@ pub enum Commands {
         #[clap(long, value_parser = clap::value_parser!(u16).range(1..=6400))]
         iso: u16,
         /// Whether to apply grain to the chroma planes as well.
+        #[clap(long)]
         chroma: bool,
     },
     /// Removes all film grain from a given AV1 video,

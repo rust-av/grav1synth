@@ -1,5 +1,6 @@
 use std::cmp::{max, min};
 
+use av1_grain::DEFAULT_GRAIN_SEED;
 use bit::BitIndex;
 use bitvec::{order::Msb0, view::BitView};
 use nom::{
@@ -537,12 +538,19 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     let mut extra_byte = orig_input[len];
                     let extra_bits_used = input.1;
                     if let Some(new_header) = self
-                        .incoming_frame_header
-                        .as_ref()
+                        .incoming_grain_header
+                        .as_mut()
                         .and_then(|segments| {
-                            segments.iter().find(|seg| {
+                            let mut segment = segments.iter_mut().find(|seg| {
                                 seg.start_time <= packet_ts && seg.end_time >= packet_ts
-                            })
+                            });
+                            if let Some(segment) = segment.as_mut() {
+                                segment.grain_params.grain_seed = segment
+                                    .grain_params
+                                    .grain_seed
+                                    .wrapping_add(DEFAULT_GRAIN_SEED);
+                            }
+                            segment
                         })
                         .cloned()
                     {
@@ -673,7 +681,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         // ar_coeffs_y
         let num_pos_luma = 2 * params.ar_coeff_lag as usize * (params.ar_coeff_lag as usize + 1);
         let num_pos_chroma = if num_y_points > 0 {
-            for point in &params.ar_coeffs_y[..=num_pos_luma] {
+            for point in &params.ar_coeffs_y[..num_pos_luma] {
                 let point = (i16::from(*point) + 128) as u8;
                 data.extend(point.view_bits::<Msb0>());
             }
