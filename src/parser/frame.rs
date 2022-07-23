@@ -1,7 +1,7 @@
 use std::cmp::{max, min};
 
 use bit::BitIndex;
-use bitvec::order::Msb0;
+use bitvec::{order::Msb0, view::BitView};
 use nom::{
     bits::{bits, complete as bit_parsers},
     error::{context, VerboseError},
@@ -546,7 +546,12 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                         })
                         .cloned()
                     {
-                        self.write_film_grain_bits(extra_byte, extra_bits_used, &new_header)
+                        self.write_film_grain_bits(
+                            extra_byte,
+                            extra_bits_used,
+                            &new_header,
+                            frame_type,
+                        )
                     } else {
                         // Sets "apply_grain" to false. We don't need to do anything else.
                         extra_byte.set_bit(7 - extra_bits_used, false);
@@ -604,7 +609,9 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         extra_byte: u8,
         extra_bits_used: usize,
         new_header: &GrainTableSegment,
+        frame_type: FrameType,
     ) -> FilmGrainHeader {
+        let params = &new_header.grain_params;
         let mut data = bitvec::bitvec![u8, Msb0;];
 
         for i in 0..extra_bits_used {
@@ -613,8 +620,103 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
 
         // Set "apply_grain" to true.
         data.push(true);
+        // Grain seed (16 bits)
+        data.extend(params.grain_seed.view_bits::<Msb0>());
+        // update_grain flag (1 bit)
+        if frame_type == FrameType::Inter {
+            data.push(true);
+        }
+        // Y points
+        let num_y_points = params.scaling_points_y.len() as u8;
+        data.extend(&num_y_points.view_bits::<Msb0>()[4..]);
+        for point in &params.scaling_points_y {
+            data.extend(point[0].view_bits::<Msb0>());
+            data.extend(point[1].view_bits::<Msb0>());
+        }
+        // Chroma scaling from luma
+        let color_config = &self.sequence_header.as_ref().unwrap().color_config;
+        let monochrome = color_config.num_planes == 1;
+        let chroma_scaling_from_luma = if monochrome {
+            false
+        } else {
+            let scaling = params.chroma_scaling_from_luma;
+            data.push(scaling);
+            scaling
+        };
+        // Chroma points
+        let (num_cb_points, num_cr_points) = if monochrome
+            || chroma_scaling_from_luma
+            || (color_config.subsampling == (1, 1) && num_y_points == 0)
+        {
+            (0, 0)
+        } else {
+            let cb_points = params.scaling_points_cb.len() as u8;
+            data.extend(&cb_points.view_bits::<Msb0>()[4..]);
+            for point in &params.scaling_points_cb {
+                data.extend(point[0].view_bits::<Msb0>());
+                data.extend(point[1].view_bits::<Msb0>());
+            }
 
-        todo!()
+            let cr_points = params.scaling_points_cr.len() as u8;
+            data.extend(&cr_points.view_bits::<Msb0>()[4..]);
+            for point in &params.scaling_points_cr {
+                data.extend(point[0].view_bits::<Msb0>());
+                data.extend(point[1].view_bits::<Msb0>());
+            }
+
+            (cb_points, cr_points)
+        };
+        // Grain scaling minus 8 (2 bits)
+        data.extend(&(params.scaling_shift as u8 - 8).view_bits::<Msb0>()[6..]);
+        // ar_coeff_lag (2 bits)
+        data.extend(&(params.ar_coeff_lag as u8).view_bits::<Msb0>()[6..]);
+        // ar_coeffs_y
+        let num_pos_luma = 2 * params.ar_coeff_lag as usize * (params.ar_coeff_lag as usize + 1);
+        let num_pos_chroma = if num_y_points > 0 {
+            for point in &params.ar_coeffs_y[..=num_pos_luma] {
+                let point = (i16::from(*point) + 128) as u8;
+                data.extend(point.view_bits::<Msb0>());
+            }
+            num_pos_luma + 1
+        } else {
+            num_pos_luma
+        };
+        // ar_coeffs chroma
+        if chroma_scaling_from_luma || num_cb_points > 0 {
+            for point in &params.ar_coeffs_cb[..num_pos_chroma] {
+                let point = (i16::from(*point) + 128) as u8;
+                data.extend(point.view_bits::<Msb0>());
+            }
+        }
+        if chroma_scaling_from_luma || num_cr_points > 0 {
+            for point in &params.ar_coeffs_cr[..num_pos_chroma] {
+                let point = (i16::from(*point) + 128) as u8;
+                data.extend(point.view_bits::<Msb0>());
+            }
+        }
+        // ar coeff shift minus 6 (2 bits)
+        data.extend(&(params.ar_coeff_shift as u8 - 6).view_bits::<Msb0>()[6..]);
+        // grain scale shift (2 bits)
+        data.extend(&(params.grain_scale_shift as u8).view_bits::<Msb0>()[6..]);
+        // chroma multis
+        if num_cb_points > 0 {
+            data.extend((params.cb_mult as u8).view_bits::<Msb0>());
+            data.extend((params.cb_luma_mult as u8).view_bits::<Msb0>());
+            data.extend(&(params.cb_offset as u16).view_bits::<Msb0>()[7..]);
+        }
+        if num_cr_points > 0 {
+            data.extend((params.cr_mult as u8).view_bits::<Msb0>());
+            data.extend((params.cr_luma_mult as u8).view_bits::<Msb0>());
+            data.extend(&(params.cr_offset as u16).view_bits::<Msb0>()[7..]);
+        }
+        // overlap flag (1 bit)
+        data.push(params.overlap_flag);
+        // clip_to_restricted_range flag (1 bit)
+        data.push(params.clip_to_restricted_range);
+
+        self.packet_out.extend_from_slice(data.as_raw_slice());
+
+        FilmGrainHeader::UpdateGrain(params.clone())
     }
 }
 
