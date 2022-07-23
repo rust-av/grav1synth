@@ -47,15 +47,16 @@ pub mod reader;
 
 use std::{
     env,
-    fs::File,
+    fs::{read_to_string, File},
     io::{BufWriter, Write},
     path::PathBuf,
 };
 
 use anyhow::Result;
+use av1_grain::{generate_grain_params, parse_grain_table, TransferFunction};
 use clap::{Parser, Subcommand};
 use dialoguer::Confirm;
-use ffmpeg::{format, Rational};
+use ffmpeg::{format, sys::AVColorTransferCharacteristic, Rational};
 use log::{error, info, warn};
 use parser::grain::{FilmGrainHeader, FilmGrainParams};
 
@@ -150,7 +151,80 @@ pub fn main() -> Result<()> {
                 return Ok(());
             }
 
-            todo!()
+            let reader = BitstreamReader::open(&input)?;
+            let writer = format::output(&output)?;
+            let grain_data = read_to_string(&grain)?;
+            let new_headers = parse_grain_table(&grain_data)?;
+            let mut parser: BitstreamParser<true> = BitstreamParser::with_writer(
+                reader,
+                writer,
+                Some(
+                    new_headers
+                        .into_iter()
+                        .map(|h| h.into())
+                        .collect::<Vec<_>>(),
+                ),
+            );
+
+            parser.modify_grain_headers()?;
+
+            info!("Done, wrote output file to {}", output.to_string_lossy());
+        }
+        Commands::Generate {
+            input,
+            output,
+            overwrite,
+            iso,
+            chroma,
+        } => {
+            if input == output {
+                error!(
+                    "Input and output paths are the same. This is probably a typo, because this \
+                     would overwrite your input. Exiting."
+                );
+                return Ok(());
+            }
+
+            if output.exists()
+                && !overwrite
+                && !Confirm::new()
+                    .with_prompt(format!(
+                        "File {} exists. Overwrite?",
+                        output.to_string_lossy()
+                    ))
+                    .interact()?
+            {
+                warn!("Not overwriting existing file. Exiting.");
+                return Ok(());
+            }
+
+            let reader = BitstreamReader::open(&input)?;
+            let writer = format::output(&output)?;
+            let video_stream = reader.get_video_stream().unwrap();
+            // SAFETY: We immediately dereference the pointer to get the contained struct,
+            // so there's no possibility of use-after-free later.
+            let video_params = unsafe { *video_stream.parameters().as_ptr() };
+            let width = video_params.width as u32;
+            let height = video_params.height as u32;
+            let trc = video_params.color_trc;
+            let grain_data = generate_grain_params(0, u64::MAX, av1_grain::NoiseGenArgs {
+                iso_setting: u32::from(iso),
+                width,
+                height,
+                transfer_function: if trc == AVColorTransferCharacteristic::AVCOL_TRC_SMPTE2084 {
+                    TransferFunction::SMPTE2084
+                } else {
+                    TransferFunction::BT1886
+                },
+                chroma_grain: chroma,
+                random_seed: None,
+            });
+            let mut parser: BitstreamParser<true> =
+                BitstreamParser::with_writer(reader, writer, Some(vec![grain_data.into()]));
+
+            parser.modify_grain_headers()?;
+
+            info!("Done, wrote output file to {}", output.to_string_lossy());
         }
         Commands::Remove {
             input,
@@ -183,7 +257,7 @@ pub fn main() -> Result<()> {
             let mut parser: BitstreamParser<true> =
                 BitstreamParser::with_writer(reader, writer, None);
 
-            parser.remove_grain_headers()?;
+            parser.modify_grain_headers()?;
 
             info!("Done, wrote output file to {}", output.to_string_lossy());
         }
@@ -264,6 +338,16 @@ pub struct GrainTableSegment {
     pub start_time: u64,
     pub end_time: u64,
     pub grain_params: FilmGrainParams,
+}
+
+impl From<av1_grain::GrainTableSegment> for GrainTableSegment {
+    fn from(data: av1_grain::GrainTableSegment) -> Self {
+        GrainTableSegment {
+            start_time: data.start_time,
+            end_time: data.end_time,
+            grain_params: data.into(),
+        }
+    }
 }
 
 // I don't know why this is the base unit for a timestamp but it is. 1/10000000
@@ -360,6 +444,25 @@ pub enum Commands {
         /// The path to the input film grain table.
         #[clap(long, short, value_parser)]
         grain: PathBuf,
+    },
+    /// Generates photon-noise-baed film grain based on a given ISO value,
+    /// adds it to a given AV1 video,
+    /// and outputs it at a given `output` path.
+    Generate {
+        /// The AV1 file to apply grain to.
+        #[clap(value_parser)]
+        input: PathBuf,
+        /// The path to write the grain-synthed AV1 file to.
+        #[clap(long, short, value_parser)]
+        output: PathBuf,
+        /// Overwrite the output file without prompting.
+        #[clap(long, short = 'y')]
+        overwrite: bool,
+        /// ISO strength (100-6400) for the generated grain.
+        #[clap(long, value_parser = clap::value_parser!(u16).range(1..=6400))]
+        iso: u16,
+        /// Whether to apply grain to the chroma planes as well.
+        chroma: bool,
     },
     /// Removes all film grain from a given AV1 video,
     /// and outputs it at a given `output` path.

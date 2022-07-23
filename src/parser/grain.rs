@@ -1,19 +1,11 @@
 use arrayvec::ArrayVec;
+use av1_grain::{NUM_UV_COEFFS, NUM_UV_POINTS, NUM_Y_COEFFS, NUM_Y_POINTS};
 use nom::{bits::complete as bit_parsers, error::VerboseError, IResult};
 
 use super::{
     frame::FrameType,
     util::{take_bool_bit, BitInput},
 };
-
-/// The max number of luma scaling points for grain synthesis
-pub const GS_NUM_Y_POINTS: usize = 14;
-/// The max number of scaling points per chroma plane for grain synthesis
-pub const GS_NUM_UV_POINTS: usize = 10;
-/// The max number of luma coefficients for grain synthesis
-pub const GS_NUM_Y_COEFFS: usize = 24;
-/// The max number of coefficients per chroma plane for grain synthesis
-pub const GS_NUM_UV_COEFFS: usize = 25;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FilmGrainHeader {
@@ -30,11 +22,11 @@ pub struct FilmGrainParams {
     pub grain_seed: u16,
 
     /// Values for the cutoffs and scale factors for luma scaling points
-    pub scaling_points_y: ArrayVec<[u8; 2], GS_NUM_Y_POINTS>,
+    pub scaling_points_y: ArrayVec<[u8; 2], NUM_Y_POINTS>,
     /// Values for the cutoffs and scale factors for Cb scaling points
-    pub scaling_points_cb: ArrayVec<[u8; 2], GS_NUM_UV_POINTS>,
+    pub scaling_points_cb: ArrayVec<[u8; 2], NUM_UV_POINTS>,
     /// Values for the cutoffs and scale factors for Cr scaling points
-    pub scaling_points_cr: ArrayVec<[u8; 2], GS_NUM_UV_POINTS>,
+    pub scaling_points_cr: ArrayVec<[u8; 2], NUM_UV_POINTS>,
 
     /// Determines the range and quantization step of the standard deviation
     /// of film grain.
@@ -52,11 +44,11 @@ pub struct FilmGrainParams {
     /// Accepts values between `0..=3`.
     pub ar_coeff_lag: u8,
     /// Values for the AR coefficients for luma scaling points
-    pub ar_coeffs_y: ArrayVec<i8, GS_NUM_Y_COEFFS>,
+    pub ar_coeffs_y: ArrayVec<i8, NUM_Y_COEFFS>,
     /// Values for the AR coefficients for Cb scaling points
-    pub ar_coeffs_cb: ArrayVec<i8, GS_NUM_UV_COEFFS>,
+    pub ar_coeffs_cb: ArrayVec<i8, NUM_UV_COEFFS>,
     /// Values for the AR coefficients for Cr scaling points
-    pub ar_coeffs_cr: ArrayVec<i8, GS_NUM_UV_COEFFS>,
+    pub ar_coeffs_cr: ArrayVec<i8, NUM_UV_COEFFS>,
     /// Shift value: Specifies the range of acceptable AR coefficients
     /// 6: [-2, 2)
     /// 7: [-1, 1)
@@ -115,6 +107,33 @@ impl PartialEq for FilmGrainParams {
     }
 }
 
+impl From<av1_grain::GrainTableSegment> for FilmGrainParams {
+    fn from(data: av1_grain::GrainTableSegment) -> Self {
+        FilmGrainParams {
+            grain_seed: data.random_seed,
+            scaling_points_y: data.scaling_points_y,
+            scaling_points_cb: data.scaling_points_cb,
+            scaling_points_cr: data.scaling_points_cr,
+            scaling_shift: data.scaling_shift,
+            ar_coeff_lag: data.ar_coeff_lag,
+            ar_coeffs_y: data.ar_coeffs_y,
+            ar_coeffs_cb: data.ar_coeffs_cb,
+            ar_coeffs_cr: data.ar_coeffs_cr,
+            ar_coeff_shift: data.ar_coeff_shift,
+            cb_mult: data.cb_mult,
+            cb_luma_mult: data.cb_luma_mult,
+            cb_offset: data.cb_offset,
+            cr_mult: data.cr_mult,
+            cr_luma_mult: data.cr_luma_mult,
+            cr_offset: data.cr_offset,
+            chroma_scaling_from_luma: data.chroma_scaling_from_luma,
+            grain_scale_shift: data.grain_scale_shift,
+            overlap_flag: data.overlap_flag,
+            clip_to_restricted_range: true,
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub fn film_grain_params(
     input: BitInput,
@@ -144,7 +163,7 @@ pub fn film_grain_params(
     }
 
     let (mut input, num_y_points) = bit_parsers::take(4usize)(input)?;
-    let mut scaling_points_y: ArrayVec<[u8; 2], GS_NUM_Y_POINTS> = ArrayVec::new();
+    let mut scaling_points_y: ArrayVec<[u8; 2], NUM_Y_POINTS> = ArrayVec::new();
     for _ in 0u8..num_y_points {
         let (inner_input, point_y_value) = bit_parsers::take(8usize)(input)?;
         let (inner_input, point_y_scaling) = bit_parsers::take(8usize)(inner_input)?;
@@ -152,8 +171,8 @@ pub fn film_grain_params(
         input = inner_input;
     }
 
-    let mut scaling_points_cb: ArrayVec<_, GS_NUM_UV_POINTS> = ArrayVec::new();
-    let mut scaling_points_cr: ArrayVec<_, GS_NUM_UV_POINTS> = ArrayVec::new();
+    let mut scaling_points_cb: ArrayVec<_, NUM_UV_POINTS> = ArrayVec::new();
+    let mut scaling_points_cr: ArrayVec<_, NUM_UV_POINTS> = ArrayVec::new();
     let (input, chroma_scaling_from_luma) = if monochrome {
         (input, false)
     } else {

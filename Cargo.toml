@@ -12,6 +12,7 @@ categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 [dependencies]
 anyhow = "1.0.55"
 arrayvec = "0.7.2"
+av1-grain = "0.1.1"
 bit = "0.1.1"
 clap = { version = "3.2.6", features = ["derive"] }
 dialoguer = "0.10.1"

@@ -148,14 +148,14 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         Ok(&self.grain_headers)
     }
 
-    pub fn remove_grain_headers(&mut self) -> Result<()> {
+    pub fn modify_grain_headers(&mut self) -> Result<()> {
         assert!(
             WRITE,
-            "Can only remove headers if the WRITE generic is true"
+            "Can only modify headers if the WRITE generic is true"
         );
 
         if self.parsed {
-            warn!("Already called remove_grain_headers--calling it again does nothing");
+            warn!("Already called modify_grain_headers--calling it again does nothing");
             return Ok(());
         }
 
