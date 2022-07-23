@@ -20,6 +20,8 @@ pub mod sequence;
 pub mod tile_group;
 pub mod util;
 
+const FF_TO_AV1_TS_SHIFT: u64 = 10_000_000 / 1_000;
+
 pub struct BitstreamParser<const WRITE: bool> {
     // Borrow checker REEEE
     reader: Option<BitstreamReader>,
@@ -118,9 +120,13 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 if stream.index() != stream_idx {
                     continue;
                 }
+
+                // ffmpeg gives us the packet in milliseconds.
+                // we need it to be in 10,000,000ths of a second.
+                let packet_ts = packet.pts().unwrap_or_default() as u64 * FF_TO_AV1_TS_SHIFT;
                 loop {
                     let (inner_input, obu) = self
-                        .parse_obu(input)
+                        .parse_obu(input, packet_ts)
                         .finish()
                         .map_err(|e| anyhow!("{:?}", e))?;
                     input = inner_input;
@@ -204,9 +210,14 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     self.write_packet(packet, &stream, &stream_mapping, &ist_time_bases)?;
                     continue;
                 }
+
+                // ffmpeg gives us the packet in milliseconds.
+                // we need it to be in 10,000,000ths of a second.
+                let packet_ts = packet.pts().unwrap_or_default() as u64 * FF_TO_AV1_TS_SHIFT;
+
                 loop {
                     let (inner_input, obu) = self
-                        .parse_obu(input)
+                        .parse_obu(input, packet_ts)
                         .finish()
                         .map_err(|e| anyhow!("{:?}", e))?;
                     input = inner_input;

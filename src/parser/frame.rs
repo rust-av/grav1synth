@@ -1,6 +1,7 @@
 use std::cmp::{max, min};
 
 use bit::BitIndex;
+use bitvec::order::Msb0;
 use nom::{
     bits::{bits, complete as bit_parsers},
     error::{context, VerboseError},
@@ -16,6 +17,7 @@ use super::{
     util::{ns, su, take_bool_bit, BitInput},
     BitstreamParser,
 };
+use crate::GrainTableSegment;
 
 pub const REFS_PER_FRAME: usize = 7;
 const TOTAL_REFS_PER_FRAME: usize = 8;
@@ -67,10 +69,12 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         &mut self,
         input: &'a [u8],
         obu_header: ObuHeader,
+        // Once again, this is in 10,000,000ths of a second
+        packet_ts: u64,
     ) -> IResult<&'a [u8], Option<FrameHeader>, VerboseError<&'a [u8]>> {
         let input_len = input.len();
         let (input, frame_header) = context("Failed parsing frame header", |input| {
-            self.parse_frame_header(input, obu_header)
+            self.parse_frame_header(input, obu_header, packet_ts)
         })(input)?;
         let ref_frame_header = frame_header
             .clone()
@@ -96,6 +100,8 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         &mut self,
         input: &'a [u8],
         obu_header: ObuHeader,
+        // Once again, this is in 10,000,000ths of a second
+        packet_ts: u64,
     ) -> IResult<&'a [u8], Option<FrameHeader>, VerboseError<&'a [u8]>> {
         if self.seen_frame_header {
             return Ok((input, None));
@@ -103,7 +109,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
 
         self.seen_frame_header = true;
 
-        let (input, header) = self.uncompressed_header(input, obu_header)?;
+        let (input, header) = self.uncompressed_header(input, obu_header, packet_ts)?;
         if header.show_existing_frame {
             let (input, _) = decode_frame_wrapup(input)?;
             self.seen_frame_header = false;
@@ -120,6 +126,8 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         &mut self,
         input: &'a [u8],
         obu_headers: ObuHeader,
+        // Once again, this is in 10,000,000ths of a second
+        packet_ts: u64,
     ) -> IResult<&'a [u8], FrameHeader, VerboseError<&'a [u8]>> {
         let orig_input = input;
 
@@ -527,11 +535,18 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 if film_grain_allowed && sequence_header.new_film_grain_state {
                     // There will always be at least 1 bit left that we can read
                     let mut extra_byte = orig_input[len];
-                    let mut extra_bits_used = input.1;
-                    if let Some(new_headers) = self.incoming_frame_header.as_ref() {
-                        extra_byte.set_bit(7 - extra_bits_used, true);
-                        extra_bits_used += 1;
-                        todo!("Write new headers");
+                    let extra_bits_used = input.1;
+                    if let Some(new_header) = self
+                        .incoming_frame_header
+                        .as_ref()
+                        .and_then(|segments| {
+                            segments.iter().find(|seg| {
+                                seg.start_time <= packet_ts && seg.end_time >= packet_ts
+                            })
+                        })
+                        .cloned()
+                    {
+                        self.write_film_grain_bits(extra_byte, extra_bits_used, &new_header)
                     } else {
                         // Sets "apply_grain" to false. We don't need to do anything else.
                         extra_byte.set_bit(7 - extra_bits_used, false);
@@ -555,6 +570,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 FilmGrainHeader::Disable
             };
 
+            let sequence_header = self.sequence_header.as_ref().unwrap();
             let (input, parsed_film_grain_params) = film_grain_params(
                 input,
                 film_grain_allowed,
@@ -581,6 +597,24 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 tile_info,
             }))
         })(input)
+    }
+
+    fn write_film_grain_bits(
+        &mut self,
+        extra_byte: u8,
+        extra_bits_used: usize,
+        new_header: &GrainTableSegment,
+    ) -> FilmGrainHeader {
+        let mut data = bitvec::bitvec![u8, Msb0;];
+
+        for i in 0..extra_bits_used {
+            data.push(extra_byte.bit(7 - i));
+        }
+
+        // Set "apply_grain" to true.
+        data.push(true);
+
+        todo!()
     }
 }
 

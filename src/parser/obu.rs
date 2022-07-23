@@ -18,6 +18,8 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
     pub fn parse_obu<'a>(
         &mut self,
         input: &'a [u8],
+        // Once again, this is in 10,000,000ths of a second
+        packet_ts: u64,
     ) -> IResult<&'a [u8], Option<Obu>, VerboseError<&'a [u8]>> {
         let pre_input = input;
         let packet_start_len = self.packet_out.len();
@@ -87,7 +89,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             ObuType::Frame => {
                 let (input, header) = context("Failed parsing frame obu", |input| {
                     // Writing handled within this function
-                    self.parse_frame_obu(input, obu_header)
+                    self.parse_frame_obu(input, obu_header, packet_ts)
                 })(input)?;
                 if WRITE && obu_header.has_size_field {
                     let bytes_written = self.packet_out.len() - packet_start_len;
@@ -107,7 +109,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             ObuType::FrameHeader => {
                 let (input, header) = context("Failed parsing frame header", |input| {
                     // Writing handled within this function
-                    self.parse_frame_header(input, obu_header)
+                    self.parse_frame_header(input, obu_header, packet_ts)
                 })(input)?;
                 if WRITE && obu_header.has_size_field {
                     let bytes_written = self.packet_out.len() - packet_start_len;
