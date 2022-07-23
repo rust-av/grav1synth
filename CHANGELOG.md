@@ -1,3 +1,7 @@
+## Version 0.1.0-beta.1
+
+- Implement the "apply" and "generate" commands. See README for usage.
+
 ## Version 0.1.0-alpha.4
 
 - Implement the "remove" command, which removes all grain synthesis from a video
