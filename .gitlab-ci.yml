@@ -1,6 +1,6 @@
 before_script:
   - apt update -yyq
-  - apt install -yyq libavformat-dev libclang1 gcc libc-dev
+  - apt install -yyq libavformat-dev libclang-dev
 
 include:
   - template: Rust.gitlab-ci.yml
