@@ -1,6 +1,6 @@
 [package]
 name = "grav1synth"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 edition = "2021"
 rust-version = "1.59.0"
 license = "MIT"
@@ -12,7 +12,7 @@ categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 [dependencies]
 anyhow = "1.0.55"
 arrayvec = "0.7.2"
-av1-grain = "0.1.1"
+av1-grain = "0.2.0"
 bit = "0.1.1"
 bitvec = "1.0.1"
 clap = { version = "3.2.6", features = ["derive"] }
@@ -22,6 +22,7 @@ ffmpeg = { version = "5.0.3", default-features = false, features = [
 ], package = "ffmpeg-next" }
 log = "0.4.17"
 nom = "7.1.0"
+num-rational = "0.4.1"
 num-traits = "0.2.15"
 num_enum = "0.5.7"
 pretty_env_logger = "0.4.0"
@@ -31,7 +32,12 @@ quickcheck = "1.0.3"
 quickcheck_macros = "1.0.0"
 
 [features]
+default = []
 ffmpeg_static = ["ffmpeg/static", "ffmpeg/build"]
+unstable = ["av1-grain/unstable"]
+
+[profile.dev]
+opt-level = 1
 
 [profile.release]
 codegen-units = 1

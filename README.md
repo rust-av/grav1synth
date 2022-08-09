@@ -29,6 +29,14 @@ Reads `my_encode.mkv`, adds photon-noise-based film grain to it based on the str
 
 Reads `my_encode.mkv`, removes all synthesized film grain, and outputs the video at `clean_encode.mkv`
 
+### `grav1synth diff my_source.mkv denoised_source.mkv -o grain_file.txt`
+
+Compares `my_source.mkv` and `denoised_source.mkv` and generates a film grain table at `grain_file.txt` based on the difference between them. This will provide the most accurate estimation of source film grain.
+
+<!-- ### `grav1synth estimate my_source.mkv -o grain_file.txt`
+
+Analyzes `my_source.mkv` and estimates the amount of noise in the source, then generates an appropriate film grain table at `grain_file.txt`. This is less accurate than the diff method, but is significantly faster. -->
+
 ## Known Issues
 
-- Currently fails to parse some video files. It is suspected that this happens on mkv files which have attachments.
+- Currently fails to parse some video files. It is yet unknown what causes the failures.

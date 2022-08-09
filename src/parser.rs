@@ -99,15 +99,6 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         }
     }
 
-    pub fn get_frame_rate(&mut self) -> Result<Rational> {
-        Ok(self
-            .reader
-            .as_ref()
-            .unwrap()
-            .get_video_stream()?
-            .avg_frame_rate())
-    }
-
     pub fn get_grain_headers(&mut self) -> Result<&[FilmGrainHeader]> {
         if self.parsed {
             return Ok(&self.grain_headers);

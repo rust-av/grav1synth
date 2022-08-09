@@ -52,17 +52,20 @@ use std::{
     path::PathBuf,
 };
 
-use anyhow::Result;
-use av1_grain::{generate_grain_params, parse_grain_table, TransferFunction};
+use anyhow::{bail, Result};
+#[cfg(feature = "unstable")]
+use av1_grain::estimate_plane_noise;
+use av1_grain::{generate_photon_noise_params, parse_grain_table, DiffGenerator, TransferFunction};
 use clap::{Parser, Subcommand};
 use dialoguer::Confirm;
 use ffmpeg::{format, sys::AVColorTransferCharacteristic, Rational};
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use parser::grain::{FilmGrainHeader, FilmGrainParams};
 
 use crate::{parser::BitstreamParser, reader::BitstreamReader};
 
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::cognitive_complexity)]
 pub fn main() -> Result<()> {
     if env::var("RUST_LOG").is_err() {
         env::set_var("RUST_LOG", "error,grav1synth=info");
@@ -99,8 +102,8 @@ pub fn main() -> Result<()> {
             }
 
             let reader = BitstreamReader::open(&input)?;
+            let frame_rate = reader.get_video_details().frame_rate;
             let mut parser: BitstreamParser<false> = BitstreamParser::new(reader);
-            let frame_rate = parser.get_frame_rate()?;
             let grain_headers = parser.get_grain_headers()?;
 
             if !grain_headers
@@ -207,7 +210,7 @@ pub fn main() -> Result<()> {
             let width = video_params.width as u32;
             let height = video_params.height as u32;
             let trc = video_params.color_trc;
-            let grain_data = generate_grain_params(0, u64::MAX, av1_grain::NoiseGenArgs {
+            let grain_data = generate_photon_noise_params(0, u64::MAX, av1_grain::NoiseGenArgs {
                 iso_setting: u32::from(iso),
                 width,
                 height,
@@ -259,6 +262,220 @@ pub fn main() -> Result<()> {
 
             parser.modify_grain_headers()?;
 
+            info!("Done, wrote output file to {}", output.to_string_lossy());
+        }
+        Commands::Diff {
+            source,
+            denoised,
+            output,
+            overwrite,
+        } => {
+            if source == output || denoised == output {
+                error!(
+                    "Input and output paths are the same. This is probably a typo, because this \
+                     would overwrite your input. Exiting."
+                );
+                return Ok(());
+            }
+
+            if source == denoised {
+                error!(
+                    "Source and denoised paths are the same. This is probably a typo, because \
+                     this would always compute an empty diff. Exiting."
+                );
+                return Ok(());
+            }
+
+            if output.exists()
+                && !overwrite
+                && !Confirm::new()
+                    .with_prompt(format!(
+                        "File {} exists. Overwrite?",
+                        output.to_string_lossy()
+                    ))
+                    .interact()?
+            {
+                warn!("Not overwriting existing file. Exiting.");
+                return Ok(());
+            }
+
+            let mut source_reader = BitstreamReader::open(&source)?;
+            let mut denoised_reader = BitstreamReader::open(&denoised)?;
+            let frame_rate = source_reader.get_video_details().frame_rate;
+            let source_bd = source_reader.get_video_details().bit_depth;
+            let denoised_bd = denoised_reader.get_video_details().bit_depth;
+            let mut differ = DiffGenerator::new(
+                num_rational::Rational64::new(
+                    i64::from(frame_rate.numerator()),
+                    i64::from(frame_rate.denominator()),
+                ),
+                source_bd,
+                denoised_bd,
+            );
+
+            loop {
+                debug!("Diffing next frame");
+                match (source_bd, denoised_bd) {
+                    (8, 8) => match (
+                        source_reader.get_frame::<u8>()?,
+                        denoised_reader.get_frame::<u8>()?,
+                    ) {
+                        (Some(source_frame), Some(denoised_frame)) => {
+                            differ.diff_frame(&source_frame, &denoised_frame)?;
+                        }
+                        (None, None) => {
+                            break;
+                        }
+                        _ => {
+                            warn!(
+                                "Videos did not have equal frame counts. Resulting grain table \
+                                 may not be as expected."
+                            );
+                            break;
+                        }
+                    },
+                    (8, 9..=16) => match (
+                        source_reader.get_frame::<u8>()?,
+                        denoised_reader.get_frame::<u16>()?,
+                    ) {
+                        (Some(source_frame), Some(denoised_frame)) => {
+                            differ.diff_frame(&source_frame, &denoised_frame)?;
+                        }
+                        (None, None) => {
+                            break;
+                        }
+                        _ => {
+                            warn!(
+                                "Videos did not have equal frame counts. Resulting grain table \
+                                 may not be as expected."
+                            );
+                            break;
+                        }
+                    },
+                    (9..=16, 8) => match (
+                        source_reader.get_frame::<u16>()?,
+                        denoised_reader.get_frame::<u8>()?,
+                    ) {
+                        (Some(source_frame), Some(denoised_frame)) => {
+                            differ.diff_frame(&source_frame, &denoised_frame)?;
+                        }
+                        (None, None) => {
+                            break;
+                        }
+                        _ => {
+                            warn!(
+                                "Videos did not have equal frame counts. Resulting grain table \
+                                 may not be as expected."
+                            );
+                            break;
+                        }
+                    },
+                    (9..=16, 9..=16) => match (
+                        source_reader.get_frame::<u16>()?,
+                        denoised_reader.get_frame::<u16>()?,
+                    ) {
+                        (Some(source_frame), Some(denoised_frame)) => {
+                            differ.diff_frame(&source_frame, &denoised_frame)?;
+                        }
+                        (None, None) => {
+                            break;
+                        }
+                        _ => {
+                            warn!(
+                                "Videos did not have equal frame counts. Resulting grain table \
+                                 may not be as expected."
+                            );
+                            break;
+                        }
+                    },
+                    _ => {
+                        bail!("Bit depths not between 8-16 are not currently supported");
+                    }
+                }
+            }
+
+            let grain_tables = differ.finish();
+            let mut output_file = BufWriter::new(File::create(&output)?);
+            writeln!(&mut output_file, "filmgrn1")?;
+            for segment in grain_tables {
+                write_film_grain_segment(&segment.into(), &mut output_file)?;
+            }
+            output_file.flush()?;
+            info!("Done, wrote output file to {}", output.to_string_lossy());
+        }
+        #[cfg(feature = "unstable")]
+        Commands::Estimate {
+            source,
+            output,
+            overwrite,
+            chroma,
+        } => {
+            if source == output {
+                error!(
+                    "Input and output paths are the same. This is probably a typo, because this \
+                     would overwrite your input. Exiting."
+                );
+                return Ok(());
+            }
+
+            if output.exists()
+                && !overwrite
+                && !Confirm::new()
+                    .with_prompt(format!(
+                        "File {} exists. Overwrite?",
+                        output.to_string_lossy()
+                    ))
+                    .interact()?
+            {
+                warn!("Not overwriting existing file. Exiting.");
+                return Ok(());
+            }
+
+            let mut reader = BitstreamReader::open(&source)?;
+            let bit_depth = reader.get_video_details().bit_depth;
+            let mut frame_estimates = Vec::new();
+
+            loop {
+                match bit_depth {
+                    8 => match reader.get_frame::<u8>()? {
+                        Some(frame) => {
+                            frame_estimates.push(estimate_plane_noise(&frame.planes[0], bit_depth));
+                        }
+                        None => {
+                            break;
+                        }
+                    },
+                    9..=16 => match reader.get_frame::<u16>()? {
+                        Some(frame) => {
+                            frame_estimates.push(estimate_plane_noise(&frame.planes[0], bit_depth));
+                        }
+                        None => {
+                            break;
+                        }
+                    },
+                    _ => {
+                        bail!("Bit depths not between 8-16 are not currently supported");
+                    }
+                }
+            }
+
+            let video_stream = reader.get_video_stream().unwrap();
+            // SAFETY: We immediately dereference the pointer to get the contained struct,
+            // so there's no possibility of use-after-free later.
+            let video_params = unsafe { *video_stream.parameters().as_ptr() };
+            let frame_rate = reader.get_video_details().frame_rate;
+            let trc = video_params.color_trc;
+
+            let mut output_file = BufWriter::new(File::create(&output)?);
+            writeln!(&mut output_file, "filmgrn1")?;
+            for estimate in &frame_estimates {
+                writeln!(&mut output_file, "{:.3}", estimate.unwrap_or(-1f64))?;
+            }
+            // for segment in build_segments_from_estimate(&frame_estimates, video_params,
+            // frame_rate, chroma) {
+            //     write_film_grain_segment(&segment.into(), &mut output_file)?;
+            // }
+            output_file.flush()?;
             info!("Done, wrote output file to {}", output.to_string_lossy());
         }
     }
@@ -477,5 +694,40 @@ pub enum Commands {
         /// Overwrite the output file without prompting.
         #[clap(long, short = 'y')]
         overwrite: bool,
+    },
+    /// Compares a source video and a denoised video and generates a film grain
+    /// table based on the difference between them. This will provide the most
+    /// accurate estimation of source film grain.
+    Diff {
+        /// The untouched source file to inspect.
+        #[clap(value_parser)]
+        source: PathBuf,
+        /// The denoised file to inspect.
+        #[clap(value_parser)]
+        denoised: PathBuf,
+        /// The path to the output film grain table.
+        #[clap(long, short, value_parser)]
+        output: PathBuf,
+        /// Overwrite the output file without prompting.
+        #[clap(long, short = 'y')]
+        overwrite: bool,
+    },
+    /// Analyzes a source video and estimates the amount of noise in the source,
+    /// then generates an appropriate film grain table. This is less accurate
+    /// than the diff method, but is significantly faster.
+    #[cfg(feature = "unstable")]
+    Estimate {
+        /// The source file to inspect.
+        #[clap(value_parser)]
+        source: PathBuf,
+        /// The path to the output film grain table.
+        #[clap(long, short, value_parser)]
+        output: PathBuf,
+        /// Overwrite the output file without prompting.
+        #[clap(long, short = 'y')]
+        overwrite: bool,
+        /// Whether to apply grain to the chroma planes as well.
+        #[clap(long)]
+        chroma: bool,
     },
 }

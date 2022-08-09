@@ -1,3 +1,11 @@
+## Unreleased (WIP)
+
+- Implement the "estimate" command. See README for usage.
+
+## Version 0.1.0-beta.2
+
+- Implement the "diff" command. See README for usage.
+
 ## Version 0.1.0-beta.1
 
 - Implement the "apply" and "generate" commands. See README for usage.
