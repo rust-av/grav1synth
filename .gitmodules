@@ -1,0 +1,3 @@
+[submodule "dav1d-test-data"]
+	path = dav1d-test-data
+	url = https://code.videolan.org/videolan/dav1d-test-data.git
