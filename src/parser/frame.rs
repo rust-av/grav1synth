@@ -3,6 +3,7 @@ use std::cmp::{max, min};
 use av1_grain::DEFAULT_GRAIN_SEED;
 use bit::BitIndex;
 use bitvec::{order::Msb0, view::BitView};
+use log::debug;
 use nom::{
     bits::{bits, complete as bit_parsers},
     error::{context, VerboseError},
@@ -105,14 +106,25 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         packet_ts: u64,
     ) -> IResult<&'a [u8], Option<FrameHeader>, VerboseError<&'a [u8]>> {
         if self.seen_frame_header {
+            debug!("Seen frame header, exiting frame header parsing");
             return Ok((input, None));
         }
 
         self.seen_frame_header = true;
 
+        let pre_len = input.len();
         let (input, header) = self.uncompressed_header(input, obu_header, packet_ts)?;
+        debug!(
+            "Consumed {} bytes in uncompressed header",
+            pre_len - input.len()
+        );
         if header.show_existing_frame {
+            let pre_len = input.len();
             let (input, _) = decode_frame_wrapup(input)?;
+            debug!(
+                "Consumed {} bytes in decode_frame_wrapup",
+                pre_len - input.len()
+            );
             self.seen_frame_header = false;
             Ok((input, header.show_frame.then(|| header)))
         } else {

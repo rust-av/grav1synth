@@ -1,3 +1,4 @@
+use log::debug;
 use nom::{
     bits::{bits, complete as bit_parsers},
     combinator::map_res,
@@ -21,6 +22,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         // Once again, this is in 10,000,000ths of a second
         packet_ts: u64,
     ) -> IResult<&'a [u8], Option<Obu>, VerboseError<&'a [u8]>> {
+        debug!("Parsing OBU from remaining data of {} bytes", input.len());
         let pre_input = input;
         let packet_start_len = self.packet_out.len();
         let (input, obu_header) = context("Failed parsing obu header", parse_obu_header)(input)?;
@@ -30,6 +32,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         let (input, obu_size) = if obu_header.has_size_field {
             let (input, result) = context("Failed parsing obu size", leb128)(input)?;
             leb_size = result.bytes_read;
+            debug!("Parsed OBU size of {}", result.value);
             (input, result.value as usize)
         } else {
             debug_assert!(self.size > 0);
@@ -38,6 +41,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 self.size - 1 - if obu_header.extension.is_some() { 1 } else { 0 },
             )
         };
+        debug!("Parsing contents of OBU of size {}", obu_size);
         self.size = obu_size;
         if WRITE {
             let total_header_size = pre_input.len() - input.len();
@@ -58,6 +62,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                             if WRITE {
                                 self.packet_out.extend_from_slice(&input[..obu_size]);
                             }
+                            debug!("Skipping OBU parsing because not in temporal or spatial layer");
                             return Ok((&input[obu_size..], None));
                         }
                     }
@@ -67,61 +72,88 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
 
         match obu_header.obu_type {
             ObuType::SequenceHeader => {
-                let (input, header) = context("Failed parsing sequence header", |input| {
+                debug!("Parsing sequence header");
+                let pre_len = input.len();
+                let (mut input, header) = context("Failed parsing sequence header", |input| {
                     // Writing handled within this function
                     self.parse_sequence_header(input)
                 })(input)?;
-                if WRITE && obu_header.has_size_field {
-                    let bytes_written = self.packet_out.len() - packet_start_len;
-                    let bytes_taken = pre_input.len() - input.len();
-                    let obu_size_change = bytes_written as isize - bytes_taken as isize;
-                    if obu_size_change != 0 {
-                        self.adjust_obu_size(
-                            obu_size_pos,
-                            leb_size,
-                            (obu_size as isize + obu_size_change) as usize,
-                        );
+                debug!(
+                    "Consumed {} bytes of data for sequence header",
+                    pre_len - input.len()
+                );
+                if obu_header.has_size_field {
+                    if WRITE {
+                        let bytes_written = self.packet_out.len() - packet_start_len;
+                        let bytes_taken = pre_input.len() - input.len();
+                        let obu_size_change = bytes_written as isize - bytes_taken as isize;
+                        if obu_size_change != 0 {
+                            self.adjust_obu_size(
+                                obu_size_pos,
+                                leb_size,
+                                (obu_size as isize + obu_size_change) as usize,
+                            );
+                        }
                     }
+                    let adjustment = obu_size - (pre_len - input.len());
+                    input = &input[adjustment..];
                 }
 
                 Ok((input, Some(Obu::SequenceHeader(header))))
             }
             ObuType::Frame => {
-                let (input, header) = context("Failed parsing frame obu", |input| {
+                debug!("Parsing frame");
+                let pre_len = input.len();
+                let (mut input, header) = context("Failed parsing frame obu", |input| {
                     // Writing handled within this function
                     self.parse_frame_obu(input, obu_header, packet_ts)
                 })(input)?;
-                if WRITE && obu_header.has_size_field {
-                    let bytes_written = self.packet_out.len() - packet_start_len;
-                    let bytes_taken = pre_input.len() - input.len();
-                    let obu_size_change = bytes_written as isize - bytes_taken as isize;
-                    if obu_size_change != 0 {
-                        self.adjust_obu_size(
-                            obu_size_pos,
-                            leb_size,
-                            (obu_size as isize + obu_size_change) as usize,
-                        );
+                debug!("Consumed {} bytes of data for frame", pre_len - input.len());
+                if obu_header.has_size_field {
+                    if WRITE {
+                        let bytes_written = self.packet_out.len() - packet_start_len;
+                        let bytes_taken = pre_input.len() - input.len();
+                        let obu_size_change = bytes_written as isize - bytes_taken as isize;
+                        if obu_size_change != 0 {
+                            self.adjust_obu_size(
+                                obu_size_pos,
+                                leb_size,
+                                (obu_size as isize + obu_size_change) as usize,
+                            );
+                        }
                     }
+                    let adjustment = obu_size - (pre_len - input.len());
+                    input = &input[adjustment..];
                 }
 
                 Ok((input, header.map(Obu::FrameHeader)))
             }
             ObuType::FrameHeader => {
-                let (input, header) = context("Failed parsing frame header", |input| {
+                debug!("Parsing frame header");
+                let pre_len = input.len();
+                let (mut input, header) = context("Failed parsing frame header", |input| {
                     // Writing handled within this function
                     self.parse_frame_header(input, obu_header, packet_ts)
                 })(input)?;
-                if WRITE && obu_header.has_size_field {
-                    let bytes_written = self.packet_out.len() - packet_start_len;
-                    let bytes_taken = pre_input.len() - input.len();
-                    let obu_size_change = bytes_written as isize - bytes_taken as isize;
-                    if obu_size_change != 0 {
-                        self.adjust_obu_size(
-                            obu_size_pos,
-                            leb_size,
-                            (obu_size as isize + obu_size_change) as usize,
-                        );
+                debug!(
+                    "Consumed {} bytes of data for frame header",
+                    pre_len - input.len()
+                );
+                if obu_header.has_size_field {
+                    if WRITE {
+                        let bytes_written = self.packet_out.len() - packet_start_len;
+                        let bytes_taken = pre_input.len() - input.len();
+                        let obu_size_change = bytes_written as isize - bytes_taken as isize;
+                        if obu_size_change != 0 {
+                            self.adjust_obu_size(
+                                obu_size_pos,
+                                leb_size,
+                                (obu_size as isize + obu_size_change) as usize,
+                            );
+                        }
                     }
+                    let adjustment = obu_size - (pre_len - input.len());
+                    input = &input[adjustment..];
                 }
 
                 Ok((input, header.map(Obu::FrameHeader)))
@@ -132,6 +164,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 unreachable!("This should only be called from within a frame OBU.");
             }
             ObuType::TemporalDelimiter => {
+                debug!("Skipping temporal delimiter");
                 self.seen_frame_header = false;
                 if WRITE {
                     self.packet_out.extend_from_slice(&input[..obu_size]);
@@ -139,6 +172,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 Ok((&input[obu_size..], None))
             }
             _ => {
+                debug!("Skipping unused OBU type");
                 if WRITE {
                     self.packet_out.extend_from_slice(&input[..obu_size]);
                 }
