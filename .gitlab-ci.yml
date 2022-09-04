@@ -2,6 +2,7 @@ test:cargo:
   before_script:
     - apt-get update -yqq
     - apt-get install -yqq --no-install-recommends build-essential libavformat-dev libclang-dev
+    - git submodule update --init
 
 include:
   - template: Rust.gitlab-ci.yml # https://gitlab.com/gitlab-org/gitlab/blob/master/lib/gitlab/ci/templates/Rust.gitlab-ci.yml
