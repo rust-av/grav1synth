@@ -8,6 +8,7 @@ repository = "https://git.bluefalcon.cc/soichiro/grav1synth"
 description = "Grain Synth analyzer and editor for AV1 files"
 keywords = ["video", "multimedia", "av1"]
 categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
+exclude = ["/dav1d-test-data", "/tests"]
 
 [dependencies]
 anyhow = "1.0.55"
