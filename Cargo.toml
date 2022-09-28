@@ -16,9 +16,9 @@ arrayvec = "0.7.2"
 av1-grain = "0.2.0"
 bit = "0.1.1"
 bitvec = "1.0.1"
-clap = { version = "3.2.6", features = ["derive"] }
+clap = { version = "4.0.2", features = ["derive"] }
 dialoguer = "0.10.1"
-ffmpeg = { version = "5.0.3", default-features = false, features = [
+ffmpeg = { version = "5.1.1", default-features = false, features = [
     "format",
 ], package = "ffmpeg-next" }
 log = "0.4.17"

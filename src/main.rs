@@ -662,9 +662,8 @@ pub enum Commands {
         #[clap(long, short, value_parser)]
         grain: PathBuf,
     },
-    /// Generates photon-noise-baed film grain based on a given ISO value,
-    /// adds it to a given AV1 video,
-    /// and outputs it at a given `output` path.
+    /// Generates photon-noise-based film grain based on a given ISO value,
+    /// adds it to a given AV1 video, and outputs it at a given `output` path.
     Generate {
         /// The AV1 file to apply grain to.
         #[clap(value_parser)]

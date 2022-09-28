@@ -175,8 +175,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     };
 
                     if WRITE {
-                        let len =
-                            orig_input.len() - input.0.len() + if input.1 > 0 { 1 } else { 0 };
+                        let len = orig_input.len() - input.0.len() + usize::from(input.1 > 0);
                         self.packet_out.extend_from_slice(&orig_input[..len]);
                     }
                     return Ok((input, FrameHeader {

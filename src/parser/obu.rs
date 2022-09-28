@@ -16,6 +16,7 @@ use super::{
 
 impl<const WRITE: bool> BitstreamParser<WRITE> {
     #[allow(clippy::too_many_lines)]
+    #[allow(clippy::cognitive_complexity)]
     pub fn parse_obu<'a>(
         &mut self,
         input: &'a [u8],
@@ -38,7 +39,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             debug_assert!(self.size > 0);
             (
                 input,
-                self.size - 1 - if obu_header.extension.is_some() { 1 } else { 0 },
+                self.size - 1 - usize::from(obu_header.extension.is_some()),
             )
         };
         debug!("Parsing contents of OBU of size {}", obu_size);
