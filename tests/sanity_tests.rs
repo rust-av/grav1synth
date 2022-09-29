@@ -1578,7 +1578,16 @@ fn apply(path: &str) {
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(stderr.contains("Done, wrote grain table"));
+    assert!(
+        result.status.success(),
+        "Inspection failed. Stderr:\n\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("Done, wrote grain table"),
+        "Output not as expected. Stderr:\n\n{}",
+        stderr
+    );
 }
 
 #[interpolate_test(bd8_cdfupdate_04, "8-bit/cdfupdate/av1-1-b8-04-cdfupdate.ivf")]
@@ -2370,5 +2379,14 @@ fn remove(path: &str) {
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(stderr.contains("No film grain headers found"));
+    assert!(
+        result.status.success(),
+        "Inspection failed. Stderr:\n\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("No film grain headers found",),
+        "Output not as expected. Stderr:\n\n{}",
+        stderr
+    );
 }
