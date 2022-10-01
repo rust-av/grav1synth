@@ -1,5 +1,6 @@
 use arrayvec::ArrayVec;
 use bit::BitIndex;
+use log::debug;
 use nom::{bits, bits::complete as bit_parsers, error::VerboseError, IResult};
 use num_enum::TryFromPrimitive;
 
@@ -349,6 +350,12 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     .unwrap()
                     .set_bit(7 - bit_offset, self.incoming_grain_header.is_some());
                 self.packet_out.extend_from_slice(&obu_out);
+                debug!(
+                    "Writing updated sequence header of size {} to packet_out, total packet size \
+                     at {}",
+                    obu_out.len(),
+                    self.packet_out.len()
+                );
             }
 
             let (input, film_grain_params_present) = take_bool_bit(input)?;

@@ -48,6 +48,11 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             let total_header_size = pre_input.len() - input.len();
             self.packet_out
                 .extend_from_slice(&pre_input[..total_header_size]);
+            debug!(
+                "Writing header of size {} to packet_out, total packet size at {}",
+                total_header_size,
+                self.packet_out.len()
+            );
         }
 
         if obu_header.obu_type != ObuType::SequenceHeader
@@ -62,6 +67,12 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                         if !in_temporal_layer || !in_spatial_layer {
                             if WRITE {
                                 self.packet_out.extend_from_slice(&input[..obu_size]);
+                                debug!(
+                                    "Writing skipped OBU of size {} to packet_out, total packet \
+                                     size at {}",
+                                    obu_size,
+                                    self.packet_out.len()
+                                );
                             }
                             debug!("Skipping OBU parsing because not in temporal or spatial layer");
                             return Ok((&input[obu_size..], None));
@@ -169,6 +180,12 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 self.seen_frame_header = false;
                 if WRITE {
                     self.packet_out.extend_from_slice(&input[..obu_size]);
+                    debug!(
+                        "Writing temporal delimiter of size {} to packet_out, total packet size \
+                         at {}",
+                        obu_size,
+                        self.packet_out.len()
+                    );
                 }
                 Ok((&input[obu_size..], None))
             }
@@ -176,6 +193,11 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 debug!("Skipping unused OBU type");
                 if WRITE {
                     self.packet_out.extend_from_slice(&input[..obu_size]);
+                    debug!(
+                        "Writing unused OBU of size {} to packet_out, total packet size at {}",
+                        obu_size,
+                        self.packet_out.len()
+                    );
                 }
                 Ok((&input[obu_size..], None))
             }
@@ -190,6 +212,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         new_obu.extend_from_slice(&encoded_size);
         new_obu.extend_from_slice(&self.packet_out[(pos + leb_size)..]);
         self.packet_out = new_obu;
+        debug!("Adjusted packet size to {}", self.packet_out.len());
     }
 }
 

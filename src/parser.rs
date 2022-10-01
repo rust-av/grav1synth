@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use anyhow::{anyhow, Result};
 use ffmpeg::{codec, encoder, format::context::Output, media, Packet, Rational, Stream};
-use log::warn;
+use log::{debug, warn};
 use nom::Finish;
 
 use self::{
@@ -229,15 +229,27 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 let orig_size = packet.size();
                 match self.packet_out.len().cmp(&orig_size) {
                     Ordering::Greater => {
+                        debug!(
+                            "Growing packet from {} to {}",
+                            orig_size,
+                            self.packet_out.len()
+                        );
                         // `av_grow_packet` takes the number of bytes to grow by.
                         packet.grow(self.packet_out.len() - orig_size);
                     }
                     Ordering::Less => {
+                        debug!(
+                            "Shrinking packet from {} to {}",
+                            orig_size,
+                            self.packet_out.len()
+                        );
                         // `av_shrink_packet` takes the new size of the packet.
                         // because consistency.
                         packet.shrink(self.packet_out.len());
                     }
-                    Ordering::Equal => (),
+                    Ordering::Equal => {
+                        debug!("Packet sizes equal at {}", orig_size);
+                    }
                 }
                 packet.data_mut().unwrap().copy_from_slice(&self.packet_out);
                 self.write_packet(packet, &stream, &stream_mapping, &ist_time_bases)?;

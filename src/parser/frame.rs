@@ -539,8 +539,11 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             let (input, _reduced_tx_set) = take_bool_bit(input)?;
             let (input, _) = global_motion_params(input, frame_type.is_intra())?;
 
-            let film_grain_allowed =
-                sequence_header.film_grain_params_present && (show_frame || showable_frame);
+            let film_grain_allowed = (if WRITE {
+                sequence_header.new_film_grain_state
+            } else {
+                sequence_header.film_grain_params_present
+            }) && (show_frame || showable_frame);
             let written_film_grain_params = if WRITE {
                 let len = orig_input.len() - input.0.len();
                 self.packet_out.extend_from_slice(&orig_input[..len]);
