@@ -539,15 +539,11 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             let (input, _reduced_tx_set) = take_bool_bit(input)?;
             let (input, _) = global_motion_params(input, frame_type.is_intra())?;
 
-            let film_grain_allowed = (if WRITE {
-                sequence_header.new_film_grain_state
-            } else {
-                sequence_header.film_grain_params_present
-            }) && (show_frame || showable_frame);
+            let film_grain_allowed = show_frame || showable_frame;
             let written_film_grain_params = if WRITE {
                 let len = orig_input.len() - input.0.len();
                 self.packet_out.extend_from_slice(&orig_input[..len]);
-                if film_grain_allowed && sequence_header.new_film_grain_state {
+                if sequence_header.new_film_grain_state && film_grain_allowed {
                     // There will always be at least 1 bit left that we can read
                     let mut extra_byte = orig_input[len];
                     let extra_bits_used = input.1;
@@ -600,7 +596,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             let sequence_header = self.sequence_header.as_ref().unwrap();
             let (input, parsed_film_grain_params) = film_grain_params(
                 input,
-                film_grain_allowed,
+                sequence_header.film_grain_params_present && film_grain_allowed,
                 frame_type,
                 sequence_header.color_config.num_planes == 1,
                 sequence_header.color_config.subsampling,

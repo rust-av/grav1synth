@@ -2,6 +2,10 @@
 
 - Implement the "estimate" command. See README for usage.
 
+## Version 0.1.0-beta.4
+
+- Fix issue where `apply` and `remove` commands did not modify the file correctly.
+
 ## Version 0.1.0-beta.3
 
 - Fix compatibility with a number of videos.
