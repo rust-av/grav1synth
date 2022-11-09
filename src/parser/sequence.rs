@@ -360,34 +360,37 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
 
             let (input, film_grain_params_present) = take_bool_bit(input)?;
 
-            Ok((input, SequenceHeader {
-                reduced_still_picture_header,
-                frame_id_numbers_present,
-                additional_frame_id_len_minus_1,
-                delta_frame_id_len_minus_2,
-                film_grain_params_present,
-                new_film_grain_state: self.incoming_grain_header.is_some(),
-                force_screen_content_tools,
-                force_integer_mv,
-                order_hint_bits,
-                frame_width_bits_minus_1,
-                frame_height_bits_minus_1,
-                max_frame_width_minus_1,
-                max_frame_height_minus_1,
-                decoder_model_info,
-                decoder_model_present_for_op,
-                operating_points_cnt_minus_1,
-                operating_point_idc,
-                cur_operating_point_idc,
-                timing_info,
-                enable_ref_frame_mvs,
-                enable_warped_motion,
-                enable_superres,
-                enable_cdef,
-                enable_restoration,
-                use_128x128_superblock,
-                color_config,
-            }))
+            Ok((
+                input,
+                SequenceHeader {
+                    reduced_still_picture_header,
+                    frame_id_numbers_present,
+                    additional_frame_id_len_minus_1,
+                    delta_frame_id_len_minus_2,
+                    film_grain_params_present,
+                    new_film_grain_state: self.incoming_grain_header.is_some(),
+                    force_screen_content_tools,
+                    force_integer_mv,
+                    order_hint_bits,
+                    frame_width_bits_minus_1,
+                    frame_height_bits_minus_1,
+                    max_frame_width_minus_1,
+                    max_frame_height_minus_1,
+                    decoder_model_info,
+                    decoder_model_present_for_op,
+                    operating_points_cnt_minus_1,
+                    operating_point_idc,
+                    cur_operating_point_idc,
+                    timing_info,
+                    enable_ref_frame_mvs,
+                    enable_warped_motion,
+                    enable_superres,
+                    enable_cdef,
+                    enable_restoration,
+                    use_128x128_superblock,
+                    color_config,
+                },
+            ))
         })(input)
     }
 }
@@ -402,9 +405,12 @@ fn timing_info(input: BitInput) -> IResult<BitInput, TimingInfo, VerboseError<Bi
     } else {
         input
     };
-    Ok((input, TimingInfo {
-        equal_picture_interval,
-    }))
+    Ok((
+        input,
+        TimingInfo {
+            equal_picture_interval,
+        },
+    ))
 }
 
 fn decoder_model_info(
@@ -414,11 +420,14 @@ fn decoder_model_info(
     let (input, _num_units_in_decoding_tick): (_, u32) = bit_parsers::take(32usize)(input)?;
     let (input, buffer_removal_time_length_minus_1) = bit_parsers::take(5usize)(input)?;
     let (input, frame_presentation_time_length_minus_1) = bit_parsers::take(5usize)(input)?;
-    Ok((input, DecoderModelInfo {
-        buffer_delay_length_minus_1,
-        buffer_removal_time_length_minus_1,
-        frame_presentation_time_length_minus_1,
-    }))
+    Ok((
+        input,
+        DecoderModelInfo {
+            buffer_delay_length_minus_1,
+            buffer_removal_time_length_minus_1,
+            frame_presentation_time_length_minus_1,
+        },
+    ))
 }
 
 fn operating_parameters_info(
@@ -477,15 +486,18 @@ fn color_config(
         };
     let (input, color_range, subsampling) = if monochrome {
         let (input, color_range): (_, u8) = bit_parsers::take(1usize)(input)?;
-        return Ok((input, ColorConfig {
-            color_primaries,
-            transfer_characteristics,
-            matrix_coefficients,
-            color_range: ColorRange::try_from(color_range).unwrap(),
-            num_planes,
-            separate_uv_delta_q: false,
-            subsampling: (1, 1),
-        }));
+        return Ok((
+            input,
+            ColorConfig {
+                color_primaries,
+                transfer_characteristics,
+                matrix_coefficients,
+                color_range: ColorRange::try_from(color_range).unwrap(),
+                num_planes,
+                separate_uv_delta_q: false,
+                subsampling: (1, 1),
+            },
+        ));
     } else if color_primaries == ColorPrimaries::Bt709
         && transfer_characteristics == TransferCharacteristics::Srgb
         && matrix_coefficients == MatrixCoefficients::Identity
@@ -521,15 +533,18 @@ fn color_config(
         )
     };
     let (input, separate_uv_delta_q) = take_bool_bit(input)?;
-    Ok((input, ColorConfig {
-        color_primaries,
-        transfer_characteristics,
-        matrix_coefficients,
-        color_range,
-        num_planes,
-        separate_uv_delta_q,
-        subsampling,
-    }))
+    Ok((
+        input,
+        ColorConfig {
+            color_primaries,
+            transfer_characteristics,
+            matrix_coefficients,
+            color_range,
+            num_planes,
+            separate_uv_delta_q,
+            subsampling,
+        },
+    ))
 }
 
 #[must_use]

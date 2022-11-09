@@ -2,10 +2,7 @@ use std::fmt::Debug;
 
 use arrayvec::ArrayVec;
 use nom::{
-    bits::complete as bit_parsers,
-    bytes::complete::take,
-    combinator::map,
-    error::VerboseError,
+    bits::complete as bit_parsers, bytes::complete::take, combinator::map, error::VerboseError,
     IResult,
 };
 use num_traits::PrimInt;
@@ -51,10 +48,13 @@ pub fn leb128(mut input: &[u8]) -> IResult<&[u8], ReadResult<u64>, VerboseError<
             break;
         }
     }
-    Ok((input, ReadResult {
-        value,
-        bytes_read: leb128_bytes,
-    }))
+    Ok((
+        input,
+        ReadResult {
+            value,
+            bytes_read: leb128_bytes,
+        },
+    ))
 }
 
 /// Unsigned integer represented by a variable number of little-endian bytes.

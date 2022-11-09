@@ -2,6 +2,11 @@
 
 - Implement the "estimate" command. See README for usage.
 
+## Version 0.1.0-beta.5
+
+- Fix issue where `diff` may fail in certain circumstances.
+- Considerably speed up the `diff` command.
+
 ## Version 0.1.0-beta.4
 
 - Fix issue where `apply` and `remove` commands did not modify the file correctly.

@@ -210,18 +210,23 @@ pub fn main() -> Result<()> {
             let width = video_params.width as u32;
             let height = video_params.height as u32;
             let trc = video_params.color_trc;
-            let grain_data = generate_photon_noise_params(0, u64::MAX, av1_grain::NoiseGenArgs {
-                iso_setting: u32::from(iso),
-                width,
-                height,
-                transfer_function: if trc == AVColorTransferCharacteristic::AVCOL_TRC_SMPTE2084 {
-                    TransferFunction::SMPTE2084
-                } else {
-                    TransferFunction::BT1886
+            let grain_data = generate_photon_noise_params(
+                0,
+                u64::MAX,
+                av1_grain::NoiseGenArgs {
+                    iso_setting: u32::from(iso),
+                    width,
+                    height,
+                    transfer_function: if trc == AVColorTransferCharacteristic::AVCOL_TRC_SMPTE2084
+                    {
+                        TransferFunction::SMPTE2084
+                    } else {
+                        TransferFunction::BT1886
+                    },
+                    chroma_grain: chroma,
+                    random_seed: None,
                 },
-                chroma_grain: chroma,
-                random_seed: None,
-            });
+            );
             let mut parser: BitstreamParser<true> =
                 BitstreamParser::with_writer(reader, writer, Some(vec![grain_data.into()]));
 
@@ -312,6 +317,7 @@ pub fn main() -> Result<()> {
                 source_bd,
                 denoised_bd,
             );
+            let mut frames = 0usize;
 
             loop {
                 debug!("Diffing next frame");
@@ -392,6 +398,7 @@ pub fn main() -> Result<()> {
                         bail!("Bit depths not between 8-16 are not currently supported");
                     }
                 }
+                frames += 1;
             }
 
             let grain_tables = differ.finish();
@@ -401,6 +408,7 @@ pub fn main() -> Result<()> {
                 write_film_grain_segment(&segment.into(), &mut output_file)?;
             }
             output_file.flush()?;
+            info!("Computed diff for {} frames", frames);
             info!("Done, wrote output file to {}", output.to_string_lossy());
         }
         #[cfg(feature = "unstable")]

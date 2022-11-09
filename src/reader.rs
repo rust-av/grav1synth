@@ -5,11 +5,9 @@ use av1_grain::v_frame::{frame::Frame as VFrame, pixel::Pixel as VPixel, prelude
 use ffmpeg::{
     codec::{decoder, packet},
     format::{self, context::Input},
-    frame,
-    media,
+    frame, media,
     util::frame::video::Video,
-    Rational,
-    Stream,
+    Rational, Stream,
 };
 
 pub struct BitstreamReader {

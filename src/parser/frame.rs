@@ -178,12 +178,15 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                         let len = orig_input.len() - input.0.len() + usize::from(input.1 > 0);
                         self.packet_out.extend_from_slice(&orig_input[..len]);
                     }
-                    return Ok((input, FrameHeader {
-                        show_frame: true,
-                        show_existing_frame,
-                        film_grain_params: FilmGrainHeader::CopyRefFrame,
-                        tile_info: self.previous_frame_header.as_ref().unwrap().tile_info,
-                    }));
+                    return Ok((
+                        input,
+                        FrameHeader {
+                            show_frame: true,
+                            show_existing_frame,
+                            film_grain_params: FilmGrainHeader::CopyRefFrame,
+                            tile_info: self.previous_frame_header.as_ref().unwrap().tile_info,
+                        },
+                    ));
                 };
                 let (input, frame_type): (_, u8) = bit_parsers::take(2usize)(input)?;
                 let frame_type = FrameType::try_from(frame_type).unwrap();
@@ -609,16 +612,19 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 }
             }
 
-            Ok((input, FrameHeader {
-                show_frame,
-                show_existing_frame,
-                film_grain_params: if WRITE {
-                    written_film_grain_params
-                } else {
-                    parsed_film_grain_params
+            Ok((
+                input,
+                FrameHeader {
+                    show_frame,
+                    show_existing_frame,
+                    film_grain_params: if WRITE {
+                        written_film_grain_params
+                    } else {
+                        parsed_film_grain_params
+                    },
+                    tile_info,
                 },
-                tile_info,
-            }))
+            ))
         })(input)
     }
 
@@ -1042,12 +1048,15 @@ fn tile_info(
         input
     };
 
-    Ok((input, TileInfo {
-        tile_cols,
-        tile_rows,
-        tile_cols_log2,
-        tile_rows_log2,
-    }))
+    Ok((
+        input,
+        TileInfo {
+            tile_cols,
+            tile_rows,
+            tile_cols_log2,
+            tile_rows_log2,
+        },
+    ))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1112,14 +1121,17 @@ fn quantization_params(
         input
     };
 
-    Ok((input, QuantizationParams {
-        base_q_idx,
-        deltaq_y_dc,
-        deltaq_u_ac,
-        deltaq_u_dc,
-        deltaq_v_ac,
-        deltaq_v_dc,
-    }))
+    Ok((
+        input,
+        QuantizationParams {
+            base_q_idx,
+            deltaq_y_dc,
+            deltaq_u_ac,
+            deltaq_u_dc,
+            deltaq_v_ac,
+            deltaq_v_dc,
+        },
+    ))
 }
 
 fn read_delta_q(input: BitInput) -> IResult<BitInput, i64, VerboseError<BitInput>> {

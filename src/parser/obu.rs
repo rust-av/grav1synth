@@ -275,11 +275,14 @@ fn parse_obu_header(input: &[u8]) -> IResult<&[u8], ObuHeader, VerboseError<&[u8
             (input, None)
         };
 
-        Ok((input, ObuHeader {
-            obu_type,
-            has_size_field,
-            extension,
-        }))
+        Ok((
+            input,
+            ObuHeader {
+                obu_type,
+                has_size_field,
+                extension,
+            },
+        ))
     })(input)?;
 
     Ok((input, obu_header))
@@ -289,10 +292,13 @@ fn obu_extension(input: BitInput) -> IResult<BitInput, ObuExtension, VerboseErro
     let (input, temporal_id) = bit_parsers::take(3usize)(input)?;
     let (input, spatial_id) = bit_parsers::take(2usize)(input)?;
     let (input, _reserved): (_, u8) = bit_parsers::take(3usize)(input)?;
-    Ok((input, ObuExtension {
-        temporal_id,
-        spatial_id,
-    }))
+    Ok((
+        input,
+        ObuExtension {
+            temporal_id,
+            spatial_id,
+        },
+    ))
 }
 
 fn obu_type(input: BitInput) -> IResult<BitInput, ObuType, VerboseError<BitInput>> {
