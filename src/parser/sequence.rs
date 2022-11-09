@@ -440,6 +440,7 @@ fn operating_parameters_info(
     Ok((input, ()))
 }
 
+#[allow(clippy::too_many_lines)]
 fn color_config(
     input: BitInput,
     seq_profile: u8,
