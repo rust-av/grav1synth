@@ -44,3 +44,4 @@ Analyzes `my_source.mkv` and estimates the amount of noise in the source, then g
 ## Known Issues
 
 - Currently fails to parse some video files. It is yet unknown what causes the failures.
+- There have been reports that certain files result in a corrupted bitstream after applying film grain. This is likely related to aomenc's `--keyframe-filtering=2`.
