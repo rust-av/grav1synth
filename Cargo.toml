@@ -17,10 +17,12 @@ av1-grain = "0.2.2"
 bit = "0.1.1"
 bitvec = "1.0.1"
 clap = { version = "4.0.2", features = ["derive"] }
+crossterm = "0.25.0"
 dialoguer = "0.10.1"
 ffmpeg = { version = "5.1.1", default-features = false, features = [
     "format",
 ], package = "ffmpeg-next" }
+indicatif = "0.17.1"
 log = "0.4.17"
 nom = "7.1.0"
 num-rational = "0.4.1"

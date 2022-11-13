@@ -1,6 +1,6 @@
-## Unreleased (WIP)
+## Next Version (git main)
 
-- Implement the "estimate" command. See README for usage.
+- Add a progress bar for the `diff` function.
 
 ## Version 0.1.0-beta.5
 

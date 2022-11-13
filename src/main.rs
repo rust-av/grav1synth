@@ -48,7 +48,7 @@ pub mod reader;
 use std::{
     env,
     fs::{read_to_string, File},
-    io::{BufWriter, Write},
+    io::{stderr, BufWriter, Write},
     path::PathBuf,
 };
 
@@ -57,8 +57,10 @@ use anyhow::{bail, Result};
 use av1_grain::estimate_plane_noise;
 use av1_grain::{generate_photon_noise_params, parse_grain_table, DiffGenerator, TransferFunction};
 use clap::{Parser, Subcommand};
+use crossterm::tty::IsTty;
 use dialoguer::Confirm;
 use ffmpeg::{format, sys::AVColorTransferCharacteristic, Rational};
+use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, error, info, warn};
 use parser::grain::{FilmGrainHeader, FilmGrainParams};
 
@@ -304,6 +306,17 @@ pub fn main() -> Result<()> {
                 return Ok(());
             }
 
+            let progress = if stderr().is_tty() {
+                ProgressBar::new_spinner().with_style(
+                    ProgressStyle::with_template(
+                        "[{elapsed_precise:.blue}] [{per_sec:.green}] Frame {pos}",
+                    )
+                    .unwrap(),
+                )
+            } else {
+                ProgressBar::hidden()
+            };
+
             let mut source_reader = BitstreamReader::open(&source)?;
             let mut denoised_reader = BitstreamReader::open(&denoised)?;
             let frame_rate = source_reader.get_video_details().frame_rate;
@@ -399,7 +412,9 @@ pub fn main() -> Result<()> {
                     }
                 }
                 frames += 1;
+                progress.inc(1);
             }
+            progress.finish();
 
             let grain_tables = differ.finish();
             let mut output_file = BufWriter::new(File::create(&output)?);
