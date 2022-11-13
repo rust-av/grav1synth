@@ -101,10 +101,6 @@ impl BitstreamReader {
         // us, but noooooo.
         //
         // Reference: https://ffmpeg.org/doxygen/trunk/api-h264-test_8c_source.html#l00110
-        if self.end_of_stream {
-            return Ok(None);
-        }
-
         loop {
             // This iterator is actually really stupid... it doesn't reset itself after each
             // `new`. But that solves our lifetime hell issues, ironically.
@@ -129,7 +125,7 @@ impl BitstreamReader {
                 }
 
                 // If there is an error sending a packet, skip to the next packet
-                if self.decoder.send_packet(&packet).is_err() {
+                if self.decoder.send_packet(&packet).is_err() && !self.end_of_stream {
                     continue;
                 }
 
