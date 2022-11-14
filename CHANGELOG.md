@@ -2,6 +2,7 @@
 
 - Add a progress bar for the `diff` function.
 - Fix bug where some codecs may not return the final frame.
+- Add ability to crop and resize `diff` sources.
 
 ## Version 0.1.0-beta.5
 

@@ -42,6 +42,7 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::missing_panics_doc)]
 
+mod filters;
 pub mod parser;
 pub mod reader;
 
@@ -64,7 +65,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, error, info, warn};
 use parser::grain::{FilmGrainHeader, FilmGrainParams};
 
-use crate::{parser::BitstreamParser, reader::BitstreamReader};
+use crate::{filters::FilterChain, parser::BitstreamParser, reader::BitstreamReader};
 
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::cognitive_complexity)]
@@ -276,6 +277,7 @@ pub fn main() -> Result<()> {
             denoised,
             output,
             overwrite,
+            filters,
         } => {
             if source == output || denoised == output {
                 error!(
@@ -292,6 +294,18 @@ pub fn main() -> Result<()> {
                 );
                 return Ok(());
             }
+
+            let filters = match filters {
+                Some(f) => {
+                    let f = FilterChain::new(&f);
+                    if let Err(e) = f {
+                        error!("Invalid filter chain: {}", e);
+                        return Ok(());
+                    }
+                    Some(f.unwrap())
+                }
+                None => None,
+            };
 
             if output.exists()
                 && !overwrite
@@ -339,7 +353,10 @@ pub fn main() -> Result<()> {
                         source_reader.get_frame::<u8>()?,
                         denoised_reader.get_frame::<u8>()?,
                     ) {
-                        (Some(source_frame), Some(denoised_frame)) => {
+                        (Some(mut source_frame), Some(denoised_frame)) => {
+                            if let Some(f) = filters.as_ref() {
+                                source_frame = f.apply(source_frame, source_bd);
+                            }
                             differ.diff_frame(&source_frame, &denoised_frame)?;
                         }
                         (None, None) => {
@@ -357,7 +374,10 @@ pub fn main() -> Result<()> {
                         source_reader.get_frame::<u8>()?,
                         denoised_reader.get_frame::<u16>()?,
                     ) {
-                        (Some(source_frame), Some(denoised_frame)) => {
+                        (Some(mut source_frame), Some(denoised_frame)) => {
+                            if let Some(f) = filters.as_ref() {
+                                source_frame = f.apply(source_frame, source_bd);
+                            }
                             differ.diff_frame(&source_frame, &denoised_frame)?;
                         }
                         (None, None) => {
@@ -375,7 +395,10 @@ pub fn main() -> Result<()> {
                         source_reader.get_frame::<u16>()?,
                         denoised_reader.get_frame::<u8>()?,
                     ) {
-                        (Some(source_frame), Some(denoised_frame)) => {
+                        (Some(mut source_frame), Some(denoised_frame)) => {
+                            if let Some(f) = filters.as_ref() {
+                                source_frame = f.apply(source_frame, source_bd);
+                            }
                             differ.diff_frame(&source_frame, &denoised_frame)?;
                         }
                         (None, None) => {
@@ -393,7 +416,10 @@ pub fn main() -> Result<()> {
                         source_reader.get_frame::<u16>()?,
                         denoised_reader.get_frame::<u16>()?,
                     ) {
-                        (Some(source_frame), Some(denoised_frame)) => {
+                        (Some(mut source_frame), Some(denoised_frame)) => {
+                            if let Some(f) = filters.as_ref() {
+                                source_frame = f.apply(source_frame, source_bd);
+                            }
                             differ.diff_frame(&source_frame, &denoised_frame)?;
                         }
                         (None, None) => {
@@ -733,6 +759,18 @@ pub enum Commands {
         /// Overwrite the output file without prompting.
         #[clap(long, short = 'y')]
         overwrite: bool,
+        /// A semicolon-separated list of filters to apply to the source before running the diff.
+        /// For example: "crop:top=42,left=64;resize:width=1920,height=1080".
+        ///
+        /// Currently supported filters and options:
+        /// - "crop": Crops the sides of the video
+        ///   - Params: "top", "bottom", "left", "right"
+        /// - "resize": Resizes the video
+        ///   - Params: "width", "height", "alg"
+        ///   - "alg" options are "hermite", "catmullrom", "mitchell", "lanczos", and "spline36"
+        ///     Default is "catmullrom"
+        #[clap(long, short, verbatim_doc_comment)]
+        filters: Option<String>,
     },
     /// Analyzes a source video and estimates the amount of noise in the source,
     /// then generates an appropriate film grain table. This is less accurate
