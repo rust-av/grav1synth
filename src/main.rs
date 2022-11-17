@@ -56,7 +56,11 @@ use std::{
 use anyhow::{bail, Result};
 #[cfg(feature = "unstable")]
 use av1_grain::estimate_plane_noise;
-use av1_grain::{generate_photon_noise_params, parse_grain_table, DiffGenerator, TransferFunction};
+use av1_grain::{
+    generate_photon_noise_params, parse_grain_table,
+    v_frame::{frame::Frame, prelude::Pixel},
+    DiffGenerator, TransferFunction,
+};
 use clap::{Parser, Subcommand};
 use crossterm::tty::IsTty;
 use dialoguer::Confirm;
@@ -64,6 +68,7 @@ use ffmpeg::{format, sys::AVColorTransferCharacteristic, Rational};
 use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, error, info, warn};
 use parser::grain::{FilmGrainHeader, FilmGrainParams};
+use scoped_threadpool::Pool;
 
 use crate::{filters::FilterChain, parser::BitstreamParser, reader::BitstreamReader};
 
@@ -344,19 +349,21 @@ pub fn main() -> Result<()> {
                 source_bd,
                 denoised_bd,
             );
+            // Currently we use 2 threads, one for the source frame and one for the denoised frame.
+            let mut pool = Pool::new(2);
             let mut frames = 0usize;
 
             loop {
                 debug!("Diffing next frame");
                 match (source_bd, denoised_bd) {
-                    (8, 8) => match (
-                        source_reader.get_frame::<u8>()?,
-                        denoised_reader.get_frame::<u8>()?,
-                    ) {
-                        (Some(mut source_frame), Some(denoised_frame)) => {
-                            if let Some(f) = filters.as_ref() {
-                                source_frame = f.apply(source_frame, source_bd);
-                            }
+                    (8, 8) => match get_filtered_frame_pair::<u8, u8>(
+                        &mut pool,
+                        &mut source_reader,
+                        &mut denoised_reader,
+                        source_bd,
+                        &filters,
+                    )? {
+                        (Some(source_frame), Some(denoised_frame)) => {
                             differ.diff_frame(&source_frame, &denoised_frame)?;
                         }
                         (None, None) => {
@@ -370,14 +377,14 @@ pub fn main() -> Result<()> {
                             break;
                         }
                     },
-                    (8, 9..=16) => match (
-                        source_reader.get_frame::<u8>()?,
-                        denoised_reader.get_frame::<u16>()?,
-                    ) {
-                        (Some(mut source_frame), Some(denoised_frame)) => {
-                            if let Some(f) = filters.as_ref() {
-                                source_frame = f.apply(source_frame, source_bd);
-                            }
+                    (8, 9..=16) => match get_filtered_frame_pair::<u8, u16>(
+                        &mut pool,
+                        &mut source_reader,
+                        &mut denoised_reader,
+                        source_bd,
+                        &filters,
+                    )? {
+                        (Some(source_frame), Some(denoised_frame)) => {
                             differ.diff_frame(&source_frame, &denoised_frame)?;
                         }
                         (None, None) => {
@@ -391,14 +398,14 @@ pub fn main() -> Result<()> {
                             break;
                         }
                     },
-                    (9..=16, 8) => match (
-                        source_reader.get_frame::<u16>()?,
-                        denoised_reader.get_frame::<u8>()?,
-                    ) {
-                        (Some(mut source_frame), Some(denoised_frame)) => {
-                            if let Some(f) = filters.as_ref() {
-                                source_frame = f.apply(source_frame, source_bd);
-                            }
+                    (9..=16, 8) => match get_filtered_frame_pair::<u16, u8>(
+                        &mut pool,
+                        &mut source_reader,
+                        &mut denoised_reader,
+                        source_bd,
+                        &filters,
+                    )? {
+                        (Some(source_frame), Some(denoised_frame)) => {
                             differ.diff_frame(&source_frame, &denoised_frame)?;
                         }
                         (None, None) => {
@@ -412,14 +419,14 @@ pub fn main() -> Result<()> {
                             break;
                         }
                     },
-                    (9..=16, 9..=16) => match (
-                        source_reader.get_frame::<u16>()?,
-                        denoised_reader.get_frame::<u16>()?,
-                    ) {
-                        (Some(mut source_frame), Some(denoised_frame)) => {
-                            if let Some(f) = filters.as_ref() {
-                                source_frame = f.apply(source_frame, source_bd);
-                            }
+                    (9..=16, 9..=16) => match get_filtered_frame_pair::<u16, u16>(
+                        &mut pool,
+                        &mut source_reader,
+                        &mut denoised_reader,
+                        source_bd,
+                        &filters,
+                    )? {
+                        (Some(source_frame), Some(denoised_frame)) => {
                             differ.diff_frame(&source_frame, &denoised_frame)?;
                         }
                         (None, None) => {
@@ -530,6 +537,32 @@ pub fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[allow(clippy::type_complexity)]
+fn get_filtered_frame_pair<T: Pixel, U: Pixel>(
+    pool: &mut Pool,
+    source_reader: &mut BitstreamReader,
+    denoised_reader: &mut BitstreamReader,
+    source_bd: usize,
+    filters: &Option<FilterChain>,
+) -> Result<(Option<Frame<T>>, Option<Frame<U>>)> {
+    let mut source_frame = Ok(None);
+    let mut denoised_frame = Ok(None);
+    pool.scoped(|s| {
+        s.execute(|| {
+            let mut frame = source_reader.get_frame::<T>();
+            if let Some(f) = filters.as_ref() {
+                frame = frame.map(|opt| opt.map(|source_frame| f.apply(source_frame, source_bd)));
+            }
+            source_frame = frame;
+        });
+        s.execute(|| {
+            denoised_frame = denoised_reader.get_frame::<U>();
+        });
+        s.join_all();
+    });
+    Ok((source_frame?, denoised_frame?))
 }
 
 fn write_film_grain_segment(
