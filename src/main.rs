@@ -43,6 +43,7 @@
 #![allow(clippy::missing_panics_doc)]
 
 mod filters;
+mod misc;
 pub mod parser;
 pub mod reader;
 
@@ -51,6 +52,7 @@ use std::{
     fs::{read_to_string, File},
     io::{stderr, BufWriter, Write},
     path::PathBuf,
+    time::Duration,
 };
 
 use anyhow::{bail, Result};
@@ -65,12 +67,109 @@ use clap::{Parser, Subcommand};
 use crossterm::tty::IsTty;
 use dialoguer::Confirm;
 use ffmpeg::{format, sys::AVColorTransferCharacteristic, Rational};
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{HumanDuration, ProgressBar, ProgressDrawTarget, ProgressState, ProgressStyle};
 use log::{debug, error, info, warn};
 use parser::grain::{FilmGrainHeader, FilmGrainParams};
 use scoped_threadpool::Pool;
 
-use crate::{filters::FilterChain, parser::BitstreamParser, reader::BitstreamReader};
+use crate::{
+    filters::FilterChain, misc::get_frame_count, parser::BitstreamParser, reader::BitstreamReader,
+};
+
+const PROGRESS_CHARS: &str = "█▉▊▋▌▍▎▏  ";
+const INDICATIF_PROGRESS_TEMPLATE: &str = if cfg!(windows) {
+    // Do not use a spinner on Windows since the default console cannot display
+    // the characters used for the spinner
+    "{elapsed_precise:.bold} ▕{wide_bar:.blue/white.dim}▏ {percent:.bold}  {pos} ({fps:.bold}, eta {fixed_eta}{msg})"
+} else {
+    "{spinner:.green.bold} {elapsed_precise:.bold} ▕{wide_bar:.blue/white.dim}▏ {percent:.bold}  {pos} ({fps:.bold}, eta {fixed_eta}{msg})"
+};
+const INDICATIF_SPINNER_TEMPLATE: &str = if cfg!(windows) {
+    // Do not use a spinner on Windows since the default console cannot display
+    // the characters used for the spinner
+    "{elapsed_precise:.bold} [{wide_bar:.blue/white.dim}]  {pos} frames ({fps:.bold})"
+} else {
+    "{spinner:.green.bold} {elapsed_precise:.bold} [{wide_bar:.blue/white.dim}]  {pos} frames ({fps:.bold})"
+};
+
+fn pretty_progress_style() -> ProgressStyle {
+    ProgressStyle::default_bar()
+        .template(INDICATIF_PROGRESS_TEMPLATE)
+        .unwrap()
+        .with_key(
+            "fps",
+            |state: &ProgressState, w: &mut dyn std::fmt::Write| {
+                if state.pos() == 0 || state.elapsed().as_secs_f32() < f32::EPSILON {
+                    write!(w, "0 fps").unwrap();
+                } else {
+                    let fps = state.pos() as f32 / state.elapsed().as_secs_f32();
+                    if fps < 1.0 {
+                        write!(w, "{:.2} s/fr", 1.0 / fps).unwrap();
+                    } else {
+                        write!(w, "{:.2} fps", fps).unwrap();
+                    }
+                }
+            },
+        )
+        .with_key(
+            "fixed_eta",
+            |state: &ProgressState, w: &mut dyn std::fmt::Write| {
+                if state.pos() == 0 || state.elapsed().as_secs_f32() < f32::EPSILON {
+                    write!(w, "unknown").unwrap();
+                } else {
+                    let spf = state.elapsed().as_secs_f32() / state.pos() as f32;
+                    let remaining = state.len().unwrap_or(0) - state.pos();
+                    write!(
+                        w,
+                        "{:#}",
+                        HumanDuration(Duration::from_secs_f32(spf * remaining as f32))
+                    )
+                    .unwrap();
+                }
+            },
+        )
+        .with_key(
+            "pos",
+            |state: &ProgressState, w: &mut dyn std::fmt::Write| {
+                write!(w, "{}/{}", state.pos(), state.len().unwrap_or(0)).unwrap();
+            },
+        )
+        .with_key(
+            "percent",
+            |state: &ProgressState, w: &mut dyn std::fmt::Write| {
+                write!(w, "{:>3.0}%", state.fraction() * 100_f32).unwrap();
+            },
+        )
+        .progress_chars(PROGRESS_CHARS)
+}
+
+fn spinner_style() -> ProgressStyle {
+    ProgressStyle::default_spinner()
+        .template(INDICATIF_SPINNER_TEMPLATE)
+        .unwrap()
+        .with_key(
+            "fps",
+            |state: &ProgressState, w: &mut dyn std::fmt::Write| {
+                if state.pos() == 0 || state.elapsed().as_secs_f32() < f32::EPSILON {
+                    write!(w, "0 fps").unwrap();
+                } else {
+                    let fps = state.pos() as f32 / state.elapsed().as_secs_f32();
+                    if fps < 1.0 {
+                        write!(w, "{:.2} s/fr", 1.0 / fps).unwrap();
+                    } else {
+                        write!(w, "{:.2} fps", fps).unwrap();
+                    }
+                }
+            },
+        )
+        .with_key(
+            "pos",
+            |state: &ProgressState, w: &mut dyn std::fmt::Write| {
+                write!(w, "{}", state.pos()).unwrap();
+            },
+        )
+        .progress_chars(PROGRESS_CHARS)
+}
 
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::cognitive_complexity)]
@@ -325,13 +424,22 @@ pub fn main() -> Result<()> {
                 return Ok(());
             }
 
+            let frame_count = get_frame_count(&source).ok();
+
             let progress = if stderr().is_tty() {
-                ProgressBar::new_spinner().with_style(
-                    ProgressStyle::with_template(
-                        "[{elapsed_precise:.blue}] [{per_sec:.green}] Frame {pos}",
-                    )
-                    .unwrap(),
-                )
+                let pb = frame_count.map_or_else(
+                    || ProgressBar::new(0).with_style(spinner_style()),
+                    |frame_count| {
+                        ProgressBar::new(frame_count as u64).with_style(pretty_progress_style())
+                    },
+                );
+                pb.set_draw_target(ProgressDrawTarget::stderr());
+                pb.enable_steady_tick(Duration::from_millis(100));
+                pb.reset();
+                pb.reset_eta();
+                pb.reset_elapsed();
+                pb.set_position(0);
+                pb
             } else {
                 ProgressBar::hidden()
             };
