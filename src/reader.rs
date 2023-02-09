@@ -5,9 +5,7 @@ use av1_grain::v_frame::{frame::Frame as VFrame, pixel::Pixel as VPixel, prelude
 use ffmpeg::{
     codec::{decoder, packet},
     format::{self, context::Input},
-    frame, media,
-    util::frame::video::Video,
-    Rational, Stream,
+    frame, media, Rational, Stream,
 };
 
 pub struct BitstreamReader {
@@ -16,6 +14,7 @@ pub struct BitstreamReader {
     video_details: VideoDetails,
     frameno: usize,
     end_of_stream: bool,
+    eof_sent: bool,
 }
 
 impl BitstreamReader {
@@ -72,6 +71,7 @@ impl BitstreamReader {
             video_details,
             frameno: 0usize,
             end_of_stream: false,
+            eof_sent: false,
         })
     }
 
@@ -113,20 +113,22 @@ impl BitstreamReader {
                 packet::Packet::empty()
             };
 
+            if self.end_of_stream && !self.eof_sent {
+                let _ = self.decoder.send_eof();
+                self.eof_sent = true;
+            }
+
             if self.end_of_stream || packet.stream() == self.get_video_stream()?.index() {
                 let mut decoded = frame::Video::new(
                     self.decoder.format(),
                     self.video_details.width as u32,
                     self.video_details.height as u32,
                 );
-                if packet.pts().is_none() {
-                    packet.set_pts(Some(self.frameno as i64));
-                    packet.set_dts(Some(self.frameno as i64));
-                }
+                packet.set_pts(Some(self.frameno as i64));
+                packet.set_dts(Some(self.frameno as i64));
 
-                // If there is an error sending a packet, skip to the next packet
-                if self.decoder.send_packet(&packet).is_err() && !self.end_of_stream {
-                    continue;
+                if !self.end_of_stream {
+                    let _ = self.decoder.send_packet(&packet);
                 }
 
                 if self.decoder.receive_frame(&mut decoded).is_ok() {
@@ -162,13 +164,9 @@ impl BitstreamReader {
 
                     self.frameno += 1;
                     return Ok(Some(f));
+                } else if self.end_of_stream {
+                    return Ok(None);
                 }
-            }
-            // Close decoder
-            if self.end_of_stream {
-                let _ = self.decoder.send_eof();
-                let _ = self.decoder.receive_frame(&mut Video::empty());
-                return Ok(None);
             }
         }
     }

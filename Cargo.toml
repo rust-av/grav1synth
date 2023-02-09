@@ -1,6 +1,6 @@
 [package]
 name = "grav1synth"
-version = "0.1.0-beta.5"
+version = "0.1.0-beta.6"
 edition = "2021"
 rust-version = "1.59.0"
 license = "MIT"
@@ -17,11 +17,11 @@ av1-grain = "0.2.2"
 bit = "0.1.1"
 bitvec = "1.0.1"
 clap = { version = "4.0.2", features = ["derive"] }
-crossterm = "0.25.0"
+crossterm = "0.26.0"
 dialoguer = "0.10.1"
-ffmpeg = { version = "5.1.1", default-features = false, features = [
+ffmpeg = { version = "1.1.2", default-features = false, features = [
     "format",
-], package = "ffmpeg-next" }
+], package = "ffmpeg-the-third" }
 indicatif = "0.17.1"
 log = "0.4.17"
 nom = "7.1.0"

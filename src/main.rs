@@ -106,7 +106,7 @@ fn pretty_progress_style() -> ProgressStyle {
                     if fps < 1.0 {
                         write!(w, "{:.2} s/fr", 1.0 / fps).unwrap();
                     } else {
-                        write!(w, "{:.2} fps", fps).unwrap();
+                        write!(w, "{fps:.2} fps").unwrap();
                     }
                 }
             },
@@ -157,7 +157,7 @@ fn spinner_style() -> ProgressStyle {
                     if fps < 1.0 {
                         write!(w, "{:.2} s/fr", 1.0 / fps).unwrap();
                     } else {
-                        write!(w, "{:.2} fps", fps).unwrap();
+                        write!(w, "{fps:.2} fps").unwrap();
                     }
                 }
             },
@@ -263,7 +263,7 @@ pub fn main() -> Result<()> {
 
             let reader = BitstreamReader::open(&input)?;
             let writer = format::output(&output)?;
-            let grain_data = read_to_string(&grain)?;
+            let grain_data = read_to_string(grain)?;
             let new_headers = parse_grain_table(&grain_data)?;
             let mut parser: BitstreamParser<true> = BitstreamParser::with_writer(
                 reader,
@@ -800,7 +800,7 @@ fn aggregate_grain_headers(
                     }
                 }
             };
-        } else if let &FilmGrainHeader::UpdateGrain(ref grain_params) = elem {
+        } else if let FilmGrainHeader::UpdateGrain(ref grain_params) = *elem {
             acc.push(GrainTableSegment {
                 start_time: cur_packet_start,
                 end_time: cur_packet_end,

@@ -691,9 +691,9 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             (cb_points, cr_points)
         };
         // Grain scaling minus 8 (2 bits)
-        data.extend(&(params.scaling_shift as u8 - 8).view_bits::<Msb0>()[6..]);
+        data.extend(&(params.scaling_shift - 8).view_bits::<Msb0>()[6..]);
         // ar_coeff_lag (2 bits)
-        data.extend(&(params.ar_coeff_lag as u8).view_bits::<Msb0>()[6..]);
+        data.extend(&(params.ar_coeff_lag).view_bits::<Msb0>()[6..]);
         // ar_coeffs_y
         let num_pos_luma = 2 * params.ar_coeff_lag as usize * (params.ar_coeff_lag as usize + 1);
         let num_pos_chroma = if num_y_points > 0 {
@@ -719,19 +719,19 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             }
         }
         // ar coeff shift minus 6 (2 bits)
-        data.extend(&(params.ar_coeff_shift as u8 - 6).view_bits::<Msb0>()[6..]);
+        data.extend(&(params.ar_coeff_shift - 6).view_bits::<Msb0>()[6..]);
         // grain scale shift (2 bits)
-        data.extend(&(params.grain_scale_shift as u8).view_bits::<Msb0>()[6..]);
+        data.extend(&(params.grain_scale_shift).view_bits::<Msb0>()[6..]);
         // chroma multis
         if num_cb_points > 0 {
-            data.extend((params.cb_mult as u8).view_bits::<Msb0>());
-            data.extend((params.cb_luma_mult as u8).view_bits::<Msb0>());
-            data.extend(&(params.cb_offset as u16).view_bits::<Msb0>()[7..]);
+            data.extend((params.cb_mult).view_bits::<Msb0>());
+            data.extend((params.cb_luma_mult).view_bits::<Msb0>());
+            data.extend(&(params.cb_offset).view_bits::<Msb0>()[7..]);
         }
         if num_cr_points > 0 {
-            data.extend((params.cr_mult as u8).view_bits::<Msb0>());
-            data.extend((params.cr_luma_mult as u8).view_bits::<Msb0>());
-            data.extend(&(params.cr_offset as u16).view_bits::<Msb0>()[7..]);
+            data.extend((params.cr_mult).view_bits::<Msb0>());
+            data.extend((params.cr_luma_mult).view_bits::<Msb0>());
+            data.extend(&(params.cr_offset).view_bits::<Msb0>()[7..]);
         }
         // overlap flag (1 bit)
         data.push(params.overlap_flag);
@@ -804,10 +804,10 @@ fn frame_size(
     Ok((input, frame_size))
 }
 
-fn render_size<'a, 'b>(
+fn render_size<'a>(
     input: BitInput<'a>,
     frame_size: Dimensions,
-    upscaled_size: &'b mut Dimensions,
+    upscaled_size: &mut Dimensions,
 ) -> IResult<BitInput<'a>, Dimensions, VerboseError<BitInput<'a>>> {
     let (input, render_and_frame_size_different) = take_bool_bit(input)?;
     let (input, width, height) = if render_and_frame_size_different {

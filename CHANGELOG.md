@@ -1,8 +1,9 @@
-## Next Version (git main)
+## Version 0.1.0-beta.6
 
 - Add a progress bar for the `diff` function.
 - Fix bug where some codecs may not return the final frame.
 - Add ability to crop and resize `diff` sources.
+- Fix issue where `diff` may produce bad grain tables due to decoder frame desyncs.
 
 ## Version 0.1.0-beta.5
 
