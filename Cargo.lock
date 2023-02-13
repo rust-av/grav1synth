@@ -57,9 +57,9 @@ dependencies = [
 
 [[package]]
 name = "bindgen"
-version = "0.61.0"
+version = "0.64.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a022e58a142a46fea340d68012b9201c094e93ec3d033a944a24f8fd4a4f09a"
+checksum = "c4243e6031260db77ede97ad86c27e501d646a27ab57b59a574f725d98ab1fb4"
 dependencies = [
  "bitflags",
  "cexpr",
@@ -285,9 +285,9 @@ dependencies = [
 
 [[package]]
 name = "ffmpeg-sys-the-third"
-version = "1.0.0+ffmpeg-5.1.2"
+version = "1.0.2+ffmpeg-5.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9e277227232a15bced1b4c9c1a7b56d5f4aadfd6dd15697c530f0c28c8bc625"
+checksum = "aba6e39e3bb60cc687e4be01ad5eefa1e42505f0b220c267e0e2c3d83280f642"
 dependencies = [
  "bindgen",
  "cc",
@@ -945,9 +945,9 @@ checksum = "43b2853a4d09f215c24cc5489c992ce46052d359b5109343cbafbf26bc62f8a3"
 
 [[package]]
 name = "signal-hook"
-version = "0.3.14"
+version = "0.3.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a253b5e89e2698464fc26b545c9edceb338e18a89effeeecfea192c3025be29d"
+checksum = "732768f1176d21d09e076c23a93123d40bba92d50c4058da34d45c8de8e682b9"
 dependencies = [
  "libc",
  "signal-hook-registry",
@@ -966,9 +966,9 @@ dependencies = [
 
 [[package]]
 name = "signal-hook-registry"
-version = "1.4.0"
+version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e51e73328dc4ac0c7ccbda3a494dfa03df1de2f46018127f60c693f2648455b0"
+checksum = "d8229b473baa5980ac72ef434c4415e70c4b5e71b423043adb4ba059f89c99a1"
 dependencies = [
  "libc",
 ]
