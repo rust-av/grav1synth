@@ -331,6 +331,9 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 width: sequence_header.max_frame_width_minus_1 + 1,
                 height: sequence_header.max_frame_height_minus_1 + 1,
             };
+            
+            let mut allow_high_precision_mv = false;
+            
             let (input, use_ref_frame_mvs, frame_size, upscaled_size) = if frame_type.is_intra() {
                 let (input, frame_size) = frame_size(
                     input,
@@ -419,6 +422,8 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 } else {
                     take_bool_bit(input)?
                 };
+                allow_high_precision_mv = _allow_high_precision_mv;
+                
                 let (input, _) = read_interpolation_filter(input)?;
                 let (input, _is_motion_mode_switchable) = take_bool_bit(input)?;
                 let (input, use_ref_frame_mvs) =
@@ -540,7 +545,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 take_bool_bit(input)?
             };
             let (input, _reduced_tx_set) = take_bool_bit(input)?;
-            let (input, _) = global_motion_params(input, frame_type.is_intra())?;
+            let (input, _) = global_motion_params(input, frame_type.is_intra(), allow_high_precision_mv)?;
 
             let film_grain_allowed = show_frame || showable_frame;
             let written_film_grain_params = if WRITE {
@@ -1500,32 +1505,191 @@ const fn get_relative_dist(a: i64, b: i64, order_hint_bits: usize) -> i64 {
     (diff & (m - 1)) - (diff & m)
 }
 
+const GM_ABS_ALPHA_BITS: usize = 12;
+const GM_ALPHA_PREC_BITS: usize = 15;
+const GM_ABS_TRANS_ONLY_BITS: usize = 9;
+const GM_TRANS_ONLY_PREC_BITS: usize = 3;
+const GM_ABS_TRANS_BITS: usize = 12;
+const GM_TRANS_PREC_BITS: usize = 6;
+const WARPEDMODEL_PREC_BITS: usize = 16;
+const IDENTITY: usize = 0;
+const TRANSLATION: usize = 1;
+const ROTZOOM: usize = 2;
+const AFFINE: usize = 3;
+
+fn initialize_prev_gm_params() -> Vec<Vec<i32>> {
+    let mut prev_gm_params = vec![vec![0; 6]; 8]; // Assuming 8 references and 6 indices
+
+    for ref_ in 0..8 {
+        for i in 0..6 {
+            prev_gm_params[ref_][i] = if i % 3 == 2 {
+                1 << WARPEDMODEL_PREC_BITS
+            } else {
+                0
+            };
+        }
+    }
+
+    prev_gm_params
+}
+
+fn read_global_param<'a>(
+    input: BitInput<'a>,
+    allow_high_precision_mv: bool,
+    type_: usize,
+    ref_: usize,
+    idx: usize,
+) -> IResult<BitInput<'a>, (), VerboseError<BitInput<'a>>> {
+    
+    let mut abs_bits = GM_ABS_ALPHA_BITS;
+    let mut prec_bits = GM_ALPHA_PREC_BITS;
+    let mut gm_params = initialize_prev_gm_params();
+    
+
+    if idx < 2 {
+        if type_ == TRANSLATION {
+            abs_bits = GM_ABS_TRANS_ONLY_BITS - (!allow_high_precision_mv) as usize;
+            prec_bits = GM_TRANS_ONLY_PREC_BITS - (!allow_high_precision_mv) as usize;
+        } else {
+            abs_bits = GM_ABS_TRANS_BITS;
+            prec_bits = GM_TRANS_PREC_BITS;
+        }
+    }
+
+    let prec_diff = WARPEDMODEL_PREC_BITS - prec_bits;
+    let round = if idx % 3 == 2 { 1 << WARPEDMODEL_PREC_BITS } else { 0 };
+    let sub = if idx % 3 == 2 { 1 << prec_bits } else { 0 };
+
+    let mx = 1 << abs_bits;
+    let r = (gm_params[ref_][idx] >> prec_diff) - sub;
+    let (input, result) = decode_signed_subexp_with_ref(input, -mx, mx + 1, r)?;
+
+    gm_params[ref_][idx] = (result << prec_diff) + round;
+
+    Ok((input, ()))
+        
+}
+
+fn decode_signed_subexp_with_ref(input: BitInput,
+                                 low: i32, high: i32, r: i32) -> IResult<BitInput, i32, VerboseError<BitInput>>  {
+    let (input, x) = decode_unsigned_subexp_with_ref(input, high - low, r - low)?;
+    
+    Ok((input, x + low))
+}
+
+fn decode_unsigned_subexp_with_ref(input: BitInput,
+                                   mx: i32, r: i32) -> IResult<BitInput, i32, VerboseError<BitInput>> {
+    let (input, v) = decode_subexp(input, mx)?;
+    if (r << 1) <= mx {
+        Ok((input, inverse_recenter(r, v)))
+    } else {
+        Ok((input, mx - 1 - inverse_recenter(mx - 1 - r, v)))
+    }
+}
+
+fn decode_subexp(input: BitInput,
+                 num_syms: i32) -> IResult<BitInput, i32, VerboseError<BitInput>> {
+    let mut i = 0;
+    let mut mk = 0;
+    let k = 3;
+
+    let mut outer_input = input;
+    loop {
+        let mut input = outer_input;
+        let b2 = if i != 0 { k + i - 1 } else { k };
+        let a = 1 << b2;
+
+        if num_syms <= mk + 3 * a {            
+            let (inner_input, subexp_final_bits) = ns(input, (num_syms - mk) as usize)?;
+            input = inner_input;
+            return Ok((input, subexp_final_bits as i32 + mk));
+        } else {
+            let (inner_input, subexp_more_bits) = take_bool_bit(input)?;
+            input = inner_input;
+            if subexp_more_bits {
+                i += 1;
+                mk += a;
+            } else {
+                let (inner_input, subexp_bits): (_, u8) =
+                    bit_parsers::take(b2 as u32)(input)?;    
+                input = inner_input;
+                return Ok((input, subexp_bits as i32 + mk));
+            }
+        }
+        outer_input = input;
+    }
+}
+
+fn inverse_recenter(r: i32, v: i32) -> i32 {
+    if v > 2 * r {
+        v
+    } else if v & 1 == 1 {
+        r - ((v + 1) >> 1)
+    } else {
+        r + (v >> 1)
+    }
+}
+
 fn global_motion_params(
     input: BitInput,
     frame_is_intra: bool,
+    allow_high_precision_mv : bool,
 ) -> IResult<BitInput, (), VerboseError<BitInput>> {
     if frame_is_intra {
         return Ok((input, ()));
     }
+    
+    let mut input = input;
 
-    let mut outer_input = input;
-    for _ in (RefType::Last as u8)..=(RefType::Altref as u8) {
-        let input = outer_input;
-        let (input, is_global) = take_bool_bit(input)?;
-        outer_input = if is_global {
-            let (input, is_rot_zoom) = take_bool_bit(input)?;
+    for ref_ in (RefType::Last as u8)..=(RefType::Altref as u8) {
+        let mut type_ = IDENTITY;
+        
+        let (inner_input, is_global) = take_bool_bit(input)?;
+        input = inner_input;
+        if is_global {
+            let (inner_input, is_rot_zoom) = take_bool_bit(input)?;
+            input = inner_input;
             if is_rot_zoom {
-                input
+                type_ = ROTZOOM;
             } else {
-                let (input, _is_translation) = take_bool_bit(input)?;
-                input
+                let (inner_input, _is_translation) = take_bool_bit(input)?;
+                input = inner_input;
+                if _is_translation {
+                    type_ = TRANSLATION;
+                } else {
+                    type_ = AFFINE;
+                }
             }
-        } else {
-            input
         };
+        
+        if type_ >= ROTZOOM {
+            let (inner_input, _) =
+                read_global_param(input, allow_high_precision_mv, type_, ref_ as usize, 2)?;
+            input = inner_input;
+            let (inner_input, _) =
+                read_global_param(input, allow_high_precision_mv, type_, ref_ as usize, 3)?;
+            input = inner_input;
+            
+            if type_ == AFFINE {
+                let (inner_input, _) =
+                    read_global_param(input, allow_high_precision_mv, type_, ref_ as usize, 4)?;
+                input = inner_input;
+                let (inner_input, _) =
+                    read_global_param(input, allow_high_precision_mv, type_, ref_ as usize, 5)?;
+                input = inner_input;
+            }
+        }
+        if type_ >= TRANSLATION {
+            let (inner_input, _) =
+                read_global_param(input, allow_high_precision_mv, type_, ref_ as usize, 0)?;
+            input = inner_input;
+            let (inner_input, _) =
+                read_global_param(input, allow_high_precision_mv, type_, ref_ as usize, 1)?;
+            input = inner_input;
+        }
     }
-
-    Ok((outer_input, ()))
+    
+    Ok((input, ()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

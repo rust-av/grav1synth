@@ -13,7 +13,7 @@ exclude = ["/dav1d-test-data", "/tests"]
 [dependencies]
 anyhow = "1.0.55"
 arrayvec = "0.7.2"
-av1-grain = "0.2.2"
+av1-grain = "0.2.3"
 bit = "0.1.1"
 bitvec = "1.0.1"
 clap = { version = "4.0.2", features = ["derive"] }
