@@ -553,7 +553,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 self.packet_out.extend_from_slice(&orig_input[..len]);
                 if sequence_header.new_film_grain_state && film_grain_allowed {
                     // There will always be at least 1 bit left that we can read
-                    let mut extra_byte = orig_input[len];
+                    let extra_byte = orig_input[len];
                     let extra_bits_used = input.1;
                     if let Some(new_header) = self
                         .incoming_grain_header
@@ -580,8 +580,10 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                         )
                     } else {
                         // Sets "apply_grain" to false. We don't need to do anything else.
-                        extra_byte.set_bit(7 - extra_bits_used, false);
-                        self.packet_out.push(extra_byte);
+                        self.write_film_grain_disabled_bit(
+                            extra_byte,
+                            extra_bits_used,
+                        );		
                         FilmGrainHeader::Disable
                     }
                 } else {
@@ -747,6 +749,23 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
 
         FilmGrainHeader::UpdateGrain(params.clone())
     }
+	
+    fn write_film_grain_disabled_bit(
+        &mut self,
+        extra_byte: u8,
+        extra_bits_used: usize,
+    ) {
+        let mut data = bitvec::bitvec![u8, Msb0;];
+
+        for i in 0..extra_bits_used {
+            data.push(extra_byte.bit(7 - i));
+        }
+        // Set "apply_grain" to false.
+        data.push(false);
+
+        self.packet_out.extend_from_slice(data.as_raw_slice());
+    }
+	
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
