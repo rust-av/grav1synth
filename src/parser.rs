@@ -106,7 +106,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
 
         let mut reader = self.reader.take().unwrap();
         let stream_idx = reader.get_video_stream()?.index();
-        for (stream, packet) in reader.input().packets() {
+        for (stream, packet) in reader.input().packets().filter_map(Result::ok) {
             if let Some(mut input) = packet.data() {
                 if stream.index() != stream_idx {
                     continue;
@@ -195,7 +195,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             .set_metadata(ictx.metadata().to_owned());
         self.writer.as_mut().unwrap().write_header()?;
 
-        for (stream, mut packet) in ictx.packets() {
+        for (stream, mut packet) in ictx.packets().filter_map(Result::ok) {
             if let Some(mut input) = packet.data() {
                 if stream.index() != stream_idx {
                     self.write_packet(packet, &stream, &stream_mapping, &ist_time_bases)?;

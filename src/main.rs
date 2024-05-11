@@ -311,12 +311,17 @@ pub fn main() -> Result<()> {
             let reader = BitstreamReader::open(&input)?;
             let writer = format::output(&output)?;
             let video_stream = reader.get_video_stream().unwrap();
-            // SAFETY: We immediately dereference the pointer to get the contained struct,
+            // SAFETY: We extract the items we need from the struct within the unsafe block,
             // so there's no possibility of use-after-free later.
-            let video_params = unsafe { *video_stream.parameters().as_ptr() };
-            let width = video_params.width as u32;
-            let height = video_params.height as u32;
-            let trc = video_params.color_trc;
+            let (width, height, trc) = unsafe {
+                let params = video_stream.parameters().as_ptr();
+                (
+                    (*params).width as u32,
+                    (*params).height as u32,
+                    (*params).color_trc,
+                )
+            };
+
             let grain_data = generate_photon_noise_params(
                 0,
                 u64::MAX,
