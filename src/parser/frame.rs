@@ -331,9 +331,9 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 width: sequence_header.max_frame_width_minus_1 + 1,
                 height: sequence_header.max_frame_height_minus_1 + 1,
             };
-            
+
             let mut allow_high_precision_mv = false;
-            
+
             let (input, use_ref_frame_mvs, frame_size, upscaled_size) = if frame_type.is_intra() {
                 let (input, frame_size) = frame_size(
                     input,
@@ -343,8 +343,8 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     sequence_header.frame_height_bits_minus_1 + 1,
                     max_frame_size,
                 )?;
-                let mut upscaled_size = frame_size;
-                let (input, _render_size) = render_size(input, frame_size, &mut upscaled_size)?;
+                let upscaled_size = frame_size;
+                let (input, _render_size) = render_size(input, frame_size, upscaled_size)?;
                 (
                     if allow_screen_content_tools && upscaled_size.width == frame_size.width {
                         let (input, allow_intrabc_inner) = take_bool_bit(input)?;
@@ -388,42 +388,42 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                         }
                     }
                 }
-                let (input, frame_size, upscaled_size) = if frame_size_override_flag
-                    && !error_resilient_mode
+                let (input, frame_size, upscaled_size) =
+                    if frame_size_override_flag && !error_resilient_mode {
+                        let mut frame_size = max_frame_size;
+                        let mut upscaled_size = frame_size;
+                        let (input, frame_size) = frame_size_with_refs(
+                            input,
+                            sequence_header.enable_superres,
+                            frame_size_override_flag,
+                            sequence_header.frame_width_bits_minus_1 + 1,
+                            sequence_header.frame_height_bits_minus_1 + 1,
+                            max_frame_size,
+                            &mut frame_size,
+                            &mut upscaled_size,
+                        )?;
+                        (input, frame_size, upscaled_size)
+                    } else {
+                        let (input, frame_size) = frame_size(
+                            input,
+                            frame_size_override_flag,
+                            sequence_header.enable_superres,
+                            sequence_header.frame_width_bits_minus_1 + 1,
+                            sequence_header.frame_height_bits_minus_1 + 1,
+                            max_frame_size,
+                        )?;
+                        let upscaled_size = frame_size;
+                        let (input, _render_size) = render_size(input, frame_size, upscaled_size)?;
+                        (input, frame_size, upscaled_size)
+                    };
+                let (input, allow_high_precision_mv_new) = if sequence_header.force_integer_mv == 1
                 {
-                    let mut frame_size = max_frame_size;
-                    let mut upscaled_size = frame_size;
-                    let (input, frame_size) = frame_size_with_refs(
-                        input,
-                        sequence_header.enable_superres,
-                        frame_size_override_flag,
-                        sequence_header.frame_width_bits_minus_1 + 1,
-                        sequence_header.frame_height_bits_minus_1 + 1,
-                        max_frame_size,
-                        &mut frame_size,
-                        &mut upscaled_size,
-                    )?;
-                    (input, frame_size, upscaled_size)
-                } else {
-                    let (input, frame_size) = frame_size(
-                        input,
-                        frame_size_override_flag,
-                        sequence_header.enable_superres,
-                        sequence_header.frame_width_bits_minus_1 + 1,
-                        sequence_header.frame_height_bits_minus_1 + 1,
-                        max_frame_size,
-                    )?;
-                    let mut upscaled_size = frame_size;
-                    let (input, _render_size) = render_size(input, frame_size, &mut upscaled_size)?;
-                    (input, frame_size, upscaled_size)
-                };
-                let (input, _allow_high_precision_mv) = if sequence_header.force_integer_mv == 1 {
                     (input, false)
                 } else {
                     take_bool_bit(input)?
                 };
-                allow_high_precision_mv = _allow_high_precision_mv;
-                
+                allow_high_precision_mv = allow_high_precision_mv_new;
+
                 let (input, _) = read_interpolation_filter(input)?;
                 let (input, _is_motion_mode_switchable) = take_bool_bit(input)?;
                 let (input, use_ref_frame_mvs) =
@@ -545,7 +545,8 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 take_bool_bit(input)?
             };
             let (input, _reduced_tx_set) = take_bool_bit(input)?;
-            let (input, _) = global_motion_params(input, frame_type.is_intra(), allow_high_precision_mv)?;
+            let (input, _) =
+                global_motion_params(input, frame_type.is_intra(), allow_high_precision_mv)?;
 
             let film_grain_allowed = show_frame || showable_frame;
             let written_film_grain_params = if WRITE {
@@ -580,10 +581,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                         )
                     } else {
                         // Sets "apply_grain" to false. We don't need to do anything else.
-                        self.write_film_grain_disabled_bit(
-                            extra_byte,
-                            extra_bits_used,
-                        );		
+                        self.write_film_grain_disabled_bit(extra_byte, extra_bits_used);
                         FilmGrainHeader::Disable
                     }
                 } else {
@@ -749,12 +747,8 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
 
         FilmGrainHeader::UpdateGrain(params.clone())
     }
-	
-    fn write_film_grain_disabled_bit(
-        &mut self,
-        extra_byte: u8,
-        extra_bits_used: usize,
-    ) {
+
+    fn write_film_grain_disabled_bit(&mut self, extra_byte: u8, extra_bits_used: usize) {
         let mut data = bitvec::bitvec![u8, Msb0;];
 
         for i in 0..extra_bits_used {
@@ -765,7 +759,6 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
 
         self.packet_out.extend_from_slice(data.as_raw_slice());
     }
-	
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
@@ -828,11 +821,11 @@ fn frame_size(
     Ok((input, frame_size))
 }
 
-fn render_size<'a>(
-    input: BitInput<'a>,
+fn render_size(
+    input: BitInput,
     frame_size: Dimensions,
-    upscaled_size: &mut Dimensions,
-) -> IResult<BitInput<'a>, Dimensions, VerboseError<BitInput<'a>>> {
+    upscaled_size: Dimensions,
+) -> IResult<BitInput, Dimensions, VerboseError<BitInput>> {
     let (input, render_and_frame_size_different) = take_bool_bit(input)?;
     let (input, width, height) = if render_and_frame_size_different {
         let (input, render_width_minus_1): (_, u32) = bit_parsers::take(16usize)(input)?;
@@ -887,7 +880,7 @@ fn frame_size_with_refs<'a, 'b>(
             frame_height_bits,
             max_frame_size,
         )?;
-        let (input, _) = render_size(input, frame_size, ref_upscaled_size)?;
+        let (input, _) = render_size(input, frame_size, *ref_upscaled_size)?;
         (input, frame_size)
     };
     Ok((input, frame_size))
@@ -1497,11 +1490,7 @@ fn skip_mode_params<'a, 'b>(
                 }
             }
 
-            if second_forward_idx < 0 {
-                skip_mode_allowed = false;
-            } else {
-                skip_mode_allowed = true;
-            }
+            skip_mode_allowed = second_forward_idx >= 0;
         }
     }
 
@@ -1537,14 +1526,14 @@ const ROTZOOM: usize = 2;
 const AFFINE: usize = 3;
 
 fn initialize_prev_gm_params() -> Vec<Vec<i32>> {
-    let mut prev_gm_params = vec![vec![0; 6]; 8]; // Assuming 8 references and 6 indices
+    let mut prev_gm_params = vec![vec![0i32; 6]; 8]; // Assuming 8 references and 6 indices
 
-    for ref_ in 0..8 {
-        for i in 0..6 {
-            prev_gm_params[ref_][i] = if i % 3 == 2 {
-                1 << WARPEDMODEL_PREC_BITS
+    for param_set in &mut prev_gm_params {
+        for (i, param) in param_set.iter_mut().enumerate() {
+            *param = if i % 3 == 2 {
+                1i32 << WARPEDMODEL_PREC_BITS
             } else {
-                0
+                0i32
             };
         }
     }
@@ -1552,23 +1541,21 @@ fn initialize_prev_gm_params() -> Vec<Vec<i32>> {
     prev_gm_params
 }
 
-fn read_global_param<'a>(
-    input: BitInput<'a>,
+fn read_global_param(
+    input: BitInput,
     allow_high_precision_mv: bool,
     type_: usize,
     ref_: usize,
     idx: usize,
-) -> IResult<BitInput<'a>, (), VerboseError<BitInput<'a>>> {
-    
+) -> IResult<BitInput, (), VerboseError<BitInput>> {
     let mut abs_bits = GM_ABS_ALPHA_BITS;
     let mut prec_bits = GM_ALPHA_PREC_BITS;
     let mut gm_params = initialize_prev_gm_params();
-    
 
     if idx < 2 {
         if type_ == TRANSLATION {
-            abs_bits = GM_ABS_TRANS_ONLY_BITS - (!allow_high_precision_mv) as usize;
-            prec_bits = GM_TRANS_ONLY_PREC_BITS - (!allow_high_precision_mv) as usize;
+            abs_bits = GM_ABS_TRANS_ONLY_BITS - usize::from(!allow_high_precision_mv);
+            prec_bits = GM_TRANS_ONLY_PREC_BITS - usize::from(!allow_high_precision_mv);
         } else {
             abs_bits = GM_ABS_TRANS_BITS;
             prec_bits = GM_TRANS_PREC_BITS;
@@ -1576,28 +1563,42 @@ fn read_global_param<'a>(
     }
 
     let prec_diff = WARPEDMODEL_PREC_BITS - prec_bits;
-    let round = if idx % 3 == 2 { 1 << WARPEDMODEL_PREC_BITS } else { 0 };
-    let sub = if idx % 3 == 2 { 1 << prec_bits } else { 0 };
+    let round = if idx % 3 == 2 {
+        1i32 << WARPEDMODEL_PREC_BITS
+    } else {
+        0i32
+    };
+    let sub = if idx % 3 == 2 {
+        1i32 << prec_bits
+    } else {
+        0i32
+    };
 
-    let mx = 1 << abs_bits;
+    let mx = 1i32 << abs_bits;
     let r = (gm_params[ref_][idx] >> prec_diff) - sub;
     let (input, result) = decode_signed_subexp_with_ref(input, -mx, mx + 1, r)?;
 
     gm_params[ref_][idx] = (result << prec_diff) + round;
 
     Ok((input, ()))
-        
 }
 
-fn decode_signed_subexp_with_ref(input: BitInput,
-                                 low: i32, high: i32, r: i32) -> IResult<BitInput, i32, VerboseError<BitInput>>  {
+fn decode_signed_subexp_with_ref(
+    input: BitInput,
+    low: i32,
+    high: i32,
+    r: i32,
+) -> IResult<BitInput, i32, VerboseError<BitInput>> {
     let (input, x) = decode_unsigned_subexp_with_ref(input, high - low, r - low)?;
-    
+
     Ok((input, x + low))
 }
 
-fn decode_unsigned_subexp_with_ref(input: BitInput,
-                                   mx: i32, r: i32) -> IResult<BitInput, i32, VerboseError<BitInput>> {
+fn decode_unsigned_subexp_with_ref(
+    input: BitInput,
+    mx: i32,
+    r: i32,
+) -> IResult<BitInput, i32, VerboseError<BitInput>> {
     let (input, v) = decode_subexp(input, mx)?;
     if (r << 1) <= mx {
         Ok((input, inverse_recenter(r, v)))
@@ -1606,11 +1607,10 @@ fn decode_unsigned_subexp_with_ref(input: BitInput,
     }
 }
 
-fn decode_subexp(input: BitInput,
-                 num_syms: i32) -> IResult<BitInput, i32, VerboseError<BitInput>> {
-    let mut i = 0;
-    let mut mk = 0;
-    let k = 3;
+fn decode_subexp(input: BitInput, num_syms: i32) -> IResult<BitInput, i32, VerboseError<BitInput>> {
+    let mut i = 0i32;
+    let mut mk = 0i32;
+    let k = 3i32;
 
     let mut outer_input = input;
     loop {
@@ -1618,28 +1618,27 @@ fn decode_subexp(input: BitInput,
         let b2 = if i != 0 { k + i - 1 } else { k };
         let a = 1 << b2;
 
-        if num_syms <= mk + 3 * a {            
+        if num_syms <= mk + 3 * a {
             let (inner_input, subexp_final_bits) = ns(input, (num_syms - mk) as usize)?;
             input = inner_input;
             return Ok((input, subexp_final_bits as i32 + mk));
+        }
+
+        let (inner_input, subexp_more_bits) = take_bool_bit(input)?;
+        input = inner_input;
+        if subexp_more_bits {
+            i += 1;
+            mk += a;
         } else {
-            let (inner_input, subexp_more_bits) = take_bool_bit(input)?;
+            let (inner_input, subexp_bits): (_, u8) = bit_parsers::take(b2 as u32)(input)?;
             input = inner_input;
-            if subexp_more_bits {
-                i += 1;
-                mk += a;
-            } else {
-                let (inner_input, subexp_bits): (_, u8) =
-                    bit_parsers::take(b2 as u32)(input)?;    
-                input = inner_input;
-                return Ok((input, subexp_bits as i32 + mk));
-            }
+            return Ok((input, i32::from(subexp_bits) + mk));
         }
         outer_input = input;
     }
 }
 
-fn inverse_recenter(r: i32, v: i32) -> i32 {
+const fn inverse_recenter(r: i32, v: i32) -> i32 {
     if v > 2 * r {
         v
     } else if v & 1 == 1 {
@@ -1652,17 +1651,17 @@ fn inverse_recenter(r: i32, v: i32) -> i32 {
 fn global_motion_params(
     input: BitInput,
     frame_is_intra: bool,
-    allow_high_precision_mv : bool,
+    allow_high_precision_mv: bool,
 ) -> IResult<BitInput, (), VerboseError<BitInput>> {
     if frame_is_intra {
         return Ok((input, ()));
     }
-    
+
     let mut input = input;
 
     for ref_ in (RefType::Last as u8)..=(RefType::Altref as u8) {
         let mut type_ = IDENTITY;
-        
+
         let (inner_input, is_global) = take_bool_bit(input)?;
         input = inner_input;
         if is_global {
@@ -1671,16 +1670,16 @@ fn global_motion_params(
             if is_rot_zoom {
                 type_ = ROTZOOM;
             } else {
-                let (inner_input, _is_translation) = take_bool_bit(input)?;
+                let (inner_input, is_translation) = take_bool_bit(input)?;
                 input = inner_input;
-                if _is_translation {
+                if is_translation {
                     type_ = TRANSLATION;
                 } else {
                     type_ = AFFINE;
                 }
             }
         };
-        
+
         if type_ >= ROTZOOM {
             let (inner_input, _) =
                 read_global_param(input, allow_high_precision_mv, type_, ref_ as usize, 2)?;
@@ -1688,7 +1687,7 @@ fn global_motion_params(
             let (inner_input, _) =
                 read_global_param(input, allow_high_precision_mv, type_, ref_ as usize, 3)?;
             input = inner_input;
-            
+
             if type_ == AFFINE {
                 let (inner_input, _) =
                     read_global_param(input, allow_high_precision_mv, type_, ref_ as usize, 4)?;
@@ -1707,7 +1706,7 @@ fn global_motion_params(
             input = inner_input;
         }
     }
-    
+
     Ok((input, ()))
 }
 
