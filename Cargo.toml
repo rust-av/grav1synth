@@ -2,7 +2,7 @@
 name = "grav1synth"
 version = "0.1.0-beta.7"
 edition = "2021"
-rust-version = "1.59.0"
+rust-version = "1.74.1"
 license = "MIT"
 repository = "https://github.com/rust-av/grav1synth"
 description = "Grain Synth analyzer and editor for AV1 files"
