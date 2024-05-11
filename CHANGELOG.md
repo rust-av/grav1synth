@@ -1,3 +1,8 @@
+## Version 0.1.0-beta.7
+
+- A lot of fixes
+- ffmpeg 7.0 support
+
 ## Version 0.1.0-beta.6
 
 - Add a progress bar for the `diff` function.
