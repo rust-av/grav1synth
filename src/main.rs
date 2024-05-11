@@ -6,6 +6,7 @@
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::default_trait_access)]
+#![allow(clippy::ignored_unit_patterns)]
 #![allow(clippy::inconsistent_struct_constructor)]
 #![allow(clippy::inline_always)]
 #![allow(clippy::module_name_repetitions)]

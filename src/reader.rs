@@ -107,8 +107,7 @@ impl BitstreamReader {
             let packet = self
                 .input_ctx
                 .packets()
-                .filter_map(Result::ok)
-                .next()
+                .find_map(Result::ok)
                 .map(|(_, packet)| packet);
 
             let mut packet = if let Some(packet) = packet {
