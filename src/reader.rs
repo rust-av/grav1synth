@@ -104,7 +104,12 @@ impl BitstreamReader {
         loop {
             // This iterator is actually really stupid... it doesn't reset itself after each
             // `new`. But that solves our lifetime hell issues, ironically.
-            let packet = self.input_ctx.packets().next().map(|(_, packet)| packet);
+            let packet = self
+                .input_ctx
+                .packets()
+                .filter_map(Result::ok)
+                .next()
+                .map(|(_, packet)| packet);
 
             let mut packet = if let Some(packet) = packet {
                 packet
