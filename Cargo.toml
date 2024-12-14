@@ -21,7 +21,7 @@ crossterm = "0.26.0"
 dialoguer = "0.10.1"
 ffmpeg = { version = "2.0.1", default-features = false, features = [
     "format",
-], package = "ffmpeg-the-third" }
+], package = "ffmpeg-the-third", git = "https://github.com/shssoichiro/ffmpeg-the-third.git" }
 indicatif = "0.17.1"
 log = "0.4.17"
 nom = "7.1.0"
