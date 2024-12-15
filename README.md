@@ -6,10 +6,6 @@
 
 Grain Synth analyzer and editor for AV1 files
 
-## Disclaimer etc.
-
-This was a quick fork created to fix a dependency issue with the library so a friend could build it correctly
-
 ## Build
 
 - Prerequisites:
