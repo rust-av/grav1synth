@@ -301,7 +301,7 @@ dependencies = [
 [[package]]
 name = "ffmpeg-sys-the-third"
 version = "2.1.0+ffmpeg-7.1"
-source = "git+https://github.com/shssoichiro/ffmpeg-the-third.git#aa81e805c868875efb4ca5d3b3a1a418260ac6fa"
+source = "git+https://github.com/shssoichiro/ffmpeg-the-third#aa81e805c868875efb4ca5d3b3a1a418260ac6fa"
 dependencies = [
  "bindgen",
  "cc",
@@ -314,7 +314,7 @@ dependencies = [
 [[package]]
 name = "ffmpeg-the-third"
 version = "2.1.0+ffmpeg-7.1"
-source = "git+https://github.com/shssoichiro/ffmpeg-the-third.git#aa81e805c868875efb4ca5d3b3a1a418260ac6fa"
+source = "git+https://github.com/shssoichiro/ffmpeg-the-third#aa81e805c868875efb4ca5d3b3a1a418260ac6fa"
 dependencies = [
  "bitflags 2.5.0",
  "ffmpeg-sys-the-third",
