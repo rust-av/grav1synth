@@ -19,9 +19,9 @@ bitvec = "1.0.1"
 clap = { version = "4.0.2", features = ["derive"] }
 crossterm = "0.26.0"
 dialoguer = "0.10.1"
-ffmpeg = { version = "2.1.0", default-features = false, features = [
+ffmpeg = { version = "3.0.0", default-features = false, features = [
     "format",
-], package = "ffmpeg-the-third", git = "https://github.com/shssoichiro/ffmpeg-the-third" }
+], package = "ffmpeg-the-third"}
 indicatif = "0.17.1"
 log = "0.4.17"
 nom = "7.1.0"
