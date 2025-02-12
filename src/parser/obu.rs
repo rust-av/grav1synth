@@ -165,6 +165,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                         }
                     }
                     let adjustment = obu_size - (pre_len - input.len());
+                    self.packet_out.extend(input.iter().take(adjustment));
                     input = &input[adjustment..];
                 }
 
