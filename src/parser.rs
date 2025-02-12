@@ -145,6 +145,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         Ok(&self.grain_headers)
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn modify_grain_headers(&mut self) -> Result<()> {
         assert!(
             WRITE,
@@ -193,6 +194,19 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             .as_mut()
             .unwrap()
             .set_metadata(ictx.metadata().to_owned());
+
+        for chapter in ictx.chapters() {
+            let Ok(_) = self.writer.as_mut().unwrap().add_chapter(
+                chapter.id(),
+                chapter.time_base(),
+                chapter.start(),
+                chapter.end(),
+                chapter.metadata().get("title").unwrap_or(""),
+            ) else {
+                continue;
+            };
+        }
+
         self.writer.as_mut().unwrap().write_header()?;
 
         for (stream, mut packet) in ictx.packets().filter_map(Result::ok) {
