@@ -2,7 +2,7 @@
 name = "grav1synth"
 version = "0.1.0-beta.6"
 edition = "2021"
-rust-version = "1.59.0"
+rust-version = "1.65.0"
 license = "MIT"
 repository = "https://github.com/rust-av/grav1synth"
 description = "Grain Synth analyzer and editor for AV1 files"
@@ -19,7 +19,7 @@ bitvec = "1.0.1"
 clap = { version = "4.0.2", features = ["derive"] }
 crossterm = "0.26.0"
 dialoguer = "0.10.1"
-ffmpeg = { version = "3.0.0", default-features = false, features = [
+ffmpeg = { version = "4.0.0", default-features = false, features = [
     "format",
 ], package = "ffmpeg-the-third"}
 indicatif = "0.17.1"
