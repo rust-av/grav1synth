@@ -57,6 +57,7 @@ use std::{
 };
 
 use anyhow::{bail, Result};
+use arrayvec::ArrayVec;
 #[cfg(feature = "unstable")]
 use av1_grain::estimate_plane_noise;
 use av1_grain::{
@@ -287,6 +288,9 @@ pub fn main() -> Result<()> {
             overwrite,
             iso,
             chroma,
+            custom_cy,
+            custom_ccb,
+            custom_ccr,
         } => {
             if input == output {
                 error!(
@@ -323,7 +327,7 @@ pub fn main() -> Result<()> {
                 )
             };
 
-            let grain_data = generate_photon_noise_params(
+            let mut grain_data = generate_photon_noise_params(
                 0,
                 u64::MAX,
                 av1_grain::NoiseGenArgs {
@@ -340,6 +344,30 @@ pub fn main() -> Result<()> {
                     random_seed: None,
                 },
             );
+
+            fn parse_coefficients(s: &str, capacity: usize) -> Vec<i8> {
+                s.split_whitespace()
+                    .map(|s| s.parse::<i8>().ok())
+                    .filter(|x| x.is_some())
+                    .map(|x| x.unwrap())
+                    .take(capacity)
+                    .collect()
+            }
+            if let Some(y) = custom_cy {
+                let y_vec = parse_coefficients(&y, 24);
+                grain_data.ar_coeffs_y = ArrayVec::try_from(y_vec.as_slice())
+                    .expect("Failed to parse coefficients for cY");
+            }
+            if let Some(cb) = custom_ccb {
+                let cb_vec: Vec<i8> = parse_coefficients(&cb, 25);
+                grain_data.ar_coeffs_cb = ArrayVec::try_from(cb_vec.as_slice())
+                    .expect("Failed to parse coefficients for cCb");
+            }
+            if let Some(cr) = custom_ccr {
+                let cr_vec: Vec<i8> = parse_coefficients(&cr, 25);
+                grain_data.ar_coeffs_cr = ArrayVec::try_from(cr_vec.as_slice())
+                    .expect("Failed to parse coefficients for cCr");
+            }
             let mut parser: BitstreamParser<true> =
                 BitstreamParser::with_writer(reader, writer, Some(vec![grain_data.into()]));
 
@@ -876,6 +904,15 @@ pub enum Commands {
         /// Whether to apply grain to the chroma planes as well.
         #[clap(long)]
         chroma: bool,
+        /// The custom AR coefficients for luma scaling points (cY).
+        #[clap(long("cy"), allow_hyphen_values = true)]
+        custom_cy: Option<String>,
+        /// The custom AR coefficients for Cb scaling points (cCb).
+        #[clap(long("ccb"), allow_hyphen_values = true)]
+        custom_ccb: Option<String>,
+        /// The custom AR coefficients for Cr scaling points (cCr).
+        #[clap(long("ccr"), allow_hyphen_values = true)]
+        custom_ccr: Option<String>,
     },
     /// Removes all film grain from a given AV1 video,
     /// and outputs it at a given `output` path.

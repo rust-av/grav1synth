@@ -25,9 +25,9 @@ Reads `my_encode.mkv` and outputs a film grain table file at `grain_file.txt`
 
 Reads `my_encode.mkv`, adds film grain to it based on `grain_file.txt`, and outputs the video to `grainy_encode.mkv`
 
-### `grav1synth generate my_encode.mkv -o grainy_encode.mkv --iso 400 --chroma`
+### `grav1synth generate my_encode.mkv -o grainy_encode.mkv --iso 400 --chroma --ccy "3 -6 3 4 6 6 -5 -7 11 2 -13 -24 -4 8 4 6 -32 35 30 -6 -4 10 -38 67"`
 
-Reads `my_encode.mkv`, adds photon-noise-based film grain to it based on the strength provided by `--iso` (up to `6400`), and outputs the video to `grainy_encode.mkv`. By default applies grain to only the luma plane. `--chroma` enables grain on chroma planes as well.
+Reads `my_encode.mkv`, adds photon-noise-based film grain to it based on the strength provided by `--iso` (up to `6400`), and outputs the video to `grainy_encode.mkv`. By default applies grain to only the luma plane. `--chroma` enables grain on chroma planes as well. `--ccy`, `--ccb`, and `--ccr` specify the custom AR coefficients for luma, Cb, and Cr planes, respectively.
 
 ### `grav1synth remove my_encode.mkv -o clean_encode.mkv`
 
