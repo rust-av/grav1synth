@@ -284,6 +284,7 @@ pub fn main() -> Result<()> {
         Commands::Generate {
             input,
             output,
+            output_table,
             overwrite,
             iso,
             chroma,
@@ -340,6 +341,12 @@ pub fn main() -> Result<()> {
                     random_seed: None,
                 },
             );
+            if let Some(path) = output_table {
+                let mut output_file = BufWriter::new(File::create(&path)?);
+                writeln!(output_file, "filmgrn1")?;
+                write_film_grain_segment(&grain_data.clone().into(), &mut output_file)?;
+            }
+
             let mut parser: BitstreamParser<true> =
                 BitstreamParser::with_writer(reader, writer, Some(vec![grain_data.into()]));
 
@@ -867,6 +874,9 @@ pub enum Commands {
         /// The path to write the grain-synthed AV1 file to.
         #[clap(long, short, value_parser)]
         output: PathBuf,
+        /// The path to write the generated film grain table to.
+        #[clap(long, short, value_parser)]
+        output_table: Option<PathBuf>,
         /// Overwrite the output file without prompting.
         #[clap(long, short = 'y')]
         overwrite: bool,
