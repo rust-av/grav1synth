@@ -287,6 +287,8 @@ pub fn main() -> Result<()> {
             overwrite,
             iso,
             chroma,
+            width,
+            height,
         } => {
             if input == output {
                 error!(
@@ -314,7 +316,7 @@ pub fn main() -> Result<()> {
             let video_stream = reader.get_video_stream().unwrap();
             // SAFETY: We extract the items we need from the struct within the unsafe block,
             // so there's no possibility of use-after-free later.
-            let (width, height, trc) = unsafe {
+            let (video_width, video_height, trc) = unsafe {
                 let params = video_stream.parameters().as_ptr();
                 (
                     (*params).width as u32,
@@ -328,8 +330,8 @@ pub fn main() -> Result<()> {
                 u64::MAX,
                 av1_grain::NoiseGenArgs {
                     iso_setting: u32::from(iso),
-                    width,
-                    height,
+                    width: width.unwrap_or(video_width),
+                    height: height.unwrap_or(video_height),
                     transfer_function: if trc == AVColorTransferCharacteristic::AVCOL_TRC_SMPTE2084
                     {
                         TransferFunction::SMPTE2084
@@ -876,6 +878,12 @@ pub enum Commands {
         /// Whether to apply grain to the chroma planes as well.
         #[clap(long)]
         chroma: bool,
+        /// The width of the generated grain table. Defaults to the width of the input AV1 file.
+        #[clap(long, value_parser = clap::value_parser!(u32).range(1..))]
+        width: Option<u32>,
+        /// The height of the generated grain table. Defaults to the height of the input AV1 file.
+        #[clap(long, value_parser = clap::value_parser!(u32).range(1..))]
+        height: Option<u32>,
     },
     /// Removes all film grain from a given AV1 video,
     /// and outputs it at a given `output` path.
