@@ -870,9 +870,9 @@ pub enum Commands {
         /// Overwrite the output file without prompting.
         #[clap(long, short = 'y')]
         overwrite: bool,
-        /// ISO strength (100-6400) for the generated grain.
-        #[clap(long, value_parser = clap::value_parser!(u16).range(1..=6400))]
-        iso: u16,
+        /// ISO strength (1-4294967295) for the generated grain. Values between 100-6400 are recommended.
+        #[clap(long, value_parser = clap::value_parser!(u32).range(1..))]
+        iso: u32,
         /// Whether to apply grain to the chroma planes as well.
         #[clap(long)]
         chroma: bool,

@@ -27,7 +27,7 @@ Reads `my_encode.mkv`, adds film grain to it based on `grain_file.txt`, and outp
 
 ### `grav1synth generate my_encode.mkv -o grainy_encode.mkv --iso 400 --chroma`
 
-Reads `my_encode.mkv`, adds photon-noise-based film grain to it based on the strength provided by `--iso` (up to `6400`), and outputs the video to `grainy_encode.mkv`. By default applies grain to only the luma plane. `--chroma` enables grain on chroma planes as well.
+Reads `my_encode.mkv`, adds photon-noise-based film grain to it based on the strength provided by `--iso` (up to `4294967295`), and outputs the video to `grainy_encode.mkv`. By default applies grain to only the luma plane. `--chroma` enables grain on chroma planes as well.
 
 ### `grav1synth remove my_encode.mkv -o clean_encode.mkv`
 
