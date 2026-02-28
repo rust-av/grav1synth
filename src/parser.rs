@@ -1,17 +1,17 @@
 use std::cmp::Ordering;
 
-use anyhow::{anyhow, Result};
-use ffmpeg::{codec, encoder, format::context::Output, media, Packet, Rational, Stream};
+use anyhow::{Result, anyhow};
+use ffmpeg::{Packet, Rational, Stream, codec, encoder, format::context::Output, media};
 use log::{debug, warn};
 use nom::Finish;
 
 use self::{
-    frame::{FrameHeader, RefType, NUM_REF_FRAMES, REFS_PER_FRAME},
+    frame::{FrameHeader, NUM_REF_FRAMES, REFS_PER_FRAME, RefType},
     grain::FilmGrainHeader,
     obu::Obu,
     sequence::SequenceHeader,
 };
-use crate::{reader::BitstreamReader, GrainTableSegment};
+use crate::{GrainTableSegment, reader::BitstreamReader};
 
 pub mod frame;
 pub mod grain;
@@ -119,7 +119,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     let (inner_input, obu) = self
                         .parse_obu(input, packet_ts)
                         .finish()
-                        .map_err(|e| anyhow!("{:?}", e))?;
+                        .map_err(|e| anyhow!("{e:?}"))?;
                     input = inner_input;
                     match obu {
                         Some(Obu::SequenceHeader(obu)) => {
@@ -130,7 +130,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                             self.previous_frame_header = Some(obu);
                         }
                         None => (),
-                    };
+                    }
                     if input.is_empty() {
                         break;
                     }
@@ -210,7 +210,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     let (inner_input, obu) = self
                         .parse_obu(input, packet_ts)
                         .finish()
-                        .map_err(|e| anyhow!("{:?}", e))?;
+                        .map_err(|e| anyhow!("{e:?}"))?;
                     input = inner_input;
                     match obu {
                         Some(Obu::SequenceHeader(obu)) => {
@@ -220,7 +220,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                             self.previous_frame_header = Some(obu);
                         }
                         None => (),
-                    };
+                    }
                     if input.is_empty() {
                         break;
                     }
@@ -248,7 +248,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                         packet.shrink(self.packet_out.len());
                     }
                     Ordering::Equal => {
-                        debug!("Packet sizes equal at {}", orig_size);
+                        debug!("Packet sizes equal at {orig_size}");
                     }
                 }
                 packet.data_mut().unwrap().copy_from_slice(&self.packet_out);

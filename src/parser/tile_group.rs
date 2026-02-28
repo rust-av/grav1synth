@@ -1,10 +1,10 @@
 use nom::{
+    IResult,
     bits::{bits, complete as bit_parsers},
     error::VerboseError,
-    IResult,
 };
 
-use super::{frame::TileInfo, util::take_bool_bit, BitstreamParser};
+use super::{BitstreamParser, frame::TileInfo, util::take_bool_bit};
 
 impl<const WRITE: bool> BitstreamParser<WRITE> {
     pub fn parse_tile_group_obu<'a>(

@@ -2,8 +2,8 @@ use std::fmt::Debug;
 
 use arrayvec::ArrayVec;
 use nom::{
-    bits::complete as bit_parsers, bytes::complete::take, combinator::map, error::VerboseError,
-    IResult,
+    IResult, bits::complete as bit_parsers, bytes::complete::take, combinator::map,
+    error::VerboseError,
 };
 use num_traits::PrimInt;
 

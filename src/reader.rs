@@ -1,11 +1,19 @@
-use std::path::Path;
+use std::{
+    num::{NonZeroU8, NonZeroUsize},
+    path::Path,
+};
 
-use anyhow::{anyhow, bail, Result};
-use av1_grain::v_frame::{frame::Frame as VFrame, pixel::Pixel as VPixel, prelude::ChromaSampling};
+use anyhow::{Result, anyhow, bail};
+use av1_grain::v_frame::{
+    chroma::ChromaSubsampling,
+    frame::{Frame as VFrame, FrameBuilder},
+    pixel::Pixel as VPixel,
+};
 use ffmpeg::{
+    Rational, Stream,
     codec::{decoder, packet},
     format::{self, context::Input},
-    frame, media, Rational, Stream,
+    frame, media,
 };
 
 pub struct BitstreamReader {
@@ -32,32 +40,35 @@ impl BitstreamReader {
         decoder.set_parameters(input.parameters())?;
 
         let video_details = VideoDetails {
-            width: decoder.width() as usize,
-            height: decoder.height() as usize,
-            bit_depth: match decoder.format() {
-                format::pixel::Pixel::YUV420P
-                | format::pixel::Pixel::YUV422P
-                | format::pixel::Pixel::YUV444P => 8,
-                format::pixel::Pixel::YUV420P10LE
-                | format::pixel::Pixel::YUV422P10LE
-                | format::pixel::Pixel::YUV444P10LE => 10,
-                format::pixel::Pixel::YUV420P12LE
-                | format::pixel::Pixel::YUV422P12LE
-                | format::pixel::Pixel::YUV444P12LE => 12,
-                _ => {
-                    bail!("Unsupported pixel format {:?}", decoder.format());
+            width: NonZeroUsize::new(decoder.width() as usize).expect("cannot be zero"),
+            height: NonZeroUsize::new(decoder.height() as usize).expect("cannot be zero"),
+            // SAFETY: consts
+            bit_depth: unsafe {
+                match decoder.format() {
+                    format::pixel::Pixel::YUV420P
+                    | format::pixel::Pixel::YUV422P
+                    | format::pixel::Pixel::YUV444P => NonZeroU8::new_unchecked(8),
+                    format::pixel::Pixel::YUV420P10LE
+                    | format::pixel::Pixel::YUV422P10LE
+                    | format::pixel::Pixel::YUV444P10LE => NonZeroU8::new_unchecked(10),
+                    format::pixel::Pixel::YUV420P12LE
+                    | format::pixel::Pixel::YUV422P12LE
+                    | format::pixel::Pixel::YUV444P12LE => NonZeroU8::new_unchecked(12),
+                    _ => {
+                        bail!("Unsupported pixel format {:?}", decoder.format());
+                    }
                 }
             },
             chroma_sampling: match decoder.format() {
                 format::pixel::Pixel::YUV420P
                 | format::pixel::Pixel::YUV420P10LE
-                | format::pixel::Pixel::YUV420P12LE => ChromaSampling::Cs420,
+                | format::pixel::Pixel::YUV420P12LE => ChromaSubsampling::Yuv420,
                 format::pixel::Pixel::YUV422P
                 | format::pixel::Pixel::YUV422P10LE
-                | format::pixel::Pixel::YUV422P12LE => ChromaSampling::Cs422,
+                | format::pixel::Pixel::YUV422P12LE => ChromaSubsampling::Yuv422,
                 format::pixel::Pixel::YUV444P
                 | format::pixel::Pixel::YUV444P10LE
-                | format::pixel::Pixel::YUV444P12LE => ChromaSampling::Cs444,
+                | format::pixel::Pixel::YUV444P12LE => ChromaSubsampling::Yuv444,
                 _ => {
                     bail!("Unsupported pixel format {:?}", decoder.format());
                 }
@@ -75,7 +86,7 @@ impl BitstreamReader {
         })
     }
 
-    pub fn get_video_stream(&self) -> Result<Stream> {
+    pub fn get_video_stream(&'_ self) -> Result<Stream<'_>> {
         Ok(self
             .input_ctx
             .streams()
@@ -83,7 +94,7 @@ impl BitstreamReader {
             .ok_or(ffmpeg::Error::StreamNotFound)?)
     }
 
-    pub fn input(&mut self) -> &mut Input {
+    pub const fn input(&mut self) -> &mut Input {
         &mut self.input_ctx
     }
 
@@ -125,8 +136,8 @@ impl BitstreamReader {
             if self.end_of_stream || packet.stream() == self.get_video_stream()?.index() {
                 let mut decoded = frame::Video::new(
                     self.decoder.format(),
-                    self.video_details.width as u32,
-                    self.video_details.height as u32,
+                    self.video_details.width.get() as u32,
+                    self.video_details.height.get() as u32,
                 );
                 packet.set_pts(Some(self.frameno as i64));
                 packet.set_dts(Some(self.frameno as i64));
@@ -136,35 +147,23 @@ impl BitstreamReader {
                 }
 
                 if self.decoder.receive_frame(&mut decoded).is_ok() {
-                    let mut f: VFrame<T> = VFrame::new_with_padding(
+                    let mut f: VFrame<T> = FrameBuilder::new(
                         self.video_details.width,
                         self.video_details.height,
                         self.video_details.chroma_sampling,
-                        0,
-                    );
-                    let width = self.video_details.width;
-                    let height = self.video_details.height;
-                    let bit_depth = self.video_details.bit_depth;
-                    let bytes = if bit_depth > 8 { 2 } else { 1 };
-                    let (chroma_width, chroma_height) = self
-                        .video_details
-                        .chroma_sampling
-                        .get_chroma_dimensions(width, height);
+                        self.video_details.bit_depth,
+                    )
+                    .build()?;
 
-                    // `VFrame::new_with_padding` expands the width to a factor of 8.
-                    // We don't want this.
-                    // To be honest, this is probably a bug in v_frame but I'm scared to change it
-                    // since so many packages use v_frame.
-                    f.planes[0].cfg.width = width;
-                    f.planes[0].cfg.height = height;
-                    f.planes[1].cfg.width = chroma_width;
-                    f.planes[1].cfg.height = chroma_height;
-                    f.planes[2].cfg.width = chroma_width;
-                    f.planes[2].cfg.height = chroma_height;
-
-                    f.planes[0].copy_from_raw_u8(decoded.data(0), width * bytes, bytes);
-                    f.planes[1].copy_from_raw_u8(decoded.data(1), chroma_width * bytes, bytes);
-                    f.planes[2].copy_from_raw_u8(decoded.data(2), chroma_width * bytes, bytes);
+                    f.y_plane.copy_from_u8_slice(decoded.data(0))?;
+                    f.u_plane
+                        .as_mut()
+                        .expect("has chroma")
+                        .copy_from_u8_slice(decoded.data(1))?;
+                    f.v_plane
+                        .as_mut()
+                        .expect("has chroma")
+                        .copy_from_u8_slice(decoded.data(2))?;
 
                     self.frameno += 1;
                     return Ok(Some(f));
@@ -180,13 +179,13 @@ impl BitstreamReader {
 #[derive(Debug, Clone, Copy)]
 pub struct VideoDetails {
     /// Width in pixels.
-    pub width: usize,
+    pub width: NonZeroUsize,
     /// Height in pixels.
-    pub height: usize,
+    pub height: NonZeroUsize,
     /// Bit-depth of the Video
-    pub bit_depth: usize,
+    pub bit_depth: NonZeroU8,
     /// Chroma Sampling of the Video.
-    pub chroma_sampling: ChromaSampling,
+    pub chroma_sampling: ChromaSubsampling,
     /// Frame rate of the Video.
     pub frame_rate: Rational,
 }

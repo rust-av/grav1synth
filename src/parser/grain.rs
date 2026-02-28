@@ -1,10 +1,10 @@
 use arrayvec::ArrayVec;
 use av1_grain::{NUM_UV_COEFFS, NUM_UV_POINTS, NUM_Y_COEFFS, NUM_Y_POINTS};
-use nom::{bits::complete as bit_parsers, error::VerboseError, IResult};
+use nom::{IResult, bits::complete as bit_parsers, error::VerboseError};
 
 use super::{
     frame::FrameType,
-    util::{take_bool_bit, BitInput},
+    util::{BitInput, take_bool_bit},
 };
 
 #[derive(Debug, Clone, PartialEq)]

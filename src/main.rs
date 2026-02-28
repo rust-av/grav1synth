@@ -33,7 +33,6 @@
 #![warn(clippy::rest_pat_in_fully_bound_structs)]
 #![warn(clippy::same_name_method)]
 #![warn(clippy::str_to_string)]
-#![warn(clippy::string_to_string)]
 #![warn(clippy::undocumented_unsafe_blocks)]
 #![warn(clippy::unnecessary_self_imports)]
 #![warn(clippy::unneeded_field_pattern)]
@@ -50,28 +49,31 @@ pub mod reader;
 
 use std::{
     env,
-    fs::{read_to_string, File},
-    io::{stderr, BufWriter, Write},
+    fs::{File, read_to_string},
+    io::{BufWriter, Write, stderr},
+    num::NonZeroU8,
     path::PathBuf,
     time::Duration,
 };
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 #[cfg(feature = "unstable")]
 use av1_grain::estimate_plane_noise;
 use av1_grain::{
-    generate_photon_noise_params, parse_grain_table,
-    v_frame::{frame::Frame, prelude::Pixel},
-    DiffGenerator, TransferFunction,
+    DiffGenerator, TransferFunction, generate_photon_noise_params, parse_grain_table,
+    v_frame::{frame::Frame, pixel::Pixel},
 };
 use clap::{Parser, Subcommand};
 use crossterm::tty::IsTty;
 use dialoguer::Confirm;
-use ffmpeg::{format, sys::AVColorTransferCharacteristic, Rational};
+use ffmpeg::{
+    Rational,
+    ffi::{AVColorRange, AVColorTransferCharacteristic},
+    format,
+};
 use indicatif::{HumanDuration, ProgressBar, ProgressDrawTarget, ProgressState, ProgressStyle};
 use log::{debug, error, info, warn};
 use parser::grain::{FilmGrainHeader, FilmGrainParams};
-use scoped_threadpool::Pool;
 
 use crate::{
     filters::FilterChain, misc::get_frame_count, parser::BitstreamParser, reader::BitstreamReader,
@@ -176,7 +178,10 @@ fn spinner_style() -> ProgressStyle {
 #[allow(clippy::cognitive_complexity)]
 pub fn main() -> Result<()> {
     if env::var("RUST_LOG").is_err() {
-        env::set_var("RUST_LOG", "error,grav1synth=info");
+        // SAFETY: idk why this is even unsafe
+        unsafe {
+            env::set_var("RUST_LOG", "error,grav1synth=info");
+        }
     }
     pretty_env_logger::init();
 
@@ -311,15 +316,16 @@ pub fn main() -> Result<()> {
 
             let reader = BitstreamReader::open(&input)?;
             let writer = format::output(&output)?;
-            let video_stream = reader.get_video_stream().unwrap();
             // SAFETY: We extract the items we need from the struct within the unsafe block,
             // so there's no possibility of use-after-free later.
-            let (width, height, trc) = unsafe {
+            let (width, height, trc, range) = unsafe {
+                let video_stream = reader.get_video_stream().unwrap();
                 let params = video_stream.parameters().as_ptr();
                 (
                     (*params).width as u32,
                     (*params).height as u32,
                     (*params).color_trc,
+                    (*params).color_range,
                 )
             };
 
@@ -327,7 +333,7 @@ pub fn main() -> Result<()> {
                 0,
                 u64::MAX,
                 av1_grain::NoiseGenArgs {
-                    iso_setting: u32::from(iso),
+                    iso_setting: iso,
                     width,
                     height,
                     transfer_function: if trc == AVColorTransferCharacteristic::AVCOL_TRC_SMPTE2084
@@ -337,6 +343,7 @@ pub fn main() -> Result<()> {
                         TransferFunction::BT1886
                     },
                     chroma_grain: chroma,
+                    full_range: range == AVColorRange::AVCOL_RANGE_JPEG,
                     random_seed: None,
                 },
             );
@@ -409,7 +416,7 @@ pub fn main() -> Result<()> {
                 Some(f) => {
                     let f = FilterChain::new(&f);
                     if let Err(e) = f {
-                        error!("Invalid filter chain: {}", e);
+                        error!("Invalid filter chain: {e}");
                         return Ok(());
                     }
                     Some(f.unwrap())
@@ -460,22 +467,19 @@ pub fn main() -> Result<()> {
                     i64::from(frame_rate.numerator()),
                     i64::from(frame_rate.denominator()),
                 ),
-                source_bd,
-                denoised_bd,
+                source_bd.get() as usize,
+                denoised_bd.get() as usize,
             );
-            // Currently we use 2 threads, one for the source frame and one for the denoised frame.
-            let mut pool = Pool::new(2);
-            let mut frames = 0usize;
 
+            let mut frames = 0usize;
             loop {
                 debug!("Diffing next frame");
-                match (source_bd, denoised_bd) {
+                match (source_bd.get(), denoised_bd.get()) {
                     (8, 8) => match get_filtered_frame_pair::<u8, u8>(
-                        &mut pool,
                         &mut source_reader,
                         &mut denoised_reader,
                         source_bd,
-                        &filters,
+                        filters.as_ref(),
                     )? {
                         (Some(source_frame), Some(denoised_frame)) => {
                             differ.diff_frame(&source_frame, &denoised_frame)?;
@@ -492,11 +496,10 @@ pub fn main() -> Result<()> {
                         }
                     },
                     (8, 9..=16) => match get_filtered_frame_pair::<u8, u16>(
-                        &mut pool,
                         &mut source_reader,
                         &mut denoised_reader,
                         source_bd,
-                        &filters,
+                        filters.as_ref(),
                     )? {
                         (Some(source_frame), Some(denoised_frame)) => {
                             differ.diff_frame(&source_frame, &denoised_frame)?;
@@ -513,11 +516,10 @@ pub fn main() -> Result<()> {
                         }
                     },
                     (9..=16, 8) => match get_filtered_frame_pair::<u16, u8>(
-                        &mut pool,
                         &mut source_reader,
                         &mut denoised_reader,
                         source_bd,
-                        &filters,
+                        filters.as_ref(),
                     )? {
                         (Some(source_frame), Some(denoised_frame)) => {
                             differ.diff_frame(&source_frame, &denoised_frame)?;
@@ -534,11 +536,10 @@ pub fn main() -> Result<()> {
                         }
                     },
                     (9..=16, 9..=16) => match get_filtered_frame_pair::<u16, u16>(
-                        &mut pool,
                         &mut source_reader,
                         &mut denoised_reader,
                         source_bd,
-                        &filters,
+                        filters.as_ref(),
                     )? {
                         (Some(source_frame), Some(denoised_frame)) => {
                             differ.diff_frame(&source_frame, &denoised_frame)?;
@@ -570,7 +571,7 @@ pub fn main() -> Result<()> {
                 write_film_grain_segment(&segment.into(), &mut output_file)?;
             }
             output_file.flush()?;
-            info!("Computed diff for {} frames", frames);
+            info!("Computed diff for {frames} frames");
             info!("Done, wrote output file to {}", output.to_string_lossy());
         }
         #[cfg(feature = "unstable")]
@@ -601,7 +602,7 @@ pub fn main() -> Result<()> {
                 return Ok(());
             }
 
-            let mut reader = BitstreamReader::open(&source)?;
+            let mut reader = Decoder::from_file(&source)?;
             let bit_depth = reader.get_video_details().bit_depth;
             let mut frame_estimates = Vec::new();
 
@@ -655,27 +656,18 @@ pub fn main() -> Result<()> {
 
 #[allow(clippy::type_complexity)]
 fn get_filtered_frame_pair<T: Pixel, U: Pixel>(
-    pool: &mut Pool,
     source_reader: &mut BitstreamReader,
     denoised_reader: &mut BitstreamReader,
-    source_bd: usize,
-    filters: &Option<FilterChain>,
+    source_bd: NonZeroU8,
+    filters: Option<&FilterChain>,
 ) -> Result<(Option<Frame<T>>, Option<Frame<U>>)> {
-    let mut source_frame = Ok(None);
-    let mut denoised_frame = Ok(None);
-    pool.scoped(|s| {
-        s.execute(|| {
-            let mut frame = source_reader.get_frame::<T>();
-            if let Some(f) = filters.as_ref() {
-                frame = frame.map(|opt| opt.map(|source_frame| f.apply(source_frame, source_bd)));
-            }
-            source_frame = frame;
-        });
-        s.execute(|| {
-            denoised_frame = denoised_reader.get_frame::<U>();
-        });
-        s.join_all();
-    });
+    let mut frame = source_reader.get_frame::<T>();
+    if let Some(f) = filters.as_ref() {
+        frame = frame.map(|opt| opt.map(|source_frame| f.apply(source_frame, source_bd)));
+    }
+    let source_frame = frame;
+    let denoised_frame = denoised_reader.get_frame::<U>();
+
     Ok((source_frame?, denoised_frame?))
 }
 
@@ -777,9 +769,9 @@ fn aggregate_grain_headers(
     let mut cur_packet_end: u64 = cur_packet_end_f.ceil() as u64 * TIMESTAMP_BASE_UNIT;
 
     grain_headers.iter().fold(Vec::new(), |mut acc, elem| {
-        let prev_packet_has_grain = acc.last().map_or(false, |last: &GrainTableSegment| {
-            last.end_time == cur_packet_start
-        });
+        let prev_packet_has_grain = acc
+            .last()
+            .is_some_and(|last: &GrainTableSegment| last.end_time == cur_packet_start);
         if prev_packet_has_grain {
             match *elem {
                 FilmGrainHeader::Disable => {
@@ -805,7 +797,7 @@ fn aggregate_grain_headers(
                         });
                     }
                 }
-            };
+            }
         } else if let FilmGrainHeader::UpdateGrain(ref grain_params) = *elem {
             acc.push(GrainTableSegment {
                 start_time: cur_packet_start,

@@ -1,12 +1,12 @@
 use arrayvec::ArrayVec;
 use bit::BitIndex;
 use log::debug;
-use nom::{bits, bits::complete as bit_parsers, error::VerboseError, IResult};
+use nom::{IResult, bits, bits::complete as bit_parsers, error::VerboseError};
 use num_enum::TryFromPrimitive;
 
 use super::{
-    util::{take_bool_bit, uvlc, BitInput},
     BitstreamParser,
+    util::{BitInput, take_bool_bit, uvlc},
 };
 
 pub const SELECT_SCREEN_CONTENT_TOOLS: u8 = 2;

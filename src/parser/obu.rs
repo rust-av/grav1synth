@@ -1,17 +1,17 @@
 use log::debug;
 use nom::{
+    IResult,
     bits::{bits, complete as bit_parsers},
     combinator::map_res,
-    error::{context, VerboseError},
-    IResult,
+    error::{VerboseError, context},
 };
 use num_enum::TryFromPrimitive;
 
 use super::{
+    BitstreamParser,
     frame::FrameHeader,
     sequence::SequenceHeader,
-    util::{leb128, leb128_write, take_bool_bit, take_zero_bit, BitInput},
-    BitstreamParser,
+    util::{BitInput, leb128, leb128_write, take_bool_bit, take_zero_bit},
 };
 
 impl<const WRITE: bool> BitstreamParser<WRITE> {
@@ -42,7 +42,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 self.size - 1 - usize::from(obu_header.extension.is_some()),
             )
         };
-        debug!("Parsing contents of OBU of size {}", obu_size);
+        debug!("Parsing contents of OBU of size {obu_size}");
         self.size = obu_size;
         if WRITE {
             let total_header_size = pre_input.len() - input.len();
@@ -57,27 +57,25 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
 
         if obu_header.obu_type != ObuType::SequenceHeader
             && obu_header.obu_type != ObuType::TemporalDelimiter
+            && let Some(ref obu_ext) = obu_header.extension
+            && let Some(ref sequence_header) = self.sequence_header
         {
-            if let Some(ref obu_ext) = obu_header.extension {
-                if let Some(ref sequence_header) = self.sequence_header {
-                    let op_pt_idc = sequence_header.cur_operating_point_idc;
-                    if op_pt_idc != 0 {
-                        let in_temporal_layer = (op_pt_idc >> obu_ext.temporal_id) & 1 > 0;
-                        let in_spatial_layer = (op_pt_idc >> (obu_ext.spatial_id + 8)) & 1 > 0;
-                        if !in_temporal_layer || !in_spatial_layer {
-                            if WRITE {
-                                self.packet_out.extend_from_slice(&input[..obu_size]);
-                                debug!(
-                                    "Writing skipped OBU of size {} to packet_out, total packet \
+            let op_pt_idc = sequence_header.cur_operating_point_idc;
+            if op_pt_idc != 0 {
+                let in_temporal_layer = (op_pt_idc >> obu_ext.temporal_id) & 1 > 0;
+                let in_spatial_layer = (op_pt_idc >> (obu_ext.spatial_id + 8)) & 1 > 0;
+                if !in_temporal_layer || !in_spatial_layer {
+                    if WRITE {
+                        self.packet_out.extend_from_slice(&input[..obu_size]);
+                        debug!(
+                            "Writing skipped OBU of size {} to packet_out, total packet \
                                      size at {}",
-                                    obu_size,
-                                    self.packet_out.len()
-                                );
-                            }
-                            debug!("Skipping OBU parsing because not in temporal or spatial layer");
-                            return Ok((&input[obu_size..], None));
-                        }
+                            obu_size,
+                            self.packet_out.len()
+                        );
                     }
+                    debug!("Skipping OBU parsing because not in temporal or spatial layer");
+                    return Ok((&input[obu_size..], None));
                 }
             }
         }

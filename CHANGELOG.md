@@ -1,3 +1,12 @@
+## Version 0.2.0
+
+- Upgrade all of the internals to the latest rust-av crates
+- Remove ISO range limit
+- Support ffmpeg 8.0
+- Extend packet to include adjustment obu size
+- Fix writing `apply_grain` to false
+- Add parsing for `global_param`
+
 ## Version 0.1.0-beta.6
 
 - Add a progress bar for the `diff` function.

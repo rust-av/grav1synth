@@ -5,19 +5,19 @@ use bit::BitIndex;
 use bitvec::{order::Msb0, view::BitView};
 use log::debug;
 use nom::{
-    bits::{bits, complete as bit_parsers},
-    error::{context, VerboseError},
     IResult,
+    bits::{bits, complete as bit_parsers},
+    error::{VerboseError, context},
 };
 use num_enum::TryFromPrimitive;
-use num_traits::{clamp, PrimInt};
+use num_traits::{PrimInt, clamp};
 
 use super::{
-    grain::{film_grain_params, FilmGrainHeader},
+    BitstreamParser,
+    grain::{FilmGrainHeader, film_grain_params},
     obu::ObuHeader,
     sequence::{SELECT_INTEGER_MV, SELECT_SCREEN_CONTENT_TOOLS},
-    util::{ns, su, take_bool_bit, BitInput},
-    BitstreamParser,
+    util::{BitInput, ns, su, take_bool_bit},
 };
 use crate::GrainTableSegment;
 
@@ -126,10 +126,10 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 pre_len - input.len()
             );
             self.seen_frame_header = false;
-            Ok((input, header.show_frame.then(|| header)))
+            Ok((input, header.show_frame.then_some(header)))
         } else {
             self.seen_frame_header = true;
-            Ok((input, header.show_frame.then(|| header)))
+            Ok((input, header.show_frame.then_some(header)))
         }
     }
 
@@ -187,24 +187,19 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                             tile_info: self.previous_frame_header.as_ref().unwrap().tile_info,
                         },
                     ));
-                };
+                }
                 let (input, frame_type): (_, u8) = bit_parsers::take(2usize)(input)?;
                 let frame_type = FrameType::try_from(frame_type).unwrap();
                 let (input, show_frame) = take_bool_bit(input)?;
                 let input = if show_frame
-                    && sequence_header.decoder_model_info.is_some()
+                    && let Some(decoder_model_info) = sequence_header.decoder_model_info
                     && !sequence_header
                         .timing_info
-                        .map_or(false, |ti| ti.equal_picture_interval)
+                        .is_some_and(|ti| ti.equal_picture_interval)
                 {
                     temporal_point_info(
                         input,
-                        sequence_header
-                            .decoder_model_info
-                            .unwrap()
-                            .frame_presentation_time_length_minus_1
-                            as usize
-                            + 1,
+                        decoder_model_info.frame_presentation_time_length_minus_1 as usize + 1,
                     )?
                     .0
                 } else {
@@ -594,7 +589,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                             extra_byte.set_bit(i, false);
                         }
                         self.packet_out.push(extra_byte);
-                    };
+                    }
                     FilmGrainHeader::Disable
                 }
             } else {
@@ -1221,7 +1216,7 @@ fn segmentation_params(
     };
 
     // The rest of the stuff in this method doesn't read any input, so return
-    Ok((input, segmentation_enabled.then(|| segmentation_data)))
+    Ok((input, segmentation_enabled.then_some(segmentation_data)))
 }
 
 fn delta_q_params(
@@ -1325,7 +1320,7 @@ fn loop_filter_params(
                 };
             }
         }
-    };
+    }
 
     Ok((input, ()))
 }
@@ -1678,7 +1673,7 @@ fn global_motion_params(
                     type_ = AFFINE;
                 }
             }
-        };
+        }
 
         if type_ >= ROTZOOM {
             let (inner_input, _) =
@@ -1733,23 +1728,23 @@ fn get_qindex(
 ) -> u8 {
     if seg_feature_active_idx(segment_id, SEG_LVL_ALT_Q, feature_data) {
         let data = feature_data.unwrap()[segment_id][SEG_LVL_ALT_Q].unwrap();
-        let mut qindex = i16::from(base_q_idx) + data;
-        if !ignore_delta_q {
-            if let Some(current_q_index) = current_q_index {
-                qindex = i16::from(current_q_index) + data;
-            }
-        }
+        let qindex = if !ignore_delta_q && let Some(current_q_index) = current_q_index {
+            i16::from(current_q_index) + data
+        } else {
+            i16::from(base_q_idx) + data
+        };
         return clamp(qindex, 0, 255) as u8;
-    } else if !ignore_delta_q && current_q_index.is_some() {
-        if let Some(current_q_index) = current_q_index {
-            return current_q_index;
-        }
+    } else if !ignore_delta_q
+        && current_q_index.is_some()
+        && let Some(current_q_index) = current_q_index
+    {
+        return current_q_index;
     }
     base_q_idx
 }
 
 #[inline(always)]
-fn seg_feature_active_idx(
+const fn seg_feature_active_idx(
     segment_id: usize,
     feature: usize,
     feature_data: Option<&SegmentationData>,

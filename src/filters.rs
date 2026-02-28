@@ -1,9 +1,12 @@
-use anyhow::{anyhow, bail, Result};
-use av1_grain::v_frame::{frame::Frame, prelude::Pixel};
+use std::num::{NonZeroU8, NonZeroUsize};
+
+use anyhow::{Result, anyhow, bail};
+use av1_grain::v_frame::frame::Frame;
+use av1_grain::v_frame::pixel::Pixel;
 use video_resize::algorithms::{
     BicubicCatmullRom, BicubicHermite, BicubicMitchell, Lanczos3, Spline36,
 };
-use video_resize::{crop, resize, CropDimensions, ResizeDimensions};
+use video_resize::{CropDimensions, ResizeDimensions, crop, resize};
 
 pub struct FilterChain {
     filters: Vec<Filter>,
@@ -21,7 +24,7 @@ impl FilterChain {
         for filter in filters.split(';') {
             let (filter, args) = filter
                 .split_once(':')
-                .ok_or_else(|| anyhow!("Invalid filter syntax in \"{}\"", filter))?;
+                .ok_or_else(|| anyhow!("Invalid filter syntax in \"{filter}\""))?;
             let args = args.split(',');
             match filter {
                 "crop" => {
@@ -29,7 +32,7 @@ impl FilterChain {
                     for arg in args {
                         let (arg, value) = arg
                             .split_once('=')
-                            .ok_or_else(|| anyhow!("Invalid filter syntax in \"{}\"", arg))?;
+                            .ok_or_else(|| anyhow!("Invalid filter syntax in \"{arg}\""))?;
                         match arg {
                             "top" => {
                                 top = value.parse()?;
@@ -43,7 +46,7 @@ impl FilterChain {
                             "right" => {
                                 right = value.parse()?;
                             }
-                            arg => bail!("Unrecognized crop arg \"{}\"", arg),
+                            arg => bail!("Unrecognized crop arg \"{arg}\""),
                         }
                     }
                     parsed.push(Filter::Crop {
@@ -58,7 +61,7 @@ impl FilterChain {
                     for arg in args {
                         let (arg, value) = arg
                             .split_once('=')
-                            .ok_or_else(|| anyhow!("Invalid filter syntax in \"{}\"", arg))?;
+                            .ok_or_else(|| anyhow!("Invalid filter syntax in \"{arg}\""))?;
                         match arg {
                             "width" => {
                                 width = value.parse()?;
@@ -82,24 +85,31 @@ impl FilterChain {
                                 "spline36" => {
                                     alg = "spline36";
                                 }
-                                alg => bail!("Unrecognized resize algorithm \"{}\"", alg),
+                                alg => bail!("Unrecognized resize algorithm \"{alg}\""),
                             },
-                            arg => bail!("Unrecognized resize arg \"{}\"", arg),
+                            arg => bail!("Unrecognized resize arg \"{arg}\""),
                         }
                     }
                     if width == 0 || height == 0 {
                         bail!("Both width and height must be provided to resize filter");
                     }
-                    parsed.push(Filter::Resize { width, height, alg });
+                    // SAFETY: checked above
+                    unsafe {
+                        parsed.push(Filter::Resize {
+                            width: NonZeroUsize::new_unchecked(width),
+                            height: NonZeroUsize::new_unchecked(height),
+                            alg,
+                        });
+                    }
                 }
-                f => bail!("Unrecognized filter \"{}\"", f),
+                f => bail!("Unrecognized filter \"{f}\""),
             }
         }
 
         Ok(Self { filters: parsed })
     }
 
-    pub fn apply<T: Pixel>(&self, frame: Frame<T>, source_bd: usize) -> Frame<T> {
+    pub fn apply<T: Pixel>(&self, frame: Frame<T>, source_bd: NonZeroU8) -> Frame<T> {
         self.filters
             .iter()
             .fold(frame, |prev, f| f.apply(&prev, source_bd))
@@ -114,14 +124,14 @@ enum Filter {
         right: usize,
     },
     Resize {
-        width: usize,
-        height: usize,
+        width: NonZeroUsize,
+        height: NonZeroUsize,
         alg: &'static str,
     },
 }
 
 impl Filter {
-    pub fn apply<T: Pixel>(&self, frame: &Frame<T>, source_bd: usize) -> Frame<T> {
+    pub fn apply<T: Pixel>(&self, frame: &Frame<T>, source_bd: NonZeroU8) -> Frame<T> {
         match *self {
             Filter::Crop {
                 top,

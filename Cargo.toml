@@ -1,8 +1,7 @@
 [package]
 name = "grav1synth"
-version = "0.1.0-beta.6"
-edition = "2021"
-rust-version = "1.65.0"
+version = "0.2.0"
+edition = "2024"
 license = "MIT"
 repository = "https://github.com/rust-av/grav1synth"
 description = "Grain Synth analyzer and editor for AV1 files"
@@ -13,24 +12,24 @@ exclude = ["/dav1d-test-data", "/tests"]
 [dependencies]
 anyhow = "1.0.55"
 arrayvec = "0.7.2"
-av1-grain = "0.2.3"
+av-decoders = { version = "0.9.1", features = ["ffmpeg"] }
+av1-grain = "0.4.0"
 bit = "0.1.1"
 bitvec = "1.0.1"
 clap = { version = "4.0.2", features = ["derive"] }
-crossterm = "0.26.0"
-dialoguer = "0.10.1"
+crossterm = "0.29.0"
+dialoguer = "0.12.0"
 ffmpeg = { version = "4.0.0", default-features = false, features = [
     "format",
-], package = "ffmpeg-the-third"}
-indicatif = "0.17.1"
+], package = "ffmpeg-the-third" }
+indicatif = "0.18"
 log = "0.4.17"
 nom = "7.1.0"
 num-rational = "0.4.1"
 num-traits = "0.2.15"
-num_enum = "0.5.7"
-pretty_env_logger = "0.4.0"
-scoped_threadpool = "0.1.9"
-video-resize = "0.1.0"
+num_enum = "0.7"
+pretty_env_logger = "0.5.0"
+video-resize = "0.2.0"
 
 [dev-dependencies]
 interpolate_name = "0.2.3"
