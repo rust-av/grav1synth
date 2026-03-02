@@ -1,9 +1,8 @@
 use log::debug;
 use nom::{
-    IResult,
+    IResult, Parser,
     bits::{bits, complete as bit_parsers},
-    combinator::map_res,
-    error::{VerboseError, context},
+    error::{Error, context},
 };
 use num_enum::TryFromPrimitive;
 
@@ -22,16 +21,17 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         input: &'a [u8],
         // Once again, this is in 10,000,000ths of a second
         packet_ts: u64,
-    ) -> IResult<&'a [u8], Option<Obu>, VerboseError<&'a [u8]>> {
+    ) -> IResult<&'a [u8], Option<Obu>, Error<&'a [u8]>> {
         debug!("Parsing OBU from remaining data of {} bytes", input.len());
         let pre_input = input;
         let packet_start_len = self.packet_out.len();
-        let (input, obu_header) = context("Failed parsing obu header", parse_obu_header)(input)?;
+        let (input, obu_header) =
+            context("Failed parsing obu header", parse_obu_header).parse(input)?;
         let obu_header_size = if obu_header.extension.is_some() { 2 } else { 1 };
         let obu_size_pos = packet_start_len + obu_header_size;
         let mut leb_size = 0;
         let (input, obu_size) = if obu_header.has_size_field {
-            let (input, result) = context("Failed parsing obu size", leb128)(input)?;
+            let (input, result) = context("Failed parsing obu size", leb128).parse(input)?;
             leb_size = result.bytes_read;
             debug!("Parsed OBU size of {}", result.value);
             (input, result.value as usize)
@@ -87,7 +87,8 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 let (mut input, header) = context("Failed parsing sequence header", |input| {
                     // Writing handled within this function
                     self.parse_sequence_header(input)
-                })(input)?;
+                })
+                .parse(input)?;
                 debug!(
                     "Consumed {} bytes of data for sequence header",
                     pre_len - input.len()
@@ -117,7 +118,8 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 let (mut input, header) = context("Failed parsing frame obu", |input| {
                     // Writing handled within this function
                     self.parse_frame_obu(input, obu_header, packet_ts)
-                })(input)?;
+                })
+                .parse(input)?;
                 debug!("Consumed {} bytes of data for frame", pre_len - input.len());
                 if obu_header.has_size_field {
                     if WRITE {
@@ -144,7 +146,8 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 let (mut input, header) = context("Failed parsing frame header", |input| {
                     // Writing handled within this function
                     self.parse_frame_header(input, obu_header, packet_ts)
-                })(input)?;
+                })
+                .parse(input)?;
                 debug!(
                     "Consumed {} bytes of data for frame header",
                     pre_len - input.len()
@@ -255,20 +258,21 @@ pub enum ObuType {
     Padding = 15,
 }
 
-fn parse_obu_header(input: &[u8]) -> IResult<&[u8], ObuHeader, VerboseError<&[u8]>> {
+fn parse_obu_header(input: &[u8]) -> IResult<&[u8], ObuHeader, Error<&[u8]>> {
     let (input, obu_header) = bits(|input| {
         let (input, _forbidden_bit) =
-            context("Failed parsing forbidden_bit", take_zero_bit)(input)?;
-        let (input, obu_type) = context("Failed parsing obu_type", obu_type)(input)?;
+            context("Failed parsing forbidden_bit", take_zero_bit).parse(input)?;
+        let (input, obu_type) = context("Failed parsing obu_type", obu_type).parse(input)?;
         let (input, extension_flag) =
-            context("Failed parsing extension_flag", take_bool_bit)(input)?;
+            context("Failed parsing extension_flag", take_bool_bit).parse(input)?;
         let (input, has_size_field) =
-            context("Failed parsing has_size_field", take_bool_bit)(input)?;
+            context("Failed parsing has_size_field", take_bool_bit).parse(input)?;
         let (input, _reserved_1bit) =
-            context("Failed parsing reserved_1bit", take_zero_bit)(input)?;
+            context("Failed parsing reserved_1bit", take_zero_bit).parse(input)?;
 
         let (input, extension) = if extension_flag {
-            let (input, extension) = context("Failed parsing obu extension", obu_extension)(input)?;
+            let (input, extension) =
+                context("Failed parsing obu extension", obu_extension).parse(input)?;
             (input, Some(extension))
         } else {
             (input, None)
@@ -287,7 +291,7 @@ fn parse_obu_header(input: &[u8]) -> IResult<&[u8], ObuHeader, VerboseError<&[u8
     Ok((input, obu_header))
 }
 
-fn obu_extension(input: BitInput) -> IResult<BitInput, ObuExtension, VerboseError<BitInput>> {
+fn obu_extension(input: BitInput) -> IResult<BitInput, ObuExtension, Error<BitInput>> {
     let (input, temporal_id) = bit_parsers::take(3usize)(input)?;
     let (input, spatial_id) = bit_parsers::take(2usize)(input)?;
     let (input, _reserved): (_, u8) = bit_parsers::take(3usize)(input)?;
@@ -300,8 +304,8 @@ fn obu_extension(input: BitInput) -> IResult<BitInput, ObuExtension, VerboseErro
     ))
 }
 
-fn obu_type(input: BitInput) -> IResult<BitInput, ObuType, VerboseError<BitInput>> {
-    map_res(bit_parsers::take(4usize), |output: u8| {
-        ObuType::try_from(output)
-    })(input)
+fn obu_type(input: BitInput) -> IResult<BitInput, ObuType, Error<BitInput>> {
+    bit_parsers::take(4usize)
+        .map_res(|output: u8| ObuType::try_from(output))
+        .parse(input)
 }

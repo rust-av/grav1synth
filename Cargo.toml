@@ -24,7 +24,7 @@ ffmpeg = { version = "4.0.0", default-features = false, features = [
 ], package = "ffmpeg-the-third" }
 indicatif = "0.18"
 log = "0.4.17"
-nom = "7.1.0"
+nom = "8.0.0"
 num-rational = "0.4.1"
 num-traits = "0.2.15"
 num_enum = "0.7"

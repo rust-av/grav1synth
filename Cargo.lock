@@ -516,7 +516,7 @@ dependencies = [
  "indicatif",
  "interpolate_name",
  "log",
- "nom 7.1.3",
+ "nom 8.0.0",
  "num-rational",
  "num-traits",
  "num_enum",

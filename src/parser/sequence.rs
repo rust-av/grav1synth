@@ -1,7 +1,7 @@
 use arrayvec::ArrayVec;
 use bit::BitIndex;
 use log::debug;
-use nom::{IResult, bits, bits::complete as bit_parsers, error::VerboseError};
+use nom::{IResult, bits::bits, bits::complete as bit_parsers, error::Error};
 use num_enum::TryFromPrimitive;
 
 use super::{
@@ -145,7 +145,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
     pub fn parse_sequence_header<'a>(
         &mut self,
         input: &'a [u8],
-    ) -> IResult<&'a [u8], SequenceHeader, VerboseError<&'a [u8]>> {
+    ) -> IResult<&'a [u8], SequenceHeader, Error<&'a [u8]>> {
         let mut obu_out = if WRITE {
             input[..self.size].to_owned()
         } else {
@@ -395,7 +395,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
     }
 }
 
-fn timing_info(input: BitInput) -> IResult<BitInput, TimingInfo, VerboseError<BitInput>> {
+fn timing_info(input: BitInput) -> IResult<BitInput, TimingInfo, Error<BitInput>> {
     let (input, _num_units_in_display_tick): (_, u32) = bit_parsers::take(32usize)(input)?;
     let (input, _time_scale): (_, u32) = bit_parsers::take(32usize)(input)?;
     let (input, equal_picture_interval) = take_bool_bit(input)?;
@@ -413,9 +413,7 @@ fn timing_info(input: BitInput) -> IResult<BitInput, TimingInfo, VerboseError<Bi
     ))
 }
 
-fn decoder_model_info(
-    input: BitInput,
-) -> IResult<BitInput, DecoderModelInfo, VerboseError<BitInput>> {
+fn decoder_model_info(input: BitInput) -> IResult<BitInput, DecoderModelInfo, Error<BitInput>> {
     let (input, buffer_delay_length_minus_1) = bit_parsers::take(5usize)(input)?;
     let (input, _num_units_in_decoding_tick): (_, u32) = bit_parsers::take(32usize)(input)?;
     let (input, buffer_removal_time_length_minus_1) = bit_parsers::take(5usize)(input)?;
@@ -433,7 +431,7 @@ fn decoder_model_info(
 fn operating_parameters_info(
     input: BitInput,
     buffer_delay_length: usize,
-) -> IResult<BitInput, (), VerboseError<BitInput>> {
+) -> IResult<BitInput, (), Error<BitInput>> {
     let (input, _decoder_buffer_delay): (_, u64) = bit_parsers::take(buffer_delay_length)(input)?;
     let (input, _encoder_buffer_delay): (_, u64) = bit_parsers::take(buffer_delay_length)(input)?;
     let (input, _low_delay_mode_flag) = take_bool_bit(input)?;
@@ -444,7 +442,7 @@ fn operating_parameters_info(
 fn color_config(
     input: BitInput,
     seq_profile: u8,
-) -> IResult<BitInput, ColorConfig, VerboseError<BitInput>> {
+) -> IResult<BitInput, ColorConfig, Error<BitInput>> {
     let bit_depth: u8;
     let (input, high_bitdepth) = take_bool_bit(input)?;
     let input = if seq_profile == 2 && high_bitdepth {

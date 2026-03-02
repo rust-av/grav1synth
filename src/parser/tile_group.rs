@@ -1,7 +1,7 @@
 use nom::{
     IResult,
     bits::{bits, complete as bit_parsers},
-    error::VerboseError,
+    error::Error,
 };
 
 use super::{BitstreamParser, frame::TileInfo, util::take_bool_bit};
@@ -12,7 +12,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         input: &'a [u8],
         size: usize,
         tile_info: TileInfo,
-    ) -> IResult<&'a [u8], (), VerboseError<&'a [u8]>> {
+    ) -> IResult<&'a [u8], (), Error<&'a [u8]>> {
         // Tile group header--we only need to parse this part
         let (_, (num_tiles, tg_end)) = bits(|input| {
             let num_tiles = tile_info.tile_cols * tile_info.tile_rows;

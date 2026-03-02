@@ -1,6 +1,6 @@
 use arrayvec::ArrayVec;
 use av1_grain::{NUM_UV_COEFFS, NUM_UV_POINTS, NUM_Y_COEFFS, NUM_Y_POINTS};
-use nom::{IResult, bits::complete as bit_parsers, error::VerboseError};
+use nom::{IResult, bits::complete as bit_parsers, error::Error};
 
 use super::{
     frame::FrameType,
@@ -141,7 +141,7 @@ pub fn film_grain_params(
     frame_type: FrameType,
     monochrome: bool,
     subsampling: (u8, u8),
-) -> IResult<BitInput, FilmGrainHeader, VerboseError<BitInput>> {
+) -> IResult<BitInput, FilmGrainHeader, Error<BitInput>> {
     if !film_grain_allowed {
         return Ok((input, FilmGrainHeader::Disable));
     }

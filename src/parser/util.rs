@@ -1,27 +1,23 @@
 use std::fmt::Debug;
 
 use arrayvec::ArrayVec;
-use nom::{
-    IResult, bits::complete as bit_parsers, bytes::complete::take, combinator::map,
-    error::VerboseError,
-};
+use nom::{IResult, Parser, bits::complete as bit_parsers, bytes::complete::take, error::Error};
 use num_traits::PrimInt;
 
 pub type BitInput<'a> = (&'a [u8], usize);
 
-pub fn take_bool_bit(input: BitInput) -> IResult<BitInput, bool, VerboseError<BitInput>> {
-    map(bit_parsers::take(1usize), |output: u8| output > 0)(input)
+pub fn take_bool_bit(input: BitInput) -> IResult<BitInput, bool, Error<BitInput>> {
+    bit_parsers::take(1usize)
+        .map(|output: u8| output > 0)
+        .parse(input)
 }
 
-pub fn take_zero_bit(input: BitInput) -> IResult<BitInput, (), VerboseError<BitInput>> {
+pub fn take_zero_bit(input: BitInput) -> IResult<BitInput, (), Error<BitInput>> {
     take_zero_bits(input, 1)
 }
 
-pub fn take_zero_bits(
-    input: BitInput,
-    bits: usize,
-) -> IResult<BitInput, (), VerboseError<BitInput>> {
-    map(bit_parsers::tag(0u8, bits), |_| ())(input)
+pub fn take_zero_bits(input: BitInput, bits: usize) -> IResult<BitInput, (), Error<BitInput>> {
+    bit_parsers::tag(0u8, bits).map(|_| ()).parse(input)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -34,7 +30,7 @@ where
 }
 
 /// Unsigned integer represented by a variable number of little-endian bytes.
-pub fn leb128(mut input: &[u8]) -> IResult<&[u8], ReadResult<u64>, VerboseError<&[u8]>> {
+pub fn leb128(mut input: &[u8]) -> IResult<&[u8], ReadResult<u64>, Error<&[u8]>> {
     let mut value = 0u64;
     let mut leb128_bytes = 0;
     for i in 0..8u8 {
@@ -88,7 +84,7 @@ pub fn leb128_write(value: u32) -> ArrayVec<u8, 8> {
 }
 
 /// Variable length unsigned n-bit number appearing directly in the bitstream.
-pub fn uvlc(mut input: BitInput) -> IResult<BitInput, u32, VerboseError<BitInput>> {
+pub fn uvlc(mut input: BitInput) -> IResult<BitInput, u32, Error<BitInput>> {
     let mut leading_zeros = 0usize;
     loop {
         let (rem, done) = take_bool_bit(input)?;
@@ -109,7 +105,7 @@ pub fn uvlc(mut input: BitInput) -> IResult<BitInput, u32, VerboseError<BitInput
 /// The abbreviation `ns` stands for non-symmetric. This encoding is
 /// non-symmetric because the values are not all coded with the same number of
 /// bits.
-pub fn ns(input: BitInput, n: usize) -> IResult<BitInput, u64, VerboseError<BitInput>> {
+pub fn ns(input: BitInput, n: usize) -> IResult<BitInput, u64, Error<BitInput>> {
     // I don't know what these variables stand for.
     // This is from the AV1 spec pdf.
     let w = floor_log2(n) + 1;
@@ -122,7 +118,7 @@ pub fn ns(input: BitInput, n: usize) -> IResult<BitInput, u64, VerboseError<BitI
     Ok((input, (v << 1u8) - m as u64 + extra_bit))
 }
 
-pub fn su(input: BitInput, n: usize) -> IResult<BitInput, i64, VerboseError<BitInput>> {
+pub fn su(input: BitInput, n: usize) -> IResult<BitInput, i64, Error<BitInput>> {
     let (input, mut value) = bit_parsers::take(n)(input)?;
     let sign_mask = 1 << (n - 1);
     if (value & sign_mask) > 0 {
