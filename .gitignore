@@ -1,3 +1,7 @@
 /target
 example.txt
 /.vscode
+.chunkhound*
+.mcp.json
+/*.ivf
+/*.mkv

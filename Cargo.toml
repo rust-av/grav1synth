@@ -41,6 +41,7 @@ tempfile = "3.3.0"
 default = []
 ffmpeg_static = ["ffmpeg/static", "ffmpeg/build"]
 unstable = ["av1-grain/unstable"]
+dav1d_tests = []
 
 [profile.dev]
 opt-level = 1
@@ -48,3 +49,7 @@ opt-level = 1
 [profile.release]
 codegen-units = 1
 lto = "thin"
+
+[profile.relwithdebug]
+inherits = "release"
+debug = "full"

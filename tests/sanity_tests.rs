@@ -1,3 +1,4 @@
+#![cfg(feature = "dav1d_tests")]
 #![recursion_limit = "1024"]
 
 use std::{path::PathBuf, process::Command};
