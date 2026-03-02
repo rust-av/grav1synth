@@ -12,7 +12,8 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
+use av_decoders::Rational32;
 #[cfg(feature = "unstable")]
 use av1_grain::estimate_plane_noise;
 use av1_grain::{
@@ -23,7 +24,6 @@ use clap::{Parser, Subcommand};
 use crossterm::tty::IsTty;
 use dialoguer::Confirm;
 use ffmpeg::{
-    Rational,
     ffi::{AVColorRange, AVColorTransferCharacteristic},
     format,
 };
@@ -270,7 +270,7 @@ pub fn main() -> Result<()> {
                 return Ok(());
             }
 
-            let reader = BitstreamReader::open(&input)?;
+            let mut reader = BitstreamReader::open(&input)?;
             let writer = format::output(&output)?;
             // SAFETY: We extract the items we need from the struct within the unsafe block,
             // so there's no possibility of use-after-free later.
@@ -420,21 +420,23 @@ pub fn main() -> Result<()> {
             let denoised_bd = denoised_reader.get_video_details().bit_depth;
             let mut differ = DiffGenerator::new(
                 num_rational::Rational64::new(
-                    i64::from(frame_rate.numerator()),
-                    i64::from(frame_rate.denominator()),
+                    i64::from(*frame_rate.numer()),
+                    i64::from(*frame_rate.denom()),
                 ),
-                source_bd.get() as usize,
-                denoised_bd.get() as usize,
+                source_bd,
+                denoised_bd,
             );
+            let non_zero_source_bd =
+                NonZeroU8::new(source_bd as u8).ok_or_else(|| anyhow!("bd should not be 0"))?;
 
             let mut frames = 0usize;
             loop {
                 debug!("Diffing next frame");
-                match (source_bd.get(), denoised_bd.get()) {
+                match (source_bd, denoised_bd) {
                     (8, 8) => match get_filtered_frame_pair::<u8, u8>(
                         &mut source_reader,
                         &mut denoised_reader,
-                        source_bd,
+                        non_zero_source_bd,
                         filters.as_ref(),
                     )? {
                         (Some(source_frame), Some(denoised_frame)) => {
@@ -454,7 +456,7 @@ pub fn main() -> Result<()> {
                     (8, 9..=16) => match get_filtered_frame_pair::<u8, u16>(
                         &mut source_reader,
                         &mut denoised_reader,
-                        source_bd,
+                        non_zero_source_bd,
                         filters.as_ref(),
                     )? {
                         (Some(source_frame), Some(denoised_frame)) => {
@@ -474,7 +476,7 @@ pub fn main() -> Result<()> {
                     (9..=16, 8) => match get_filtered_frame_pair::<u16, u8>(
                         &mut source_reader,
                         &mut denoised_reader,
-                        source_bd,
+                        non_zero_source_bd,
                         filters.as_ref(),
                     )? {
                         (Some(source_frame), Some(denoised_frame)) => {
@@ -494,7 +496,7 @@ pub fn main() -> Result<()> {
                     (9..=16, 9..=16) => match get_filtered_frame_pair::<u16, u16>(
                         &mut source_reader,
                         &mut denoised_reader,
-                        source_bd,
+                        non_zero_source_bd,
                         filters.as_ref(),
                     )? {
                         (Some(source_frame), Some(denoised_frame)) => {
@@ -717,9 +719,9 @@ const TIMESTAMP_BASE_UNIT: u64 = 10_000_000;
 
 fn aggregate_grain_headers(
     grain_headers: &[FilmGrainHeader],
-    frame_rate: Rational,
+    frame_rate: Rational32,
 ) -> Vec<GrainTableSegment> {
-    let time_per_packet: f64 = frame_rate.invert().into();
+    let time_per_packet: f64 = *frame_rate.denom() as f64 / *frame_rate.numer() as f64;
     let mut cur_packet_start: u64 = 0;
     let mut cur_packet_end_f: f64 = time_per_packet;
     let mut cur_packet_end: u64 = cur_packet_end_f.ceil() as u64 * TIMESTAMP_BASE_UNIT;
