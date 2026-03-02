@@ -5,3 +5,6 @@ example.txt
 .mcp.json
 /*.ivf
 /*.mkv
+lcov.info
+/CLAUDE.md
+/AGENTS.md
