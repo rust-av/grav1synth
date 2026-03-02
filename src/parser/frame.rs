@@ -1812,3 +1812,1782 @@ const fn seg_feature_active_idx(
         false
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::util::{BitInput, ns, su};
+    use super::{
+        Dimensions, FrameType, REFS_PER_FRAME, WARPEDMODEL_PREC_BITS, cdef_params,
+        compute_image_size, decode_signed_subexp_with_ref, decode_subexp,
+        decode_unsigned_subexp_with_ref, delta_lf_params, delta_q_params, frame_reference_mode,
+        frame_size, frame_size_with_refs, get_qindex, get_relative_dist, global_motion_params,
+        initialize_prev_gm_params, inverse_recenter, loop_filter_params, lr_params,
+        quantization_params, read_delta_q, read_interpolation_filter, read_tx_mode, render_size,
+        seg_feature_active_idx, segmentation_params, skip_mode_params, superres_params,
+        temporal_point_info, tile_info, tile_log2,
+    };
+
+    // -----------------------------------------------------------------------
+    // Test infrastructure
+    // -----------------------------------------------------------------------
+
+    #[derive(Default)]
+    struct BitBuilder {
+        bits: Vec<bool>,
+    }
+
+    impl BitBuilder {
+        fn push_bool(&mut self, bit: bool) {
+            self.bits.push(bit);
+        }
+
+        fn push_bits(&mut self, value: u64, width: usize) {
+            for shift in (0..width).rev() {
+                self.bits.push(((value >> shift) & 1) == 1);
+            }
+        }
+
+        /// Encodes a signed value in two's complement `n` bits (matching AV1 `su(n)`).
+        fn push_su(&mut self, value: i64, width: usize) {
+            let mask = (1u64 << width) - 1;
+            let encoded = (value as u64) & mask;
+            self.push_bits(encoded, width);
+        }
+
+        /// Encodes `value` using AV1 `ns(n)` non-symmetric coding.
+        fn push_ns(&mut self, value: u64, n: usize) {
+            let w = {
+                let mut s = 0usize;
+                let mut x = n;
+                while x != 0 {
+                    x >>= 1;
+                    s += 1;
+                }
+                s
+            };
+            let m = ((1usize << w) - n) as u64;
+            if value < m {
+                self.push_bits(value, w - 1);
+            } else {
+                let encoded = value + m;
+                self.push_bits(encoded, w);
+            }
+        }
+
+        fn len(&self) -> usize {
+            self.bits.len()
+        }
+
+        fn into_bytes(self) -> Vec<u8> {
+            let mut bytes = vec![0u8; self.bits.len().div_ceil(8)];
+            for (idx, bit) in self.bits.into_iter().enumerate() {
+                if bit {
+                    bytes[idx / 8] |= 1u8 << (7 - (idx % 8));
+                }
+            }
+            bytes
+        }
+    }
+
+    fn with_trailer(mut bits: BitBuilder) -> (Vec<u8>, usize) {
+        let consumed_bits = bits.len();
+        bits.push_bits(0b1010_0101, 8);
+        (bits.into_bytes(), consumed_bits)
+    }
+
+    fn assert_remaining_position(remaining: BitInput, input: &[u8], consumed_bits: usize) {
+        assert_eq!(remaining.0, &input[consumed_bits / 8..]);
+        assert_eq!(remaining.1, consumed_bits % 8);
+    }
+
+    /// Verifies that `push_ns` round-trips through the `ns` parser.
+    #[test]
+    fn push_ns_roundtrips_through_ns_parser() {
+        for n in [2, 3, 5, 8, 10, 16, 100] {
+            for v in 0..n as u64 {
+                let mut bits = BitBuilder::default();
+                bits.push_ns(v, n);
+                let (data, consumed) = with_trailer(bits);
+                let (rem, decoded) = ns((&data, 0), n).unwrap();
+                assert_eq!(decoded, v, "ns roundtrip failed for n={n}, v={v}");
+                assert_remaining_position(rem, &data, consumed);
+            }
+        }
+    }
+
+    /// Verifies that `push_su` round-trips through the `su` parser.
+    #[test]
+    fn push_su_roundtrips_through_su_parser() {
+        for width in [1, 4, 7, 9] {
+            let min = -(1i64 << (width - 1));
+            let max = (1i64 << (width - 1)) - 1;
+            for v in [min, min + 1, 0, max - 1, max] {
+                let mut bits = BitBuilder::default();
+                bits.push_su(v, width);
+                let (data, consumed) = with_trailer(bits);
+                let (rem, decoded) = su((&data, 0), width).unwrap();
+                assert_eq!(decoded, v, "su roundtrip failed for width={width}, v={v}");
+                assert_remaining_position(rem, &data, consumed);
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 1: FrameType::is_intra
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn is_intra_true_for_key() {
+        assert!(FrameType::Key.is_intra());
+    }
+
+    #[test]
+    fn is_intra_true_for_intra_only() {
+        assert!(FrameType::IntraOnly.is_intra());
+    }
+
+    #[test]
+    fn is_intra_false_for_inter() {
+        assert!(!FrameType::Inter.is_intra());
+    }
+
+    #[test]
+    fn is_intra_false_for_switch() {
+        assert!(!FrameType::Switch.is_intra());
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 2: temporal_point_info
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn temporal_point_info_consumes_exact_bits() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(0xABCD, 16);
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = temporal_point_info((&data, 0), 16).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn temporal_point_info_consumes_one_bit() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true);
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = temporal_point_info((&data, 0), 1).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn temporal_point_info_consumes_zero_bits() {
+        let bits = BitBuilder::default();
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = temporal_point_info((&data, 0), 0).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 3: superres_params
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn superres_disabled_identity() {
+        let bits = BitBuilder::default();
+        let (data, consumed) = with_trailer(bits);
+        let mut fs = Dimensions {
+            width: 1920,
+            height: 1080,
+        };
+        let mut us = fs;
+        let (rem, _) = superres_params((&data, 0), false, &mut fs, &mut us).unwrap();
+        assert_eq!(fs.width, 1920);
+        assert_eq!(us.width, 1920);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn superres_enabled_but_not_used() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(false); // use_superres = false
+        let (data, consumed) = with_trailer(bits);
+        let mut fs = Dimensions {
+            width: 1920,
+            height: 1080,
+        };
+        let mut us = fs;
+        let (rem, _) = superres_params((&data, 0), true, &mut fs, &mut us).unwrap();
+        // denom=8, width unchanged: (1920*8+4)/8 = 1920
+        assert_eq!(fs.width, 1920);
+        assert_eq!(us.width, 1920);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn superres_enabled_and_used_denom_9() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // use_superres = true
+        bits.push_bits(0, 3); // coded_denom = 0 → denom = 9
+        let (data, consumed) = with_trailer(bits);
+        let mut fs = Dimensions {
+            width: 1920,
+            height: 1080,
+        };
+        let mut us = fs;
+        let (rem, _) = superres_params((&data, 0), true, &mut fs, &mut us).unwrap();
+        // width = (1920*8 + 4) / 9 = 15364 / 9 = 1707
+        assert_eq!(fs.width, (1920 * 8 + 4) / 9);
+        assert_eq!(us.width, 1920);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn superres_enabled_and_used_max_denom() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // use_superres = true
+        bits.push_bits(7, 3); // coded_denom = 7 → denom = 16
+        let (data, consumed) = with_trailer(bits);
+        let mut fs = Dimensions {
+            width: 1920,
+            height: 1080,
+        };
+        let mut us = fs;
+        let (rem, _) = superres_params((&data, 0), true, &mut fs, &mut us).unwrap();
+        // width = (1920*8 + 8) / 16 = 15368 / 16 = 960
+        assert_eq!(fs.width, (1920 * 8 + 8) / 16);
+        assert_eq!(us.width, 1920);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 4: frame_size
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn frame_size_no_override_uses_max() {
+        let bits = BitBuilder::default();
+        let (data, consumed) = with_trailer(bits);
+        let max = Dimensions {
+            width: 1920,
+            height: 1080,
+        };
+        let (rem, fs) = frame_size((&data, 0), false, false, 11, 11, max).unwrap();
+        assert_eq!(fs.width, 1920);
+        assert_eq!(fs.height, 1080);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn frame_size_override_reads_dims() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(959, 11); // width_minus_1 = 959 → width = 960
+        bits.push_bits(539, 11); // height_minus_1 = 539 → height = 540
+        let (data, consumed) = with_trailer(bits);
+        let max = Dimensions {
+            width: 1920,
+            height: 1080,
+        };
+        let (rem, fs) = frame_size((&data, 0), true, false, 11, 11, max).unwrap();
+        assert_eq!(fs.width, 960);
+        assert_eq!(fs.height, 540);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn frame_size_override_with_superres() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(1919, 11); // width_minus_1 = 1919 → width = 1920
+        bits.push_bits(1079, 11); // height_minus_1 = 1079 → height = 1080
+        bits.push_bool(true); // use_superres = true
+        bits.push_bits(0, 3); // coded_denom = 0 → denom = 9
+        let (data, consumed) = with_trailer(bits);
+        let max = Dimensions {
+            width: 1920,
+            height: 1080,
+        };
+        let (rem, fs) = frame_size((&data, 0), true, true, 11, 11, max).unwrap();
+        assert_eq!(fs.width, (1920 * 8 + 4) / 9);
+        assert_eq!(fs.height, 1080);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 5: render_size
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn render_size_same_as_frame() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(false); // render_and_frame_size_different = false
+        let (data, consumed) = with_trailer(bits);
+        let fs = Dimensions {
+            width: 1920,
+            height: 1080,
+        };
+        let us = Dimensions {
+            width: 1920,
+            height: 1080,
+        };
+        let (rem, rs) = render_size((&data, 0), fs, us).unwrap();
+        assert_eq!(rs.width, 1920);
+        assert_eq!(rs.height, 1080);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn render_size_different_reads_32_bits() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // render_and_frame_size_different = true
+        bits.push_bits(1279, 16); // render_width_minus_1 = 1279 → 1280
+        bits.push_bits(719, 16); // render_height_minus_1 = 719 → 720
+        let (data, consumed) = with_trailer(bits);
+        let fs = Dimensions {
+            width: 1920,
+            height: 1080,
+        };
+        let us = Dimensions {
+            width: 1920,
+            height: 1080,
+        };
+        let (rem, rs) = render_size((&data, 0), fs, us).unwrap();
+        assert_eq!(rs.width, 1280);
+        assert_eq!(rs.height, 720);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 6: frame_size_with_refs
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn frame_size_with_refs_found_ref_first_iter() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // found_ref on first iter
+        // superres disabled (enable_superres=false): no bits needed
+        let (data, consumed) = with_trailer(bits);
+        let max = Dimensions {
+            width: 1920,
+            height: 1080,
+        };
+        let mut ref_fs = Dimensions {
+            width: 1280,
+            height: 720,
+        };
+        let mut ref_us = ref_fs;
+        let (rem, fs) = frame_size_with_refs(
+            (&data, 0),
+            false,
+            true,
+            11,
+            11,
+            max,
+            &mut ref_fs,
+            &mut ref_us,
+        )
+        .unwrap();
+        assert_eq!(fs.width, 1280);
+        assert_eq!(fs.height, 720);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn frame_size_with_refs_found_ref_third_iter() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(false); // 1st: not found
+        bits.push_bool(false); // 2nd: not found
+        bits.push_bool(true); // 3rd: found
+        let (data, consumed) = with_trailer(bits);
+        let max = Dimensions {
+            width: 1920,
+            height: 1080,
+        };
+        let mut ref_fs = Dimensions {
+            width: 640,
+            height: 480,
+        };
+        let mut ref_us = ref_fs;
+        let (rem, fs) = frame_size_with_refs(
+            (&data, 0),
+            false,
+            true,
+            11,
+            11,
+            max,
+            &mut ref_fs,
+            &mut ref_us,
+        )
+        .unwrap();
+        assert_eq!(fs.width, 640);
+        assert_eq!(fs.height, 480);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn frame_size_with_refs_no_ref_found_falls_back() {
+        let mut bits = BitBuilder::default();
+        // 7 false flags (no ref found)
+        for _ in 0..REFS_PER_FRAME {
+            bits.push_bool(false);
+        }
+        // Falls back to frame_size: override=true, enable_superres=false
+        bits.push_bits(959, 11); // width_minus_1 = 959 → 960
+        bits.push_bits(539, 11); // height_minus_1 = 539 → 540
+        // Then render_size: same
+        bits.push_bool(false);
+        let (data, consumed) = with_trailer(bits);
+        let max = Dimensions {
+            width: 1920,
+            height: 1080,
+        };
+        let mut ref_fs = Dimensions {
+            width: 1920,
+            height: 1080,
+        };
+        let mut ref_us = ref_fs;
+        let (rem, fs) = frame_size_with_refs(
+            (&data, 0),
+            false,
+            true,
+            11,
+            11,
+            max,
+            &mut ref_fs,
+            &mut ref_us,
+        )
+        .unwrap();
+        assert_eq!(fs.width, 960);
+        assert_eq!(fs.height, 540);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 7: compute_image_size
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn compute_image_size_standard_1080p() {
+        let (mi_cols, mi_rows) = compute_image_size(Dimensions {
+            width: 1920,
+            height: 1080,
+        });
+        assert_eq!(mi_cols, 480);
+        assert_eq!(mi_rows, 270);
+    }
+
+    #[test]
+    fn compute_image_size_rounds_up() {
+        let (mi_cols, mi_rows) = compute_image_size(Dimensions {
+            width: 1,
+            height: 1,
+        });
+        assert_eq!(mi_cols, 2);
+        assert_eq!(mi_rows, 2);
+    }
+
+    #[test]
+    fn compute_image_size_exact_alignment() {
+        let (mi_cols, mi_rows) = compute_image_size(Dimensions {
+            width: 8,
+            height: 16,
+        });
+        assert_eq!(mi_cols, 2);
+        assert_eq!(mi_rows, 4);
+    }
+
+    #[test]
+    fn compute_image_size_zero_dimensions() {
+        let (mi_cols, mi_rows) = compute_image_size(Dimensions {
+            width: 0,
+            height: 0,
+        });
+        assert_eq!(mi_cols, 0);
+        assert_eq!(mi_rows, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 8: read_interpolation_filter
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn read_interpolation_filter_switchable() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // is_filter_switchable
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = read_interpolation_filter((&data, 0)).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn read_interpolation_filter_explicit() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(false); // not switchable
+        bits.push_bits(2, 2); // explicit filter index
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = read_interpolation_filter((&data, 0)).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 9: tile_log2
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tile_log2_equal() {
+        assert_eq!(tile_log2(4u32, 4u32), 0);
+    }
+
+    #[test]
+    fn tile_log2_exceeds() {
+        assert_eq!(tile_log2(8u32, 4u32), 0);
+    }
+
+    #[test]
+    fn tile_log2_one_shift() {
+        assert_eq!(tile_log2(4u32, 5u32), 1);
+    }
+
+    #[test]
+    fn tile_log2_multiple_shifts() {
+        assert_eq!(tile_log2(1u32, 16u32), 4);
+    }
+
+    #[test]
+    fn tile_log2_both_one() {
+        assert_eq!(tile_log2(1u32, 1u32), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 10: tile_info
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tile_info_uniform_single_tile_64() {
+        // Small frame with 64×64 superblocks → single tile
+        // 32×32 pixels → mi_cols=8, mi_rows=8
+        // sb_cols=(8+15)>>4=1, sb_rows=1
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // uniform_tile_spacing
+        // min_log2_tile_cols=tile_log2(64,1)=0, max_log2_tile_cols=tile_log2(1,min(1,64))=0
+        // So no increment bits for cols.
+        // min_log2_tile_rows=0, max_log2_tile_rows=0
+        // So no increment bits for rows.
+        // tile_cols_log2=0, tile_rows_log2=0 → no context_update/size_bytes
+        let (data, consumed) = with_trailer(bits);
+        let (rem, ti) = tile_info((&data, 0), false, 8, 8).unwrap();
+        assert_eq!(ti.tile_cols, 1);
+        assert_eq!(ti.tile_rows, 1);
+        assert_eq!(ti.tile_cols_log2, 0);
+        assert_eq!(ti.tile_rows_log2, 0);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn tile_info_uniform_multi_tile() {
+        // Larger frame: 4096×2160 → mi_cols=1024, mi_rows=544
+        // 64×64 SB: sb_cols=(1024+15)>>4=64, sb_rows=(544+15)>>4=34
+        // max_tile_width_sb = 4096 >> 6 = 64
+        // min_log2_tile_cols = tile_log2(64,64)=0
+        // max_log2_tile_cols = tile_log2(1,min(64,64))=6
+        // Write uniform=true, then increment cols once
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // uniform
+        bits.push_bool(true); // increment tile_cols_log2 to 1
+        bits.push_bool(false); // stop incrementing cols
+        // Now tile_cols_log2=1
+        // tile_width_sb=(64+(1<<1)-1)>>1=32, tile_cols=64/32=2
+        // min_log2_tiles = max(0, tile_log2(max_tile_area_sb, sb_rows*sb_cols))
+        // max_tile_area_sb = 4096*2304 >> 12 = 2304
+        // sb_rows*sb_cols = 64*34 = 2176
+        // tile_log2(2304, 2176) = 0
+        // min_log2_tile_rows = max(0 - 1, 0) = 0
+        // max_log2_tile_rows = tile_log2(1, min(34,64)) = 6 (since 1<<5=32 < 34)
+        bits.push_bool(false); // don't increment rows
+        // tile_rows_log2=0
+        // tile_height_sb = (34 + 0) >> 0 = 34, tile_rows = 34/34 = 1
+        // tile_cols_log2(1) + tile_rows_log2(0) = 1 > 0 → reads context_update + size_bytes
+        bits.push_bits(0, 1); // context_update_tile_id (1 bit = tile_cols_log2 + tile_rows_log2)
+        bits.push_bits(0, 2); // tile_size_bytes_minus_1
+        let (data, consumed) = with_trailer(bits);
+        let (rem, ti) = tile_info((&data, 0), false, 1024, 544).unwrap();
+        assert_eq!(ti.tile_cols, 2);
+        assert_eq!(ti.tile_rows, 1);
+        assert_eq!(ti.tile_cols_log2, 1);
+        assert_eq!(ti.tile_rows_log2, 0);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn tile_info_non_uniform_small_frame() {
+        // Small frame: mi_cols=8, mi_rows=8 with 64×64 SB
+        // sb_cols=1, sb_rows=1
+        // Non-uniform: reads ns() widths/heights
+        let mut bits = BitBuilder::default();
+        bits.push_bool(false); // non-uniform
+        // max_tile_width_sb = 64
+        // First col iteration: start_sb=0, max_width=min(1-0, 64)=1
+        // ns(1) reads 0 bits, returns 0 → size_sb=1, start_sb=1 → loop exits
+        // tile_cols=1
+        // widest_tile_sb=1, max_tile_height_sb=max(4096*2304/64/1, 1) huge
+        // First row iteration: max_height=min(1-0, huge)=1
+        // ns(1) reads 0 bits, returns 0 → size_sb=1, start_sb=1 → loop exits
+        // tile_rows=1
+        // tile_cols_log2=0, tile_rows_log2=0 → no context/size bits
+        let (data, consumed) = with_trailer(bits);
+        let (rem, ti) = tile_info((&data, 0), false, 8, 8).unwrap();
+        assert_eq!(ti.tile_cols, 1);
+        assert_eq!(ti.tile_rows, 1);
+        assert_eq!(ti.tile_cols_log2, 0);
+        assert_eq!(ti.tile_rows_log2, 0);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn tile_info_uniform_128x128_sb() {
+        // 1920×1080 with 128×128 SB
+        // mi_cols=480, mi_rows=272
+        // sb_cols=(480+31)>>5=15, sb_rows=(272+31)>>5=9
+        // sb_shift=5, sb_size=7
+        // max_tile_width_sb=4096>>7=32
+        // min_log2_tile_cols=tile_log2(32,15)=0
+        // max_log2_tile_cols=tile_log2(1,min(15,64))=4 (1<<3=8<15, 1<<4=16>=15)
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // uniform
+        bits.push_bool(false); // don't increment cols → tile_cols_log2=0
+        // tile_width_sb=(15+0)>>0=15, tile_cols=15/15=1
+        // max_tile_area_sb=4096*2304>>14=576
+        // min_log2_tiles=max(0, tile_log2(576, 15*9))=tile_log2(576, 135)=0
+        // min_log2_tile_rows=max(0-0, 0)=0
+        // max_log2_tile_rows=tile_log2(1, min(9,64))=4 (1<<3=8<9, 1<<4=16>=9)
+        bits.push_bool(false); // don't increment rows → tile_rows_log2=0
+        // tile_cols_log2=0 + tile_rows_log2=0 = 0 → no context/size bits
+        let (data, consumed) = with_trailer(bits);
+        let (rem, ti) = tile_info((&data, 0), true, 480, 272).unwrap();
+        assert_eq!(ti.tile_cols, 1);
+        assert_eq!(ti.tile_rows, 1);
+        assert_eq!(ti.tile_cols_log2, 0);
+        assert_eq!(ti.tile_rows_log2, 0);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 11: quantization_params
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn quantization_params_mono_no_qmatrix() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(128, 8); // base_q_idx = 128
+        bits.push_bool(false); // deltaq_y_dc not coded
+        // num_planes=1 → skip U/V deltas
+        bits.push_bool(false); // using_qmatrix = false
+        let (data, consumed) = with_trailer(bits);
+        let (rem, qp) = quantization_params((&data, 0), 1, false).unwrap();
+        assert_eq!(qp.base_q_idx, 128);
+        assert_eq!(qp.deltaq_y_dc, 0);
+        assert_eq!(qp.deltaq_u_dc, 0);
+        assert_eq!(qp.deltaq_u_ac, 0);
+        assert_eq!(qp.deltaq_v_dc, 0);
+        assert_eq!(qp.deltaq_v_ac, 0);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn quantization_params_multi_plane_no_separate_uv() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(100, 8); // base_q_idx
+        bits.push_bool(false); // deltaq_y_dc not coded
+        // num_planes=3, separate_uv=false → diff_uv_delta=false
+        bits.push_bool(false); // deltaq_u_dc not coded
+        bits.push_bool(false); // deltaq_u_ac not coded
+        // V copies U (diff_uv_delta=false)
+        bits.push_bool(false); // using_qmatrix = false
+        let (data, consumed) = with_trailer(bits);
+        let (rem, qp) = quantization_params((&data, 0), 3, false).unwrap();
+        assert_eq!(qp.base_q_idx, 100);
+        assert_eq!(qp.deltaq_v_dc, qp.deltaq_u_dc);
+        assert_eq!(qp.deltaq_v_ac, qp.deltaq_u_ac);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn quantization_params_separate_uv_diff_delta() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(50, 8); // base_q_idx
+        bits.push_bool(false); // deltaq_y_dc not coded
+        // separate_uv=true
+        bits.push_bool(true); // diff_uv_delta = true
+        bits.push_bool(true); // deltaq_u_dc coded
+        bits.push_su(10, 7); // deltaq_u_dc = 10
+        bits.push_bool(false); // deltaq_u_ac not coded
+        // diff_uv_delta=true → read V independently
+        bits.push_bool(true); // deltaq_v_dc coded
+        bits.push_su(-5, 7); // deltaq_v_dc = -5
+        bits.push_bool(false); // deltaq_v_ac not coded
+        bits.push_bool(false); // using_qmatrix = false
+        let (data, consumed) = with_trailer(bits);
+        let (rem, qp) = quantization_params((&data, 0), 3, true).unwrap();
+        assert_eq!(qp.deltaq_u_dc, 10);
+        assert_eq!(qp.deltaq_v_dc, -5);
+        assert_eq!(qp.deltaq_u_ac, 0);
+        assert_eq!(qp.deltaq_v_ac, 0);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn quantization_params_separate_uv_no_diff() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(50, 8); // base_q_idx
+        bits.push_bool(false); // deltaq_y_dc
+        bits.push_bool(false); // diff_uv_delta = false
+        bits.push_bool(true); // deltaq_u_dc coded
+        bits.push_su(7, 7); // deltaq_u_dc = 7
+        bits.push_bool(false); // deltaq_u_ac
+        // diff_uv_delta=false → V = U
+        bits.push_bool(false); // using_qmatrix
+        let (data, consumed) = with_trailer(bits);
+        let (rem, qp) = quantization_params((&data, 0), 3, true).unwrap();
+        assert_eq!(qp.deltaq_u_dc, 7);
+        assert_eq!(qp.deltaq_v_dc, 7);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn quantization_params_qmatrix_separate_uv() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(128, 8); // base_q_idx
+        bits.push_bool(false); // deltaq_y_dc
+        bits.push_bool(false); // diff_uv_delta = false (separate_uv=true)
+        bits.push_bool(false); // deltaq_u_dc
+        bits.push_bool(false); // deltaq_u_ac
+        bits.push_bool(true); // using_qmatrix = true
+        bits.push_bits(5, 4); // qm_y
+        bits.push_bits(3, 4); // qm_u
+        bits.push_bits(7, 4); // qm_v (separate_uv=true → reads independently)
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = quantization_params((&data, 0), 3, true).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn quantization_params_qmatrix_shared_uv() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(128, 8);
+        bits.push_bool(false);
+        // separate_uv=false → no diff_uv_delta bit
+        bits.push_bool(false);
+        bits.push_bool(false);
+        bits.push_bool(true); // using_qmatrix
+        bits.push_bits(5, 4); // qm_y
+        bits.push_bits(3, 4); // qm_u; qm_v = qm_u (no extra read)
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = quantization_params((&data, 0), 3, false).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 12: read_delta_q
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn read_delta_q_not_coded_zero() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(false); // delta_coded = false
+        let (data, consumed) = with_trailer(bits);
+        let (rem, val) = read_delta_q((&data, 0)).unwrap();
+        assert_eq!(val, 0);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn read_delta_q_coded_positive() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // delta_coded = true
+        bits.push_su(42, 7); // su(7) = 42
+        let (data, consumed) = with_trailer(bits);
+        let (rem, val) = read_delta_q((&data, 0)).unwrap();
+        assert_eq!(val, 42);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn read_delta_q_coded_negative() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true);
+        bits.push_su(-10, 7);
+        let (data, consumed) = with_trailer(bits);
+        let (rem, val) = read_delta_q((&data, 0)).unwrap();
+        assert_eq!(val, -10);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn read_delta_q_coded_zero() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true);
+        bits.push_su(0, 7);
+        let (data, consumed) = with_trailer(bits);
+        let (rem, val) = read_delta_q((&data, 0)).unwrap();
+        assert_eq!(val, 0);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 13: segmentation_params
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn segmentation_params_disabled_returns_none() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(false); // segmentation_enabled = false
+        let (data, consumed) = with_trailer(bits);
+        let (rem, result) = segmentation_params((&data, 0), 7).unwrap();
+        assert!(result.is_none());
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn segmentation_params_primary_ref_none_no_features() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // segmentation_enabled
+        // primary_ref_frame=7 (PRIMARY_REF_NONE) → segmentation_update_data=true
+        // 8 segments × 8 features = 64 feature_enabled flags, all false
+        for _ in 0..64 {
+            bits.push_bool(false);
+        }
+        let (data, consumed) = with_trailer(bits);
+        let (rem, result) = segmentation_params((&data, 0), 7).unwrap();
+        let seg_data = result.unwrap();
+        for seg in &seg_data {
+            for feat in seg {
+                assert!(feat.is_none());
+            }
+        }
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn segmentation_params_primary_ref_none_unsigned_feature() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // segmentation_enabled
+        // Segment 0, features 0-4: all disabled, feature 5: enabled
+        for _ in 0..5 {
+            bits.push_bool(false);
+        }
+        bits.push_bool(true); // feature 5 enabled (unsigned, 3 bits, max=7)
+        bits.push_bits(5, 3); // feature value = 5
+        bits.push_bool(false); // feature 6
+        bits.push_bool(false); // feature 7
+        // Segments 1-7: all features disabled
+        for _ in 0..(7 * 8) {
+            bits.push_bool(false);
+        }
+        let (data, consumed) = with_trailer(bits);
+        let (rem, result) = segmentation_params((&data, 0), 7).unwrap();
+        let seg_data = result.unwrap();
+        assert_eq!(seg_data[0][5], Some(5));
+        assert!(seg_data[0][0].is_none());
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn segmentation_params_primary_ref_none_signed_feature() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // segmentation_enabled
+        // Segment 0, feature 0: enabled (signed, 8+1=9 bits including sign, su(1+8))
+        bits.push_bool(true); // feature 0 enabled
+        bits.push_su(-50, 9); // feature value = -50 (SEGMENTATION_FEATURE_BITS[0]=8, signed → su(1+8))
+        // Features 1-7: disabled
+        for _ in 1..8 {
+            bits.push_bool(false);
+        }
+        // Segments 1-7: all disabled
+        for _ in 0..(7 * 8) {
+            bits.push_bool(false);
+        }
+        let (data, consumed) = with_trailer(bits);
+        let (rem, result) = segmentation_params((&data, 0), 7).unwrap();
+        let seg_data = result.unwrap();
+        assert_eq!(seg_data[0][0], Some(-50));
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn segmentation_params_non_primary_update_map_and_data() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // segmentation_enabled
+        // primary_ref_frame=0 (not PRIMARY_REF_NONE)
+        bits.push_bool(true); // segmentation_update_map
+        bits.push_bool(true); // segmentation_temporal_update
+        bits.push_bool(true); // segmentation_update_data
+        // 8 segments × 8 features, all disabled
+        for _ in 0..64 {
+            bits.push_bool(false);
+        }
+        let (data, consumed) = with_trailer(bits);
+        let (rem, result) = segmentation_params((&data, 0), 0).unwrap();
+        assert!(result.is_some());
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn segmentation_params_non_primary_no_update_data() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // segmentation_enabled
+        bits.push_bool(false); // segmentation_update_map = false
+        bits.push_bool(false); // segmentation_update_data = false
+        let (data, consumed) = with_trailer(bits);
+        let (rem, result) = segmentation_params((&data, 0), 0).unwrap();
+        assert!(result.is_some());
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn segmentation_params_non_primary_no_map_but_data() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // segmentation_enabled
+        bits.push_bool(false); // segmentation_update_map = false
+        bits.push_bool(true); // segmentation_update_data = true
+        // 64 feature flags, all false
+        for _ in 0..64 {
+            bits.push_bool(false);
+        }
+        let (data, consumed) = with_trailer(bits);
+        let (rem, result) = segmentation_params((&data, 0), 0).unwrap();
+        assert!(result.is_some());
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 14: delta_q_params
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn delta_q_params_base_zero_returns_false() {
+        let bits = BitBuilder::default();
+        let (data, consumed) = with_trailer(bits);
+        let (rem, present) = delta_q_params((&data, 0), 0).unwrap();
+        assert!(!present);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn delta_q_params_nonzero_present_true() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // delta_q_present = true
+        bits.push_bits(2, 2); // delta_q_res = 2
+        let (data, consumed) = with_trailer(bits);
+        let (rem, present) = delta_q_params((&data, 0), 100).unwrap();
+        assert!(present);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn delta_q_params_nonzero_present_false() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(false); // delta_q_present = false
+        let (data, consumed) = with_trailer(bits);
+        let (rem, present) = delta_q_params((&data, 0), 100).unwrap();
+        assert!(!present);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 15: delta_lf_params
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn delta_lf_params_delta_q_not_present() {
+        let bits = BitBuilder::default();
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = delta_lf_params((&data, 0), false, false).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn delta_lf_params_intrabc_forces_false() {
+        let bits = BitBuilder::default();
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = delta_lf_params((&data, 0), true, true).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn delta_lf_params_lf_present_true() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // delta_lf_present = true
+        bits.push_bits(1, 2); // delta_lf_res
+        bits.push_bool(false); // delta_lf_multi
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = delta_lf_params((&data, 0), true, false).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn delta_lf_params_lf_present_false() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(false); // delta_lf_present = false
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = delta_lf_params((&data, 0), true, false).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 16: loop_filter_params
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn loop_filter_params_coded_lossless_early_return() {
+        let bits = BitBuilder::default();
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = loop_filter_params((&data, 0), true, false, 3).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn loop_filter_params_intrabc_early_return() {
+        let bits = BitBuilder::default();
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = loop_filter_params((&data, 0), false, true, 3).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn loop_filter_params_mono_both_zero() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(0, 6); // l0 = 0
+        bits.push_bits(0, 6); // l1 = 0
+        // num_planes=1, l0=l1=0 → skip l2/l3
+        bits.push_bits(2, 3); // sharpness
+        bits.push_bool(false); // delta_enabled = false
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = loop_filter_params((&data, 0), false, false, 1).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn loop_filter_params_multi_plane_nonzero() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(10, 6); // l0 = 10
+        bits.push_bits(5, 6); // l1 = 5
+        // num_planes=3, l0>0 → reads l2/l3
+        bits.push_bits(3, 6); // l2
+        bits.push_bits(7, 6); // l3
+        bits.push_bits(4, 3); // sharpness
+        bits.push_bool(false); // delta_enabled = false
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = loop_filter_params((&data, 0), false, false, 3).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn loop_filter_params_multi_plane_l0_zero_l1_nonzero() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(0, 6); // l0 = 0
+        bits.push_bits(5, 6); // l1 = 5 (nonzero → reads l2/l3)
+        bits.push_bits(1, 6); // l2
+        bits.push_bits(2, 6); // l3
+        bits.push_bits(0, 3); // sharpness
+        bits.push_bool(false); // delta_enabled
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = loop_filter_params((&data, 0), false, false, 3).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn loop_filter_params_delta_enabled_with_update() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(10, 6); // l0
+        bits.push_bits(0, 6); // l1
+        // num_planes=1, l0>0 but num_planes==1 → no l2/l3 is wrong,
+        // let's use num_planes=1 with l0>0: the condition is num_planes > 1 AND (l0>0 || l1>0)
+        // So with num_planes=1 we skip l2/l3
+        bits.push_bits(3, 3); // sharpness
+        bits.push_bool(true); // delta_enabled
+        bits.push_bool(true); // delta_update
+        // 8 ref deltas: first one updates, rest don't
+        bits.push_bool(true); // update_ref_delta[0]
+        bits.push_su(5, 7); // delta value
+        for _ in 1..8 {
+            bits.push_bool(false); // no update
+        }
+        // 2 mode deltas: none update
+        bits.push_bool(false);
+        bits.push_bool(false);
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = loop_filter_params((&data, 0), false, false, 1).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn loop_filter_params_delta_enabled_no_update() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(10, 6); // l0
+        bits.push_bits(0, 6); // l1
+        bits.push_bits(3, 3); // sharpness
+        bits.push_bool(true); // delta_enabled
+        bits.push_bool(false); // delta_update = false
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = loop_filter_params((&data, 0), false, false, 1).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 17: cdef_params
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cdef_params_lossless_early_return() {
+        let bits = BitBuilder::default();
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = cdef_params((&data, 0), true, false, true, 3).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn cdef_params_intrabc_early_return() {
+        let bits = BitBuilder::default();
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = cdef_params((&data, 0), false, true, true, 3).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn cdef_params_disabled_early_return() {
+        let bits = BitBuilder::default();
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = cdef_params((&data, 0), false, false, false, 3).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn cdef_params_mono_bits_zero() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(1, 2); // cdef_damping_minus_3
+        bits.push_bits(0, 2); // cdef_bits = 0 → 1 iteration
+        // 1 iteration, mono: y_pri(4) + y_sec(2) = 6
+        bits.push_bits(5, 4); // cdef_y_pri_str
+        bits.push_bits(1, 2); // cdef_y_sec_str
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = cdef_params((&data, 0), false, false, true, 1).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn cdef_params_multi_plane_bits_one() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(2, 2); // cdef_damping_minus_3
+        bits.push_bits(1, 2); // cdef_bits = 1 → 2 iterations
+        for _ in 0..2 {
+            bits.push_bits(3, 4); // y_pri
+            bits.push_bits(1, 2); // y_sec
+            bits.push_bits(2, 4); // uv_pri
+            bits.push_bits(0, 2); // uv_sec
+        }
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = cdef_params((&data, 0), false, false, true, 3).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn cdef_params_multi_plane_bits_three() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(0, 2); // damping
+        bits.push_bits(3, 2); // cdef_bits = 3 → 8 iterations
+        for _ in 0..8 {
+            bits.push_bits(0, 4); // y_pri
+            bits.push_bits(0, 2); // y_sec
+            bits.push_bits(0, 4); // uv_pri
+            bits.push_bits(0, 2); // uv_sec
+        }
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = cdef_params((&data, 0), false, false, true, 3).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 18: lr_params
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn lr_params_lossless_early_return() {
+        let bits = BitBuilder::default();
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = lr_params((&data, 0), true, false, true, false, 3, (1, 1)).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn lr_params_intrabc_early_return() {
+        let bits = BitBuilder::default();
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = lr_params((&data, 0), false, true, true, false, 3, (1, 1)).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn lr_params_disabled_early_return() {
+        let bits = BitBuilder::default();
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = lr_params((&data, 0), false, false, false, false, 3, (1, 1)).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn lr_params_all_restore_none() {
+        let mut bits = BitBuilder::default();
+        // 3 planes, all lr_type=0 (RESTORE_NONE)
+        bits.push_bits(0, 2);
+        bits.push_bits(0, 2);
+        bits.push_bits(0, 2);
+        // uses_lr=false → no shift bits
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = lr_params((&data, 0), false, false, true, false, 3, (1, 1)).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn lr_params_luma_lr_64x64_sb() {
+        let mut bits = BitBuilder::default();
+        // plane 0: lr_type=1 (non-zero), planes 1,2: lr_type=0
+        bits.push_bits(1, 2);
+        bits.push_bits(0, 2);
+        bits.push_bits(0, 2);
+        // uses_lr=true, use_128x128=false
+        bits.push_bool(true); // lr_unit_shift = true
+        bits.push_bool(false); // lr_unit_extra_shift
+        // subsampling=(1,1) but uses_chroma_lr=false → no lr_uv_shift
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = lr_params((&data, 0), false, false, true, false, 3, (1, 1)).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn lr_params_chroma_lr_128x128_sb_subsample() {
+        let mut bits = BitBuilder::default();
+        // plane 0: none, plane 1: lr_type=1, plane 2: none
+        bits.push_bits(0, 2);
+        bits.push_bits(1, 2);
+        bits.push_bits(0, 2);
+        // uses_lr=true, use_128x128=true
+        bits.push_bool(false); // lr_unit_shift
+        // subsampling=(1,1) && uses_chroma_lr=true → reads lr_uv_shift
+        bits.push_bool(true); // lr_uv_shift
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = lr_params((&data, 0), false, false, true, true, 3, (1, 1)).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn lr_params_no_subsampling_skips_uv_shift() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(0, 2);
+        bits.push_bits(1, 2); // chroma lr
+        bits.push_bits(0, 2);
+        // uses_lr=true, use_128x128=true
+        bits.push_bool(true); // lr_unit_shift
+        // subsampling=(0,0) → no lr_uv_shift even though uses_chroma_lr=true
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = lr_params((&data, 0), false, false, true, true, 3, (0, 0)).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 19: read_tx_mode
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn read_tx_mode_lossless_reads_nothing() {
+        let bits = BitBuilder::default();
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = read_tx_mode((&data, 0), true).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn read_tx_mode_not_lossless_reads_one_bit() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // tx_mode_select
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = read_tx_mode((&data, 0), false).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 20: frame_reference_mode
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn frame_reference_mode_intra_returns_false() {
+        let bits = BitBuilder::default();
+        let (data, consumed) = with_trailer(bits);
+        let (rem, val) = frame_reference_mode((&data, 0), true).unwrap();
+        assert!(!val);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn frame_reference_mode_non_intra_true() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true);
+        let (data, consumed) = with_trailer(bits);
+        let (rem, val) = frame_reference_mode((&data, 0), false).unwrap();
+        assert!(val);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn frame_reference_mode_non_intra_false() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(false);
+        let (data, consumed) = with_trailer(bits);
+        let (rem, val) = frame_reference_mode((&data, 0), false).unwrap();
+        assert!(!val);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 21: skip_mode_params
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn skip_mode_params_intra_reads_nothing() {
+        let bits = BitBuilder::default();
+        let (data, consumed) = with_trailer(bits);
+        let ref_order = [0u64; 8];
+        let ref_idx = [0usize; 7];
+        let (rem, _) =
+            skip_mode_params((&data, 0), true, true, 4, 10, &ref_order, &ref_idx).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn skip_mode_params_ref_select_false() {
+        let bits = BitBuilder::default();
+        let (data, consumed) = with_trailer(bits);
+        let ref_order = [0u64; 8];
+        let ref_idx = [0usize; 7];
+        let (rem, _) =
+            skip_mode_params((&data, 0), false, false, 4, 10, &ref_order, &ref_idx).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn skip_mode_params_order_hint_bits_zero() {
+        let bits = BitBuilder::default();
+        let (data, consumed) = with_trailer(bits);
+        let ref_order = [0u64; 8];
+        let ref_idx = [0usize; 7];
+        let (rem, _) =
+            skip_mode_params((&data, 0), false, true, 0, 10, &ref_order, &ref_idx).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn skip_mode_params_forward_and_backward_refs() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(false); // skip_mode_present
+        let (data, consumed) = with_trailer(bits);
+        // order_hint=10, ref 0 has hint 5 (forward), ref 1 has hint 12 (backward)
+        let mut ref_order = [0u64; 8];
+        ref_order[0] = 5; // forward (dist < 0)
+        ref_order[1] = 12; // backward (dist > 0)
+        let ref_idx = [0, 1, 0, 0, 0, 0, 0];
+        let (rem, _) =
+            skip_mode_params((&data, 0), false, true, 4, 10, &ref_order, &ref_idx).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn skip_mode_params_two_forward_refs() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // skip_mode_present
+        let (data, consumed) = with_trailer(bits);
+        // order_hint=10, ref 0 has hint 5 (forward), ref 1 has hint 3 (also forward, further back)
+        let mut ref_order = [0u64; 8];
+        ref_order[0] = 5;
+        ref_order[1] = 3;
+        let ref_idx = [0, 1, 0, 0, 0, 0, 0];
+        let (rem, _) =
+            skip_mode_params((&data, 0), false, true, 4, 10, &ref_order, &ref_idx).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn skip_mode_params_one_forward_no_backward() {
+        // One forward ref, but no second forward and no backward → skip_mode_allowed=false
+        let bits = BitBuilder::default();
+        let (data, consumed) = with_trailer(bits);
+        // All refs point to same hint that's forward
+        let mut ref_order = [0u64; 8];
+        ref_order[0] = 5;
+        // All ref_idx point to slot 0
+        let ref_idx = [0, 0, 0, 0, 0, 0, 0];
+        let (rem, _) =
+            skip_mode_params((&data, 0), false, true, 4, 10, &ref_order, &ref_idx).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 22: get_relative_dist
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn get_relative_dist_zero_order_hint_bits() {
+        assert_eq!(get_relative_dist(5, 3, 0), 0);
+    }
+
+    #[test]
+    fn get_relative_dist_positive_diff() {
+        assert_eq!(get_relative_dist(5, 3, 4), 2);
+    }
+
+    #[test]
+    fn get_relative_dist_negative_diff() {
+        assert_eq!(get_relative_dist(3, 5, 4), -2);
+    }
+
+    #[test]
+    fn get_relative_dist_wrap_positive() {
+        // a=15, b=1, bits=4 → diff=14, m=8
+        // (14 & 7) - (14 & 8) = 6 - 8 = -2
+        assert_eq!(get_relative_dist(15, 1, 4), -2);
+    }
+
+    #[test]
+    fn get_relative_dist_wrap_negative() {
+        // a=1, b=15, bits=4 → diff=-14, m=8
+        // (-14 & 7) - (-14 & 8) = 2 - 0 = 2
+        assert_eq!(get_relative_dist(1, 15, 4), 2);
+    }
+
+    #[test]
+    fn get_relative_dist_same_values() {
+        assert_eq!(get_relative_dist(5, 5, 4), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 23: initialize_prev_gm_params
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn initialize_prev_gm_params_correct_dimensions() {
+        let params = initialize_prev_gm_params();
+        assert_eq!(params.len(), 8);
+        for row in &params {
+            assert_eq!(row.len(), 6);
+        }
+    }
+
+    #[test]
+    fn initialize_prev_gm_params_identity_values() {
+        let params = initialize_prev_gm_params();
+        let identity_val = 1i32 << WARPEDMODEL_PREC_BITS;
+        for row in &params {
+            assert_eq!(row[0], 0);
+            assert_eq!(row[1], 0);
+            assert_eq!(row[2], identity_val);
+            assert_eq!(row[3], 0);
+            assert_eq!(row[4], 0);
+            assert_eq!(row[5], identity_val);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 24: inverse_recenter
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn inverse_recenter_v_gt_2r() {
+        assert_eq!(inverse_recenter(3, 7), 7);
+    }
+
+    #[test]
+    fn inverse_recenter_v_odd() {
+        // r=10, v=5 (odd) → r - (v+1)/2 = 10 - 3 = 7
+        assert_eq!(inverse_recenter(10, 5), 7);
+    }
+
+    #[test]
+    fn inverse_recenter_v_even() {
+        // r=10, v=4 (even) → r + v/2 = 10 + 2 = 12
+        assert_eq!(inverse_recenter(10, 4), 12);
+    }
+
+    #[test]
+    fn inverse_recenter_v_zero() {
+        // r=5, v=0 (even) → r + 0 = 5
+        assert_eq!(inverse_recenter(5, 0), 5);
+    }
+
+    #[test]
+    fn inverse_recenter_v_one() {
+        // r=5, v=1 (odd) → r - 1 = 4
+        assert_eq!(inverse_recenter(5, 1), 4);
+    }
+
+    #[test]
+    fn inverse_recenter_r_zero() {
+        // r=0, v=3 → v > 2*0 → returns v
+        assert_eq!(inverse_recenter(0, 3), 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 25: decode_subexp
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn decode_subexp_final_bits_small_num_syms() {
+        // num_syms=10: first iteration, i=0, k=3, b2=3, a=8
+        // num_syms(10) <= mk(0) + 3*a(24)? Yes → ns(10-0=10)
+        // Encode value 5 as ns(10)
+        let mut bits = BitBuilder::default();
+        bits.push_ns(5, 10);
+        let (data, consumed) = with_trailer(bits);
+        let (rem, val) = decode_subexp((&data, 0), 10).unwrap();
+        assert_eq!(val, 5);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn decode_subexp_subexp_bits_first_iter() {
+        // num_syms=100: i=0, k=3, b2=3, a=8
+        // num_syms(100) <= mk(0) + 3*8(24)? No
+        // Read subexp_more_bits=false, then read b2=3 bits
+        let mut bits = BitBuilder::default();
+        bits.push_bool(false); // more = false
+        bits.push_bits(5, 3); // subexp_bits = 5; result = 5 + mk(0) = 5
+        let (data, consumed) = with_trailer(bits);
+        let (rem, val) = decode_subexp((&data, 0), 100).unwrap();
+        assert_eq!(val, 5);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn decode_subexp_increment_then_final_ns() {
+        // num_syms=30: i=0, k=3, b2=3, a=8
+        // 30 <= 0+24? No → read more=true → i=1, mk=8
+        // i=1, k=3, b2=3+1-1=3, a=8
+        // 30 <= 8+24? Yes → ns(30-8=22)
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // more = true
+        bits.push_ns(4, 22); // ns(22) = 4; result = 4 + mk(8) = 12
+        let (data, consumed) = with_trailer(bits);
+        let (rem, val) = decode_subexp((&data, 0), 30).unwrap();
+        assert_eq!(val, 12);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 26: decode_signed/unsigned_subexp_with_ref
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn decode_signed_subexp_with_ref_basic() {
+        // low=-10, high=11, r=0
+        // Calls unsigned with mx=high-low=21, r_unsigned=r-low=0-(-10)=10
+        // r_unsigned<<1 = 20 <= mx(21): uses inverse_recenter path
+        // We encode a value that decodes to something in [-10, 11)
+        let mut bits = BitBuilder::default();
+        // decode_subexp(21): num_syms=21, i=0, k=3, b2=3, a=8, 21 <= 0+24 → ns(21)
+        bits.push_ns(0, 21); // v=0 → inverse_recenter(10, 0) = 10 → signed = 10 + (-10) = 0
+        let (data, consumed) = with_trailer(bits);
+        let (rem, val) = decode_signed_subexp_with_ref((&data, 0), -10, 11, 0).unwrap();
+        assert_eq!(val, 0);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn decode_unsigned_subexp_with_ref_r_small() {
+        // mx=20, r=3: r<<1(6) <= mx(20) → inverse_recenter(r, v)
+        let mut bits = BitBuilder::default();
+        // decode_subexp(20): ns(20), encode v=0 → inverse_recenter(3, 0)=3
+        bits.push_ns(0, 20);
+        let (data, consumed) = with_trailer(bits);
+        let (rem, val) = decode_unsigned_subexp_with_ref((&data, 0), 20, 3).unwrap();
+        assert_eq!(val, 3);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn decode_unsigned_subexp_with_ref_r_large() {
+        // mx=20, r=15: r<<1(30) > mx(20) → complement path
+        // mx-1-r = 19-15=4, inverse_recenter(4, v), result = mx-1-that
+        let mut bits = BitBuilder::default();
+        // decode_subexp(20): ns(20), encode v=0 → inverse_recenter(4, 0) = 4
+        // result = 19 - 4 = 15
+        bits.push_ns(0, 20);
+        let (data, consumed) = with_trailer(bits);
+        let (rem, val) = decode_unsigned_subexp_with_ref((&data, 0), 20, 15).unwrap();
+        assert_eq!(val, 15);
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 27: global_motion_params
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn global_motion_params_intra_early_return() {
+        let bits = BitBuilder::default();
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = global_motion_params((&data, 0), true, true).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn global_motion_params_all_identity() {
+        let mut bits = BitBuilder::default();
+        // 7 refs (Last..Altref), each is_global=false
+        for _ in 0..7 {
+            bits.push_bool(false);
+        }
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = global_motion_params((&data, 0), false, true).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn global_motion_params_single_translation() {
+        let mut bits = BitBuilder::default();
+        // Ref 0 (Last): translation
+        bits.push_bool(true); // is_global
+        bits.push_bool(false); // not rotzoom
+        bits.push_bool(true); // is_translation
+        // Translation reads params 0 and 1 via read_global_param.
+        // Each calls decode_signed_subexp_with_ref → decode_unsigned_subexp_with_ref
+        //   → decode_subexp(num_syms=1025).
+        // decode_subexp(1025): i=0, k=3, b2=3, a=8; 1025 > 0+24
+        //   → reads more_bit. Encode more=false, then 3 bits for value 0.
+        for _ in 0..2 {
+            bits.push_bool(false); // subexp_more = false
+            bits.push_bits(0, 3); // subexp_bits = 0
+        }
+        // Refs 1-6: identity
+        for _ in 1..7 {
+            bits.push_bool(false);
+        }
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = global_motion_params((&data, 0), false, true).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn global_motion_params_rotzoom() {
+        let mut bits = BitBuilder::default();
+        // Ref 0 (Last): rotzoom
+        bits.push_bool(true); // is_global
+        bits.push_bool(true); // is_rot_zoom
+        // Rotzoom reads params 2,3 (alpha) then 0,1 (translation).
+        // Each param goes through decode_subexp(8193):
+        //   i=0, k=3, b2=3, a=8; 8193 > 0+24
+        //   → reads more_bit. Encode more=false + 3-bit value.
+        for _ in 0..4 {
+            bits.push_bool(false); // subexp_more = false
+            bits.push_bits(0, 3); // subexp_bits = 0
+        }
+        // Refs 1-6: identity
+        for _ in 1..7 {
+            bits.push_bool(false);
+        }
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = global_motion_params((&data, 0), false, true).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    #[test]
+    fn global_motion_params_affine() {
+        let mut bits = BitBuilder::default();
+        // Ref 0: affine
+        bits.push_bool(true); // is_global
+        bits.push_bool(false); // not rotzoom
+        bits.push_bool(false); // not translation → affine
+        // Affine reads params 2,3,4,5 then 0,1 (6 params total).
+        // Each goes through decode_subexp(8193): more=false + 3-bit value.
+        for _ in 0..6 {
+            bits.push_bool(false); // subexp_more = false
+            bits.push_bits(0, 3); // subexp_bits = 0
+        }
+        // Refs 1-6: identity
+        for _ in 1..7 {
+            bits.push_bool(false);
+        }
+        let (data, consumed) = with_trailer(bits);
+        let (rem, _) = global_motion_params((&data, 0), false, true).unwrap();
+        assert_remaining_position(rem, &data, consumed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 28: get_qindex
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn get_qindex_no_seg_returns_base() {
+        assert_eq!(get_qindex(true, 0, 100, None, None), 100);
+    }
+
+    #[test]
+    fn get_qindex_seg_adds_offset() {
+        let mut data: super::SegmentationData = Default::default();
+        data[0][0] = Some(10);
+        assert_eq!(get_qindex(true, 0, 100, None, Some(&data)), 110);
+    }
+
+    #[test]
+    fn get_qindex_seg_negative_clamps_zero() {
+        let mut data: super::SegmentationData = Default::default();
+        data[0][0] = Some(-50);
+        assert_eq!(get_qindex(true, 0, 30, None, Some(&data)), 0);
+    }
+
+    #[test]
+    fn get_qindex_seg_overflow_clamps_255() {
+        let mut data: super::SegmentationData = Default::default();
+        data[0][0] = Some(200);
+        assert_eq!(get_qindex(true, 0, 200, None, Some(&data)), 255);
+    }
+
+    #[test]
+    fn get_qindex_seg_with_current_q() {
+        let mut data: super::SegmentationData = Default::default();
+        data[0][0] = Some(10);
+        assert_eq!(get_qindex(false, 0, 100, Some(80), Some(&data)), 90);
+    }
+
+    #[test]
+    fn get_qindex_seg_ignore_delta_uses_base() {
+        let mut data: super::SegmentationData = Default::default();
+        data[0][0] = Some(10);
+        assert_eq!(get_qindex(true, 0, 100, Some(80), Some(&data)), 110);
+    }
+
+    #[test]
+    fn get_qindex_no_seg_returns_current_q() {
+        assert_eq!(get_qindex(false, 0, 100, Some(80), None), 80);
+    }
+
+    #[test]
+    fn get_qindex_no_seg_ignore_delta_returns_base() {
+        assert_eq!(get_qindex(true, 0, 100, Some(80), None), 100);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 29: seg_feature_active_idx
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn seg_feature_active_idx_none_data() {
+        assert!(!seg_feature_active_idx(0, 0, None));
+    }
+
+    #[test]
+    fn seg_feature_active_idx_none_feature() {
+        let data: super::SegmentationData = Default::default();
+        assert!(!seg_feature_active_idx(0, 0, Some(&data)));
+    }
+
+    #[test]
+    fn seg_feature_active_idx_some_feature() {
+        let mut data: super::SegmentationData = Default::default();
+        data[2][3] = Some(42);
+        assert!(seg_feature_active_idx(2, 3, Some(&data)));
+    }
+}
