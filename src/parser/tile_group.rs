@@ -62,3 +62,121 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         Ok((&input[size..], ()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{BitstreamParser, TileInfo};
+
+    fn make_parser<const WRITE: bool>(
+        seen_frame_header: bool,
+        packet_out: Vec<u8>,
+    ) -> BitstreamParser<WRITE> {
+        BitstreamParser {
+            reader: None,
+            writer: None,
+            packet_out,
+            incoming_grain_header: None,
+            parsed: false,
+            size: 0,
+            seen_frame_header,
+            sequence_header: None,
+            previous_frame_header: None,
+            ref_frame_idx: Default::default(),
+            ref_order_hint: Default::default(),
+            big_ref_order_hint: Default::default(),
+            big_ref_valid: Default::default(),
+            big_order_hints: Default::default(),
+            grain_headers: Vec::new(),
+        }
+    }
+
+    fn tile_info(
+        tile_cols: u32,
+        tile_rows: u32,
+        tile_cols_log2: u32,
+        tile_rows_log2: u32,
+    ) -> TileInfo {
+        TileInfo {
+            tile_cols,
+            tile_rows,
+            tile_cols_log2,
+            tile_rows_log2,
+        }
+    }
+
+    #[test]
+    fn parse_tile_group_obu_single_tile_skips_start_end_flag_and_clears_seen_frame_header() {
+        let mut parser = make_parser::<false>(true, Vec::new());
+        let input: [u8; 0] = [];
+        let size = 0;
+
+        let (remaining, ()) = parser
+            .parse_tile_group_obu(&input, size, tile_info(1, 1, 0, 0))
+            .expect("single-tile tile-group OBU should parse without reading header bits");
+
+        assert_eq!(remaining, &input[size..]);
+        assert!(!parser.seen_frame_header);
+        assert!(parser.packet_out.is_empty());
+    }
+
+    #[test]
+    fn parse_tile_group_obu_multi_tile_without_start_end_flag_uses_last_tile_index() {
+        let mut parser = make_parser::<false>(true, vec![0x55]);
+        let input = [0b0000_0000, 0xAB];
+        let size = 1;
+
+        let (remaining, ()) = parser
+            .parse_tile_group_obu(&input, size, tile_info(2, 2, 1, 1))
+            .expect("multi-tile tile-group with tile_start_and_end_present = false should parse");
+
+        assert_eq!(remaining, &input[size..]);
+        assert!(!parser.seen_frame_header);
+        assert_eq!(parser.packet_out, vec![0x55]);
+    }
+
+    #[test]
+    fn parse_tile_group_obu_multi_tile_with_start_end_flag_preserves_seen_frame_header_when_not_last()
+     {
+        let mut parser = make_parser::<false>(true, vec![0xCC]);
+        // Bits: tile_start_and_end_present=1, tg_start=01, tg_end=10.
+        let input = [0b1011_0000, 0xDE, 0xAD];
+        let size = 2;
+
+        let (remaining, ()) = parser
+            .parse_tile_group_obu(&input, size, tile_info(2, 2, 1, 1))
+            .expect("multi-tile tile-group with explicit tg_start/tg_end should parse");
+
+        assert_eq!(remaining, &input[size..]);
+        assert!(parser.seen_frame_header);
+        assert_eq!(parser.packet_out, vec![0xCC]);
+    }
+
+    #[test]
+    fn parse_tile_group_obu_multi_tile_with_start_end_flag_clears_seen_frame_header_when_last() {
+        let mut parser = make_parser::<false>(true, Vec::new());
+        // Bits: tile_start_and_end_present=1, tg_start=00, tg_end=11.
+        let input = [0b1001_1000, 0xFE];
+        let size = 1;
+
+        let (remaining, ()) = parser
+            .parse_tile_group_obu(&input, size, tile_info(2, 2, 1, 1))
+            .expect("multi-tile tile-group should clear seen_frame_header when tg_end is last");
+
+        assert_eq!(remaining, &input[size..]);
+        assert!(!parser.seen_frame_header);
+    }
+
+    #[test]
+    fn parse_tile_group_obu_write_mode_appends_size_bytes_to_packet_out() {
+        let mut parser = make_parser::<true>(true, vec![0xAA]);
+        let input = [0x12, 0x34, 0x56];
+        let size = 2;
+
+        let (remaining, ()) = parser
+            .parse_tile_group_obu(&input, size, tile_info(1, 1, 0, 0))
+            .expect("write-mode tile-group parse should succeed");
+
+        assert_eq!(remaining, &input[size..]);
+        assert_eq!(parser.packet_out, vec![0xAA, 0x12, 0x34]);
+    }
+}
