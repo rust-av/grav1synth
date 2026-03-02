@@ -6,28 +6,31 @@ use num_traits::PrimInt;
 
 pub type BitInput<'a> = (&'a [u8], usize);
 
-/// Returns a boolean representing the next bit in `input`.
+/// Reads and consumes the next bit from a bit-level input tuple.
 ///
-/// # Errors (returning original input)
-/// - If input is empty
+/// Returns `false` for a `0` bit and `true` for a `1` bit.
+///
+/// # Errors
+/// Returns an error if fewer than 1 bit remains in `input`.
 pub fn take_bool_bit(input: BitInput) -> IResult<BitInput, bool, Error<BitInput>> {
     bit_parsers::take(1usize)
         .map(|output: u8| output > 0)
         .parse(input)
 }
 
-/// Consumes the next bit of `input` if it is 0.
+/// Consumes exactly one bit, requiring that bit to be `0`.
 ///
-/// # Errors (returning original input)
-/// - If the next bit is not 0
+/// # Errors
+/// Returns an error if the next bit is `1` or if no bit is available.
 pub fn take_zero_bit(input: BitInput) -> IResult<BitInput, (), Error<BitInput>> {
     take_zero_bits(input, 1)
 }
 
-/// Consumes the next `bits` bits of `input` if they are all 0,
+/// Consumes `bits` bits, requiring all consumed bits to be `0`.
 ///
-/// # Errors (returning original input)
-/// - If the next `bits` bits are not all 0
+/// # Errors
+/// Returns an error if any consumed bit is `1` or if `input` does not contain
+/// enough bits.
 pub fn take_zero_bits(input: BitInput, bits: usize) -> IResult<BitInput, (), Error<BitInput>> {
     bit_parsers::tag(0u8, bits).map(|_| ()).parse(input)
 }
@@ -41,10 +44,23 @@ where
     pub bytes_read: usize,
 }
 
-/// Parses an unsigned integer represented by a variable number of little-endian bytes.
+/// Parses an unsigned LEB128 integer from byte-aligned input.
 ///
-/// FIXME(doc): how does this determine how many bytes to take?
-/// FIXME(doc): can this error?
+/// This AV1 syntax element uses base-128 little-endian groups: each byte
+/// contributes 7 payload bits and a continuation flag in bit 7 (`0x80`).
+/// Parsing stops when a byte with continuation flag `0` is encountered, or
+/// after 8 bytes have been consumed.
+///
+/// The returned [`ReadResult`] includes both the decoded value and the number
+/// of encoded bytes consumed.
+///
+/// # Errors
+/// Returns an error if the input ends before the next LEB128 byte can be read.
+///
+/// # Notes
+/// AV1 conformance imposes additional constraints (for example, value
+/// `<= u32::MAX` and a cleared continuation bit in the 8th byte). This function
+/// only decodes bytes and does not enforce those conformance checks.
 pub fn leb128(mut input: &[u8]) -> IResult<&[u8], ReadResult<u64>, Error<&[u8]>> {
     let mut value = 0u64;
     let mut leb128_bytes = 0;
@@ -68,13 +84,13 @@ pub fn leb128(mut input: &[u8]) -> IResult<&[u8], ReadResult<u64>, Error<&[u8]>>
     ))
 }
 
-/// Write an unsigned integer represented by a variable number of little-endian bytes
-/// into a byte array.
+/// Encodes a `u32` as unsigned LEB128 bytes.
 ///
-/// NOTE from libaom:
-/// Disallow values larger than 32-bits to ensure consistent behavior on 32 and
-/// 64 bit targets: value is typically used to determine buffer allocation size
-/// when decoded.
+/// The output uses 7 payload bits per byte and sets the high bit (`0x80`) on
+/// all bytes except the last, matching the AV1 `leb128()` syntax element.
+///
+/// The return type has capacity for 8 bytes (the AV1 maximum), while a `u32`
+/// value itself always encodes to at most 5 bytes.
 #[must_use]
 pub fn leb128_write(value: u32) -> ArrayVec<u8, 8> {
     let mut coded_value = ArrayVec::new();
@@ -99,9 +115,21 @@ pub fn leb128_write(value: u32) -> ArrayVec<u8, 8> {
     coded_value
 }
 
-/// Parses a variable-length unsigned n-bit number appearing directly in the bitstream.
+/// Parses AV1 `uvlc()`: an unsigned variable-length code from the bitstream.
 ///
-/// FIXME(doc): can this error?
+/// The code is encoded as:
+/// - `leading_zeros` zero bits,
+/// - one terminating `1` bit,
+/// - `leading_zeros` payload bits.
+///
+/// The decoded value is `payload + (1 << leading_zeros) - 1`.
+///
+/// Per AV1 syntax, if `leading_zeros >= 32`, the decoded value is saturated to
+/// `u32::MAX`.
+///
+/// # Errors
+/// Returns an error if the input ends before reading the terminating bit or the
+/// required payload bits.
 pub fn uvlc(mut input: BitInput) -> IResult<BitInput, u32, Error<BitInput>> {
     let mut leading_zeros = 0usize;
     loop {
@@ -120,15 +148,23 @@ pub fn uvlc(mut input: BitInput) -> IResult<BitInput, u32, Error<BitInput>> {
     Ok((input, value + (1 << leading_zeros) - 1))
 }
 
-/// The abbreviation `ns` stands for non-symmetric. This encoding is
-/// non-symmetric because the values are not all coded with the same number of
-/// bits.
+/// Parses AV1 `ns(n)`: a non-symmetric unsigned integer coding.
 ///
-/// FIXME(doc): but what does this actually do?
-/// FIXME(doc): can this error?
+/// This coding represents exactly `n` values in the range `0..n`, while often
+/// using fewer bits than a fixed-width `ceil(log2(n))` encoding for
+/// non-power-of-two ranges.
+///
+/// # Parameters
+/// - `n`: Number of representable values. Must be greater than `0`.
+///
+/// # Errors
+/// Returns an error if there are not enough bits available to read the encoded
+/// value.
+///
+/// # Panics
+/// In debug builds, may panic if `n == 0` due to overflow in [`floor_log2`].
 pub fn ns(input: BitInput, n: usize) -> IResult<BitInput, u64, Error<BitInput>> {
-    // I don't know what these variables stand for.
-    // This is from the AV1 spec pdf.
+    // Names follow the AV1 spec pseudocode for `ns(n)`.
     let w = floor_log2(n) + 1;
     let m = (1 << w) - n;
     let (input, v): (_, u64) = bit_parsers::take(w - 1)(input)?;
@@ -139,7 +175,16 @@ pub fn ns(input: BitInput, n: usize) -> IResult<BitInput, u64, Error<BitInput>> 
     Ok((input, (v << 1u8) - m as u64 + extra_bit))
 }
 
-/// FIXME(doc): write doc
+/// Parses AV1 `su(n)`: a signed value stored in `n` bits.
+///
+/// The `n` parsed bits are interpreted as the low `n` bits of a two's-complement
+/// signed integer and sign-extended to `i64`.
+///
+/// # Errors
+/// Returns an error if fewer than `n` bits are available.
+///
+/// # Panics
+/// Panics if `n == 0`.
 pub fn su(input: BitInput, n: usize) -> IResult<BitInput, i64, Error<BitInput>> {
     let (input, mut value) = bit_parsers::take(n)(input)?;
     let sign_mask = 1 << (n - 1);
@@ -149,7 +194,15 @@ pub fn su(input: BitInput, n: usize) -> IResult<BitInput, i64, Error<BitInput>> 
     Ok((input, value))
 }
 
-/// FIXME(doc): write doc
+/// Returns `floor(log2(x))` for a strictly positive integer.
+///
+/// This is equivalent to the index of the highest set bit in `x`.
+///
+/// # Panics
+/// In debug builds, panics when `x == 0` due to subtraction overflow.
+///
+/// # Notes
+/// This helper is intended for non-zero values only.
 pub fn floor_log2<T: PrimInt>(mut x: T) -> T {
     let zero = T::from(0u8).unwrap();
     let one = T::from(1u8).unwrap();
