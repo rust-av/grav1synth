@@ -6,16 +6,19 @@ use num_traits::PrimInt;
 
 pub type BitInput<'a> = (&'a [u8], usize);
 
+/// Returns a boolean representing the next bit in `input`
 pub fn take_bool_bit(input: BitInput) -> IResult<BitInput, bool, Error<BitInput>> {
     bit_parsers::take(1usize)
         .map(|output: u8| output > 0)
         .parse(input)
 }
 
+/// Consumes the next bit of `input` if it is 0, otherwise returns an error.
 pub fn take_zero_bit(input: BitInput) -> IResult<BitInput, (), Error<BitInput>> {
     take_zero_bits(input, 1)
 }
 
+/// Consumes the next `bits` bits of `input` if they are all 0, otherwise returns an error.
 pub fn take_zero_bits(input: BitInput, bits: usize) -> IResult<BitInput, (), Error<BitInput>> {
     bit_parsers::tag(0u8, bits).map(|_| ()).parse(input)
 }
