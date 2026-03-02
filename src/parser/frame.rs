@@ -67,6 +67,11 @@ pub struct FrameHeader {
 }
 
 impl<const WRITE: bool> BitstreamParser<WRITE> {
+    /// Parses a full frame OBU payload.
+    ///
+    /// This reads the frame header first, then parses the tile group section
+    /// with the remaining byte budget computed from the OBU payload size.
+    /// Returns the parsed [`FrameHeader`] only when the frame is shown.
     pub fn parse_frame_obu<'a>(
         &mut self,
         input: &'a [u8],
@@ -92,14 +97,14 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         Ok((input, frame_header))
     }
 
-    /// This will return `None` for a show-existing frame. We don't need to
-    /// apply film grain params to those packets, because they are inherited
-    /// from the ref frame.
+    /// Parses the AV1 frame header section needed by grain processing.
     ///
-    /// I wish we didn't have to parse the whole frame header,
-    /// but the film grain params are of course the very last item,
-    /// and we don't know how many bits precede it, so we have to parse
-    /// THE WHOLE THING before we get the film grain params.
+    /// Returns `None` when the parser has already consumed a frame header for
+    /// the current temporal unit, or when the frame is not displayed.
+    ///
+    /// RATIONALE: film grain parameters live at the tail of the uncompressed
+    /// header, so this parser must walk the entire header bitstream to reach
+    /// them even when most fields are not otherwise used.
     pub fn parse_frame_header<'a>(
         &mut self,
         input: &'a [u8],
@@ -135,6 +140,10 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         }
     }
 
+    /// Parses `uncompressed_header()` fields and materializes frame state.
+    ///
+    /// In write mode, this also rewrites film-grain syntax bits based on the
+    /// selected [`GrainTableSegment`] that matches `packet_ts`.
     #[allow(clippy::cognitive_complexity)]
     #[allow(clippy::too_many_lines)]
     fn uncompressed_header<'a>(
@@ -630,6 +639,10 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         })(input)
     }
 
+    /// Serializes replacement film-grain syntax into the output packet buffer.
+    ///
+    /// `extra_byte` and `extra_bits_used` preserve already-consumed prefix bits
+    /// from the partially-read source byte before writing new grain fields.
     fn write_film_grain_bits(
         &mut self,
         extra_byte: u8,
@@ -745,6 +758,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         FilmGrainHeader::UpdateGrain(params.clone())
     }
 
+    /// Writes an `apply_grain = 0` bit while preserving partial-byte alignment.
     fn write_film_grain_disabled_bit(&mut self, extra_byte: u8, extra_bits_used: usize) {
         let mut data = bitvec::bitvec![u8, Msb0;];
 
@@ -769,18 +783,22 @@ pub enum FrameType {
 
 impl FrameType {
     #[must_use]
+    /// Returns `true` for intra-coded frame types.
     pub fn is_intra(self) -> bool {
         self == FrameType::Key || self == FrameType::IntraOnly
     }
 }
 
+/// Placeholder for AV1 `decode_frame_wrapup()`.
+///
+/// RATIONALE: this parser only needs header traversal and does not model the
+/// decoder-side wrap-up operations.
 #[allow(clippy::unnecessary_wraps)]
 const fn decode_frame_wrapup(input: &[u8]) -> IResult<&[u8], (), Error<&[u8]>> {
-    // I don't believe this actually parses anything
-    // or does anything relevant to us...
     Ok((input, ()))
 }
 
+/// Reads and discards temporal-point timing metadata when present.
 fn temporal_point_info(
     input: BitInput,
     frame_presentation_time_length: usize,
@@ -796,6 +814,7 @@ pub struct Dimensions {
     pub height: u32,
 }
 
+/// Parses coded frame dimensions and applies super-resolution scaling.
 fn frame_size(
     input: BitInput,
     frame_size_override: bool,
@@ -817,6 +836,7 @@ fn frame_size(
     Ok((input, frame_size))
 }
 
+/// Parses optional render dimensions for display sizing.
 fn render_size(
     input: BitInput,
     frame_size: Dimensions,
@@ -833,12 +853,18 @@ fn render_size(
     Ok((input, Dimensions { width, height }))
 }
 
+/// Placeholder for AV1 `set_frame_refs()`.
+///
+/// RATIONALE: reference remapping side effects are not required for the
+/// grain/header operations implemented by this tool.
 #[allow(clippy::unnecessary_wraps)]
 const fn set_frame_refs(input: BitInput) -> IResult<BitInput, (), Error<BitInput>> {
-    // Does nothing that we care about
     Ok((input, ()))
 }
 
+/// Parses frame size using reference-frame signaling when available.
+///
+/// If no reference size is selected, falls back to explicit frame-size syntax.
 #[allow(clippy::too_many_arguments)]
 fn frame_size_with_refs<'a, 'b>(
     input: BitInput<'a>,
@@ -881,6 +907,7 @@ fn frame_size_with_refs<'a, 'b>(
     Ok((input, frame_size))
 }
 
+/// Parses super-resolution parameters and updates frame/upscaled dimensions.
 fn superres_params<'a, 'b>(
     input: BitInput<'a>,
     enable_superres: bool,
@@ -903,12 +930,14 @@ fn superres_params<'a, 'b>(
     Ok((input, ()))
 }
 
+/// Converts frame dimensions into MI (mode info) grid dimensions.
 const fn compute_image_size(frame_size: Dimensions) -> (u32, u32) {
     let mi_cols = 2 * ((frame_size.width + 7) >> 3u8);
     let mi_rows = 2 * ((frame_size.height + 7) >> 3u8);
     (mi_cols, mi_rows)
 }
 
+/// Parses interpolation-filter selection syntax.
 fn read_interpolation_filter(input: BitInput) -> IResult<BitInput, (), Error<BitInput>> {
     let (input, is_filter_switchable) = take_bool_bit(input)?;
     let (input, _interpolation_filter) = if is_filter_switchable {
@@ -919,37 +948,41 @@ fn read_interpolation_filter(input: BitInput) -> IResult<BitInput, (), Error<Bit
     Ok((input, ()))
 }
 
+/// Placeholder for CDF initialization when no primary reference is used.
 #[allow(clippy::unnecessary_wraps)]
 const fn init_non_coeff_cdfs(input: BitInput) -> IResult<BitInput, (), Error<BitInput>> {
-    // We don't care about this
     Ok((input, ()))
 }
 
+/// Placeholder for AV1 `setup_past_independence()` state reset.
 #[allow(clippy::unnecessary_wraps)]
 const fn setup_past_independence(input: BitInput) -> IResult<BitInput, (), Error<BitInput>> {
-    // We don't care about this
     Ok((input, ()))
 }
 
+/// Placeholder for loading probability models from a reference frame.
 #[allow(clippy::unnecessary_wraps)]
 const fn load_cdfs(input: BitInput) -> IResult<BitInput, (), Error<BitInput>> {
-    // We don't care about this
     Ok((input, ()))
 }
 
+/// Placeholder for loading decoder state from a primary reference frame.
 #[allow(clippy::unnecessary_wraps)]
 const fn load_previous(input: BitInput) -> IResult<BitInput, (), Error<BitInput>> {
-    // We don't care about this
     Ok((input, ()))
 }
 
+/// Placeholder for AV1 motion-field estimation side effects.
 #[allow(clippy::unnecessary_wraps)]
 const fn motion_field_estimation(input: BitInput) -> IResult<BitInput, (), Error<BitInput>> {
-    // We don't care about this
     Ok((input, ()))
 }
 
 #[allow(clippy::too_many_lines)]
+/// Parses tile layout syntax and returns derived tile-grid metadata.
+///
+/// The returned [`TileInfo`] is reused by tile-group parsing to determine how
+/// many tile units are expected in this frame.
 fn tile_info(
     input: BitInput,
     use_128x128_superblock: bool,
@@ -1074,11 +1107,10 @@ pub struct TileInfo {
     pub tile_rows_log2: u32,
 }
 
-/// Returns the smallest value for `k` such that `blk_size << k` is greater than
-/// or equal to target.
+/// Returns the smallest `k` where `blk_size << k >= target`.
 ///
-/// There's probably a branchless way to do this,
-/// but I copied what is in the spec.
+/// RATIONALE: AV1 tile derivation is specified as an iterative loop, so this
+/// implementation mirrors the spec wording for readability and auditability.
 fn tile_log2<T: PrimInt>(blk_size: T, target: T) -> T {
     let mut k = 0;
     while (blk_size << k) < target {
@@ -1087,6 +1119,7 @@ fn tile_log2<T: PrimInt>(blk_size: T, target: T) -> T {
     T::from(k).unwrap()
 }
 
+/// Parses frame-level quantization parameters.
 fn quantization_params(
     input: BitInput,
     num_planes: u8,
@@ -1141,6 +1174,7 @@ fn quantization_params(
     ))
 }
 
+/// Parses an optionally coded signed quantizer delta.
 fn read_delta_q(input: BitInput) -> IResult<BitInput, i64, Error<BitInput>> {
     let (input, delta_coded) = take_bool_bit(input)?;
     if delta_coded {
@@ -1160,6 +1194,9 @@ pub struct QuantizationParams {
     pub deltaq_v_ac: i64,
 }
 
+/// Parses segmentation flags and per-segment feature payloads.
+///
+/// Returns `None` when segmentation is disabled for the frame.
 fn segmentation_params(
     input: BitInput,
     primary_ref_frame: u8,
@@ -1214,6 +1251,9 @@ fn segmentation_params(
     Ok((input, segmentation_enabled.then_some(segmentation_data)))
 }
 
+/// Parses delta-quantization enablement and resolution.
+///
+/// Returns whether `delta_q` is present for subsequent syntax sections.
 fn delta_q_params(input: BitInput, base_q_idx: u8) -> IResult<BitInput, bool, Error<BitInput>> {
     let (input, delta_q_present) = if base_q_idx > 0 {
         take_bool_bit(input)?
@@ -1228,6 +1268,7 @@ fn delta_q_params(input: BitInput, base_q_idx: u8) -> IResult<BitInput, bool, Er
     Ok((input, delta_q_present))
 }
 
+/// Parses delta loop-filter parameters when enabled.
 fn delta_lf_params(
     input: BitInput,
     delta_q_present: bool,
@@ -1252,18 +1293,19 @@ fn delta_lf_params(
     Ok((input, ()))
 }
 
+/// Placeholder for coefficient CDF initialization.
 #[allow(clippy::unnecessary_wraps)]
 const fn init_coeff_cdfs(input: BitInput) -> IResult<BitInput, (), Error<BitInput>> {
-    // We don't care about this
     Ok((input, ()))
 }
 
+/// Placeholder for loading previous segment-id maps.
 #[allow(clippy::unnecessary_wraps)]
 const fn load_previous_segment_ids(input: BitInput) -> IResult<BitInput, (), Error<BitInput>> {
-    // We don't care about this
     Ok((input, ()))
 }
 
+/// Parses loop-filter syntax for non-lossless inter/intra frames.
 fn loop_filter_params(
     input: BitInput,
     coded_lossless: bool,
@@ -1313,6 +1355,7 @@ fn loop_filter_params(
     Ok((input, ()))
 }
 
+/// Parses CDEF (constrained directional enhancement filter) parameters.
 fn cdef_params(
     input: BitInput,
     coded_lossless: bool,
@@ -1341,7 +1384,7 @@ fn cdef_params(
     Ok((input, ()))
 }
 
-#[allow(clippy::fn_params_excessive_bools)]
+/// Parses loop-restoration parameters for all active planes.
 fn lr_params(
     input: BitInput,
     all_lossless: bool,
@@ -1395,6 +1438,7 @@ fn lr_params(
     Ok((input, ()))
 }
 
+/// Parses transform-mode signaling.
 fn read_tx_mode(input: BitInput, coded_lossless: bool) -> IResult<BitInput, (), Error<BitInput>> {
     let input = if coded_lossless {
         input
@@ -1405,6 +1449,9 @@ fn read_tx_mode(input: BitInput, coded_lossless: bool) -> IResult<BitInput, (), 
     Ok((input, ()))
 }
 
+/// Parses reference-mode signaling.
+///
+/// Intra frames always return `false` because reference selection is inapplicable.
 fn frame_reference_mode(
     input: BitInput,
     frame_is_intra: bool,
@@ -1416,6 +1463,7 @@ fn frame_reference_mode(
     })
 }
 
+/// Parses skip-mode signaling after evaluating spec eligibility conditions.
 fn skip_mode_params<'a, 'b>(
     input: BitInput<'a>,
     frame_is_intra: bool,
@@ -1483,6 +1531,9 @@ fn skip_mode_params<'a, 'b>(
     Ok((input, ()))
 }
 
+/// Computes wrapped signed distance between two order hints.
+///
+/// This matches AV1 modular arithmetic for picture order comparison.
 const fn get_relative_dist(a: i64, b: i64, order_hint_bits: usize) -> i64 {
     if order_hint_bits == 0 {
         return 0;
@@ -1505,6 +1556,7 @@ const TRANSLATION: usize = 1;
 const ROTZOOM: usize = 2;
 const AFFINE: usize = 3;
 
+/// Initializes global motion parameters to identity transforms.
 fn initialize_prev_gm_params() -> Vec<Vec<i32>> {
     let mut prev_gm_params = vec![vec![0i32; 6]; 8]; // Assuming 8 references and 6 indices
 
@@ -1521,6 +1573,10 @@ fn initialize_prev_gm_params() -> Vec<Vec<i32>> {
     prev_gm_params
 }
 
+/// Parses one global-motion parameter using subexponential coding.
+///
+/// The decoded value is interpreted relative to the previous parameter value
+/// for the same reference frame and coefficient index.
 fn read_global_param(
     input: BitInput,
     allow_high_precision_mv: bool,
@@ -1563,6 +1619,7 @@ fn read_global_param(
     Ok((input, ()))
 }
 
+/// Decodes a signed subexponential-coded value anchored around reference `r`.
 fn decode_signed_subexp_with_ref(
     input: BitInput,
     low: i32,
@@ -1574,6 +1631,7 @@ fn decode_signed_subexp_with_ref(
     Ok((input, x + low))
 }
 
+/// Decodes an unsigned subexponential value and recenters it around `r`.
 fn decode_unsigned_subexp_with_ref(
     input: BitInput,
     mx: i32,
@@ -1587,6 +1645,7 @@ fn decode_unsigned_subexp_with_ref(
     }
 }
 
+/// Decodes an AV1 subexponential-coded integer in `[0, num_syms)`.
 fn decode_subexp(input: BitInput, num_syms: i32) -> IResult<BitInput, i32, Error<BitInput>> {
     let mut i = 0i32;
     let mut mk = 0i32;
@@ -1618,6 +1677,7 @@ fn decode_subexp(input: BitInput, num_syms: i32) -> IResult<BitInput, i32, Error
     }
 }
 
+/// Applies AV1 inverse recenter mapping.
 const fn inverse_recenter(r: i32, v: i32) -> i32 {
     if v > 2 * r {
         v
@@ -1628,6 +1688,7 @@ const fn inverse_recenter(r: i32, v: i32) -> i32 {
     }
 }
 
+/// Parses global-motion model syntax for each inter reference frame.
 fn global_motion_params(
     input: BitInput,
     frame_is_intra: bool,
@@ -1704,6 +1765,10 @@ pub enum RefType {
     Altref = 7,
 }
 
+/// Resolves the active quantizer index for a segment.
+///
+/// This applies segmentation `ALT_Q` offsets and optionally uses
+/// `current_q_index` when delta-q is active.
 fn get_qindex(
     ignore_delta_q: bool,
     segment_id: usize,
@@ -1728,6 +1793,7 @@ fn get_qindex(
     base_q_idx
 }
 
+/// Returns whether a segmentation feature is enabled for `segment_id`.
 const fn seg_feature_active_idx(
     segment_id: usize,
     feature: usize,
