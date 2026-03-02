@@ -584,3 +584,348 @@ fn color_config(
 const fn choose_operating_point() -> usize {
     0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ColorPrimaries, ColorRange, MatrixCoefficients, TransferCharacteristics, color_config,
+        decoder_model_info, operating_parameters_info, timing_info,
+    };
+
+    #[derive(Default)]
+    struct BitBuilder {
+        bits: Vec<bool>,
+    }
+
+    impl BitBuilder {
+        fn push_bool(&mut self, bit: bool) {
+            self.bits.push(bit);
+        }
+
+        fn push_bits(&mut self, value: u64, width: usize) {
+            for shift in (0..width).rev() {
+                self.bits.push(((value >> shift) & 1) == 1);
+            }
+        }
+
+        fn len(&self) -> usize {
+            self.bits.len()
+        }
+
+        fn into_bytes(self) -> Vec<u8> {
+            let mut bytes = vec![0u8; self.bits.len().div_ceil(8)];
+            for (idx, bit) in self.bits.into_iter().enumerate() {
+                if bit {
+                    bytes[idx / 8] |= 1u8 << (7 - (idx % 8));
+                }
+            }
+            bytes
+        }
+    }
+
+    fn with_trailer(mut bits: BitBuilder) -> (Vec<u8>, usize) {
+        let consumed_bits = bits.len();
+        bits.push_bits(0b1010_0101, 8);
+        (bits.into_bytes(), consumed_bits)
+    }
+
+    fn assert_remaining_position(remaining: (&[u8], usize), input: &[u8], consumed_bits: usize) {
+        assert_eq!(remaining.0, &input[consumed_bits / 8..]);
+        assert_eq!(remaining.1, consumed_bits % 8);
+    }
+
+    #[test]
+    fn timing_info_parses_when_equal_picture_interval_is_false() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(0x1122_3344, 32);
+        bits.push_bits(0x5566_7788, 32);
+        bits.push_bool(false);
+
+        let (data, consumed_bits) = with_trailer(bits);
+        let (remaining, parsed) =
+            timing_info((&data, 0)).expect("expected timing_info without uvlc payload");
+
+        assert!(!parsed.equal_picture_interval);
+        assert_remaining_position(remaining, &data, consumed_bits);
+    }
+
+    #[test]
+    fn timing_info_parses_when_equal_picture_interval_is_true() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(0x0102_0304, 32);
+        bits.push_bits(0x0506_0708, 32);
+        bits.push_bool(true);
+        // UVLC with 3 leading zeros and payload 0b101.
+        bits.push_bits(0b000_1101, 7);
+
+        let (data, consumed_bits) = with_trailer(bits);
+        let (remaining, parsed) =
+            timing_info((&data, 0)).expect("expected timing_info with uvlc payload");
+
+        assert!(parsed.equal_picture_interval);
+        assert_remaining_position(remaining, &data, consumed_bits);
+    }
+
+    #[test]
+    fn timing_info_returns_error_when_uvlc_payload_is_truncated() {
+        let mut bits = BitBuilder::default();
+        // Start parsing at bit offset 3 so there is no zero-padding slack at the tail.
+        bits.push_bits(0b101, 3);
+        bits.push_bits(0x0102_0304, 32);
+        bits.push_bits(0x0506_0708, 32);
+        bits.push_bool(true);
+        // Start a UVLC code but omit payload bits after the terminator.
+        bits.push_bits(0b0001, 4);
+
+        let data = bits.into_bytes();
+        assert!(timing_info((&data, 3)).is_err());
+    }
+
+    #[test]
+    fn decoder_model_info_parses_all_fields() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(17, 5);
+        bits.push_bits(0x1234_5678, 32);
+        bits.push_bits(7, 5);
+        bits.push_bits(31, 5);
+
+        let (data, consumed_bits) = with_trailer(bits);
+        let (remaining, parsed) =
+            decoder_model_info((&data, 0)).expect("expected decoder_model_info to parse");
+
+        assert_eq!(parsed.buffer_delay_length_minus_1, 17);
+        assert_eq!(parsed.buffer_removal_time_length_minus_1, 7);
+        assert_eq!(parsed.frame_presentation_time_length_minus_1, 31);
+        assert_remaining_position(remaining, &data, consumed_bits);
+    }
+
+    #[test]
+    fn decoder_model_info_returns_error_when_input_is_too_short() {
+        let data = [0u8; 5];
+        assert!(decoder_model_info((&data, 0)).is_err());
+    }
+
+    #[test]
+    fn operating_parameters_info_parses_with_non_zero_buffer_delay_length() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(0b1_0101, 5);
+        bits.push_bits(0b0_0110, 5);
+        bits.push_bool(true);
+
+        let (data, consumed_bits) = with_trailer(bits);
+        let (remaining, ()) = operating_parameters_info((&data, 0), 5)
+            .expect("expected operating_parameters_info to parse");
+
+        assert_remaining_position(remaining, &data, consumed_bits);
+    }
+
+    #[test]
+    fn operating_parameters_info_supports_zero_buffer_delay_length() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(false);
+
+        let (data, consumed_bits) = with_trailer(bits);
+        let (remaining, ()) = operating_parameters_info((&data, 0), 0)
+            .expect("expected operating_parameters_info to parse with zero-width delays");
+
+        assert_remaining_position(remaining, &data, consumed_bits);
+    }
+
+    #[test]
+    fn operating_parameters_info_returns_error_when_low_delay_flag_is_missing() {
+        let data = [0u8; 1];
+        assert!(operating_parameters_info((&data, 2), 3).is_err());
+    }
+
+    #[test]
+    fn color_config_parses_monochrome_and_returns_early() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // high_bitdepth
+        bits.push_bool(true); // twelve_bit (seq_profile == 2)
+        bits.push_bool(true); // monochrome
+        bits.push_bool(false); // color_description_present_flag
+        bits.push_bool(false); // color_range
+
+        let (data, consumed_bits) = with_trailer(bits);
+        let (remaining, parsed) =
+            color_config((&data, 0), 2).expect("expected monochrome color_config");
+
+        assert_eq!(parsed.color_primaries, ColorPrimaries::Unspecified);
+        assert_eq!(
+            parsed.transfer_characteristics,
+            TransferCharacteristics::Unspecified
+        );
+        assert_eq!(parsed.matrix_coefficients, MatrixCoefficients::Unspecified);
+        assert_eq!(parsed.color_range, ColorRange::Limited);
+        assert_eq!(parsed.num_planes, 1);
+        assert!(!parsed.separate_uv_delta_q);
+        assert_eq!(parsed.subsampling, (1, 1));
+        assert_remaining_position(remaining, &data, consumed_bits);
+    }
+
+    #[test]
+    fn color_config_uses_srgb_identity_shortcut() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // high_bitdepth
+        bits.push_bool(false); // twelve_bit (seq_profile == 2)
+        bits.push_bool(false); // monochrome
+        bits.push_bool(true); // color_description_present_flag
+        bits.push_bits(1, 8); // color_primaries = Bt709
+        bits.push_bits(13, 8); // transfer_characteristics = Srgb
+        bits.push_bits(0, 8); // matrix_coefficients = Identity
+        bits.push_bool(true); // separate_uv_delta_q
+
+        let (data, consumed_bits) = with_trailer(bits);
+        let (remaining, parsed) =
+            color_config((&data, 0), 2).expect("expected srgb identity color_config");
+
+        assert_eq!(parsed.color_primaries, ColorPrimaries::Bt709);
+        assert_eq!(
+            parsed.transfer_characteristics,
+            TransferCharacteristics::Srgb
+        );
+        assert_eq!(parsed.matrix_coefficients, MatrixCoefficients::Identity);
+        assert_eq!(parsed.color_range, ColorRange::Full);
+        assert_eq!(parsed.subsampling, (0, 0));
+        assert_eq!(parsed.num_planes, 3);
+        assert!(parsed.separate_uv_delta_q);
+        assert_remaining_position(remaining, &data, consumed_bits);
+    }
+
+    #[test]
+    fn color_config_profile0_reads_chroma_sample_position() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(false); // high_bitdepth
+        bits.push_bool(false); // monochrome
+        bits.push_bool(false); // color_description_present_flag
+        bits.push_bool(true); // color_range
+        bits.push_bits(0b10, 2); // chroma_sample_position
+        bits.push_bool(false); // separate_uv_delta_q
+
+        let (data, consumed_bits) = with_trailer(bits);
+        let (remaining, parsed) =
+            color_config((&data, 0), 0).expect("expected profile 0 color_config");
+
+        assert_eq!(parsed.color_primaries, ColorPrimaries::Unspecified);
+        assert_eq!(
+            parsed.transfer_characteristics,
+            TransferCharacteristics::Unspecified
+        );
+        assert_eq!(parsed.matrix_coefficients, MatrixCoefficients::Unspecified);
+        assert_eq!(parsed.color_range, ColorRange::Full);
+        assert_eq!(parsed.subsampling, (1, 1));
+        assert_eq!(parsed.num_planes, 3);
+        assert!(!parsed.separate_uv_delta_q);
+        assert_remaining_position(remaining, &data, consumed_bits);
+    }
+
+    #[test]
+    fn color_config_profile1_forces_non_monochrome_and_444_subsampling() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(false); // high_bitdepth
+        bits.push_bool(false); // color_description_present_flag
+        bits.push_bool(true); // color_range
+        bits.push_bool(false); // separate_uv_delta_q
+
+        let (data, consumed_bits) = with_trailer(bits);
+        let (remaining, parsed) =
+            color_config((&data, 0), 1).expect("expected profile 1 color_config");
+
+        assert_eq!(parsed.color_range, ColorRange::Full);
+        assert_eq!(parsed.num_planes, 3);
+        assert_eq!(parsed.subsampling, (0, 0));
+        assert!(!parsed.separate_uv_delta_q);
+        assert_remaining_position(remaining, &data, consumed_bits);
+    }
+
+    #[test]
+    fn color_config_profile2_twelve_bit_skips_ss_y_when_ss_x_is_zero() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // high_bitdepth
+        bits.push_bool(true); // twelve_bit
+        bits.push_bool(false); // monochrome
+        bits.push_bool(false); // color_description_present_flag
+        bits.push_bool(false); // color_range
+        bits.push_bool(false); // ss_x
+        bits.push_bool(true); // separate_uv_delta_q
+
+        let (data, consumed_bits) = with_trailer(bits);
+        let (remaining, parsed) =
+            color_config((&data, 0), 2).expect("expected profile 2 12-bit ss_x=0 color_config");
+
+        assert_eq!(parsed.color_range, ColorRange::Limited);
+        assert_eq!(parsed.subsampling, (0, 0));
+        assert!(parsed.separate_uv_delta_q);
+        assert_remaining_position(remaining, &data, consumed_bits);
+    }
+
+    #[test]
+    fn color_config_profile2_twelve_bit_reads_ss_y_and_chroma_position() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // high_bitdepth
+        bits.push_bool(true); // twelve_bit
+        bits.push_bool(false); // monochrome
+        bits.push_bool(false); // color_description_present_flag
+        bits.push_bool(true); // color_range
+        bits.push_bool(true); // ss_x
+        bits.push_bool(true); // ss_y
+        bits.push_bits(0b01, 2); // chroma_sample_position
+        bits.push_bool(false); // separate_uv_delta_q
+
+        let (data, consumed_bits) = with_trailer(bits);
+        let (remaining, parsed) = color_config((&data, 0), 2)
+            .expect("expected profile 2 12-bit ss_x=1/ss_y=1 color_config");
+
+        assert_eq!(parsed.color_range, ColorRange::Full);
+        assert_eq!(parsed.subsampling, (1, 1));
+        assert!(!parsed.separate_uv_delta_q);
+        assert_remaining_position(remaining, &data, consumed_bits);
+    }
+
+    #[test]
+    fn color_config_profile2_ten_bit_uses_default_subsampling() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // high_bitdepth
+        bits.push_bool(false); // twelve_bit => 10-bit
+        bits.push_bool(false); // monochrome
+        bits.push_bool(false); // color_description_present_flag
+        bits.push_bool(false); // color_range
+        bits.push_bool(true); // separate_uv_delta_q
+
+        let (data, consumed_bits) = with_trailer(bits);
+        let (remaining, parsed) =
+            color_config((&data, 0), 2).expect("expected profile 2 10-bit color_config");
+
+        assert_eq!(parsed.color_range, ColorRange::Limited);
+        assert_eq!(parsed.subsampling, (1, 0));
+        assert!(parsed.separate_uv_delta_q);
+        assert_remaining_position(remaining, &data, consumed_bits);
+    }
+
+    #[test]
+    fn color_config_returns_error_when_color_description_triplet_is_truncated() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(false); // high_bitdepth
+        bits.push_bool(false); // monochrome
+        bits.push_bool(true); // color_description_present_flag
+        bits.push_bits(1, 8); // partial triplet: only color_primaries
+
+        let data = bits.into_bytes();
+        assert!(color_config((&data, 0), 0).is_err());
+    }
+
+    #[test]
+    #[should_panic]
+    fn color_config_panics_when_color_primaries_code_is_invalid() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(false); // high_bitdepth
+        bits.push_bool(false); // monochrome
+        bits.push_bool(true); // color_description_present_flag
+        bits.push_bits(3, 8); // invalid color_primaries enum value
+        bits.push_bits(1, 8); // transfer_characteristics
+        bits.push_bits(1, 8); // matrix_coefficients
+
+        let data = bits.into_bytes();
+        _ = color_config((&data, 0), 0);
+    }
+}
