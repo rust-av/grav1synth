@@ -16,6 +16,24 @@ use super::{
 impl<const WRITE: bool> BitstreamParser<WRITE> {
     #[allow(clippy::too_many_lines)]
     #[allow(clippy::cognitive_complexity)]
+    /// Parse a single AV1 OBU from `input` and optionally emit a high-level parsed payload.
+    ///
+    /// This is the packet-level dispatcher for OBU parsing. It reads the OBU header and size,
+    /// enforces operating-point layer filtering, then delegates payload parsing to the
+    /// OBU-specific handlers. In write mode (`WRITE = true`), it mirrors bytes into
+    /// `self.packet_out` and rewrites size fields when transformed payload lengths differ from
+    /// the original bitstream.
+    ///
+    /// `packet_ts` uses FFmpeg's 10,000,000 tick-per-second time base and is forwarded to
+    /// frame-level parsing.
+    ///
+    /// # Returns
+    /// - Remaining unconsumed input.
+    /// - `Some(Obu)` for parsed sequence/frame header payloads that are surfaced to callers.
+    /// - `None` for OBUs that are intentionally skipped or passed through.
+    ///
+    /// # Errors
+    /// Returns a `nom` parser error when any required OBU header, size, or payload parse fails.
     pub fn parse_obu<'a>(
         &mut self,
         input: &'a [u8],
@@ -206,6 +224,12 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         }
     }
 
+    /// Rewrite an OBU size field in `self.packet_out` after write-path payload mutation.
+    ///
+    /// `pos` is the byte offset of the original LEB128-encoded size, `leb_size` is the number of
+    /// bytes currently occupied by that encoding, and `new_obu_size` is the replacement payload
+    /// size. The buffer is rebuilt so size fields can grow or shrink without fragile in-place
+    /// shifting logic.
     fn adjust_obu_size(&mut self, pos: usize, leb_size: usize, new_obu_size: usize) {
         let encoded_size = leb128_write(new_obu_size as u32);
         // Add a little padding just in case the leb grew
@@ -258,6 +282,10 @@ pub enum ObuType {
     Padding = 15,
 }
 
+/// Parse the fixed AV1 OBU header from byte-aligned input.
+///
+/// The parser validates required zero bits (`forbidden_bit`, `reserved_1bit`) and conditionally
+/// parses the extension byte when `extension_flag` is set.
 fn parse_obu_header(input: &[u8]) -> IResult<&[u8], ObuHeader, Error<&[u8]>> {
     let (input, obu_header) = bits(|input| {
         let (input, _forbidden_bit) =
@@ -291,6 +319,10 @@ fn parse_obu_header(input: &[u8]) -> IResult<&[u8], ObuHeader, Error<&[u8]>> {
     Ok((input, obu_header))
 }
 
+/// Parse the 8-bit OBU extension payload.
+///
+/// The extension carries `temporal_id` (3 bits) and `spatial_id` (2 bits). The trailing
+/// 3 reserved bits are consumed and intentionally discarded.
 fn obu_extension(input: BitInput) -> IResult<BitInput, ObuExtension, Error<BitInput>> {
     let (input, temporal_id) = bit_parsers::take(3usize)(input)?;
     let (input, spatial_id) = bit_parsers::take(2usize)(input)?;
@@ -304,6 +336,7 @@ fn obu_extension(input: BitInput) -> IResult<BitInput, ObuExtension, Error<BitIn
     ))
 }
 
+/// Parse a 4-bit OBU type discriminant and convert it into [`ObuType`].
 fn obu_type(input: BitInput) -> IResult<BitInput, ObuType, Error<BitInput>> {
     bit_parsers::take(4usize)
         .map_res(|output: u8| ObuType::try_from(output))

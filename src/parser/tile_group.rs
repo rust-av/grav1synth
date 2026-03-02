@@ -7,6 +7,26 @@ use nom::{
 use super::{BitstreamParser, frame::TileInfo, util::take_bool_bit};
 
 impl<const WRITE: bool> BitstreamParser<WRITE> {
+    /// Parses the tile group OBU header and updates frame-boundary tracking state.
+    ///
+    /// Only the tile group header fields needed to determine `tg_end` are read here; tile
+    /// payload bytes are not parsed. When this tile group reaches the last tile in the
+    /// frame, `seen_frame_header` is cleared so the next frame can parse a new header.
+    ///
+    /// In write mode (`WRITE == true`), the original OBU payload bytes are copied through to
+    /// `packet_out` unchanged.
+    ///
+    /// # Parameters
+    /// - `input`: Tile group OBU payload bytes.
+    /// - `size`: Payload size in bytes to pass through to output in write mode.
+    /// - `tile_info`: Per-frame tiling metadata used to decode tile group header fields.
+    ///
+    /// # Returns
+    /// Returns the remaining input after `size` bytes and `()`, or a `nom` parse error if
+    /// the tile group header cannot be decoded.
+    ///
+    /// # Panics
+    /// Panics if `size > input.len()`.
     pub fn parse_tile_group_obu<'a>(
         &mut self,
         input: &'a [u8],

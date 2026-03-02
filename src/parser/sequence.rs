@@ -43,6 +43,10 @@ pub struct SequenceHeader {
 }
 
 impl SequenceHeader {
+    /// Returns whether sequence-level order hints are enabled.
+    ///
+    /// AV1 signals this as a bit width (`order_hint_bits`). A width of `0`
+    /// means order hints are globally disabled for the stream.
     #[must_use]
     pub const fn enable_order_hint(&self) -> bool {
         self.order_hint_bits > 0
@@ -142,6 +146,14 @@ pub enum MatrixCoefficients {
 
 impl<const WRITE: bool> BitstreamParser<WRITE> {
     #[allow(clippy::too_many_lines)]
+    /// Parses an AV1 sequence header OBU payload into [`SequenceHeader`].
+    ///
+    /// CONTRACT: `input` must begin at the first bit of the sequence header
+    /// payload (after OBU framing has been handled by the caller).
+    ///
+    /// In write mode (`WRITE = true`), this parser mirrors the consumed OBU
+    /// bytes and rewrites only the `film_grain_params_present` bit so it
+    /// matches whether incoming grain data is being applied.
     pub fn parse_sequence_header<'a>(
         &mut self,
         input: &'a [u8],
@@ -395,6 +407,11 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
     }
 }
 
+/// Parses sequence-level `timing_info` and keeps the fields needed later.
+///
+/// RATIONALE: frame-header parsing only needs `equal_picture_interval` to know
+/// whether `temporal_point_info` is present; other timing fields are consumed
+/// only to keep bit parsing aligned.
 fn timing_info(input: BitInput) -> IResult<BitInput, TimingInfo, Error<BitInput>> {
     let (input, _num_units_in_display_tick): (_, u32) = bit_parsers::take(32usize)(input)?;
     let (input, _time_scale): (_, u32) = bit_parsers::take(32usize)(input)?;
@@ -413,6 +430,10 @@ fn timing_info(input: BitInput) -> IResult<BitInput, TimingInfo, Error<BitInput>
     ))
 }
 
+/// Parses sequence-level decoder model timing widths.
+///
+/// The returned lengths are reused when parsing per-operating-point and
+/// per-frame timing fields.
 fn decoder_model_info(input: BitInput) -> IResult<BitInput, DecoderModelInfo, Error<BitInput>> {
     let (input, buffer_delay_length_minus_1) = bit_parsers::take(5usize)(input)?;
     let (input, _num_units_in_decoding_tick): (_, u32) = bit_parsers::take(32usize)(input)?;
@@ -428,6 +449,10 @@ fn decoder_model_info(input: BitInput) -> IResult<BitInput, DecoderModelInfo, Er
     ))
 }
 
+/// Parses per-operating-point decoder buffering parameters.
+///
+/// CONTRACT: this helper only advances the bitstream; the parsed values are
+/// sequence-level timing side data that are not required by grain workflows.
 fn operating_parameters_info(
     input: BitInput,
     buffer_delay_length: usize,
@@ -439,6 +464,11 @@ fn operating_parameters_info(
 }
 
 #[allow(clippy::too_many_lines)]
+/// Parses AV1 `color_config` and normalizes chroma layout metadata.
+///
+/// ASSUMPTION: enum-coded color fields are spec-valid; invalid values currently
+/// cause a panic via `unwrap()` because this parser treats malformed bitstreams
+/// as unrecoverable.
 fn color_config(
     input: BitInput,
     seq_profile: u8,
@@ -547,7 +577,10 @@ fn color_config(
 }
 
 #[must_use]
+/// Selects the active sequence operating point for downstream parsing.
+///
+/// COMPAT: the current CLI does not expose operating-point selection, so we
+/// conservatively parse against operating point 0.
 const fn choose_operating_point() -> usize {
-    // I HAVE NO IDEA HOW THIS SHIT WORKS
     0
 }
