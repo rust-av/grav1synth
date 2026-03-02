@@ -284,3 +284,364 @@ pub fn film_grain_params(
         }),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{FilmGrainHeader, FilmGrainParams, FrameType, film_grain_params};
+
+    #[derive(Default)]
+    struct BitBuilder {
+        bits: Vec<bool>,
+    }
+
+    impl BitBuilder {
+        fn push_bool(&mut self, bit: bool) {
+            self.bits.push(bit);
+        }
+
+        fn push_bits(&mut self, value: u64, width: usize) {
+            for shift in (0..width).rev() {
+                self.bits.push(((value >> shift) & 1) == 1);
+            }
+        }
+
+        fn push_scaling_point(&mut self, value: u8, scaling: u8) {
+            self.push_bits(u64::from(value), 8);
+            self.push_bits(u64::from(scaling), 8);
+        }
+
+        fn push_signed_coeff(&mut self, coeff: i8) {
+            let encoded = u8::try_from(i16::from(coeff) + 128)
+                .expect("film grain AR coefficient must fit encoded u8 range");
+            self.push_bits(u64::from(encoded), 8);
+        }
+
+        fn len(&self) -> usize {
+            self.bits.len()
+        }
+
+        fn into_bytes(self) -> Vec<u8> {
+            let mut bytes = vec![0u8; self.bits.len().div_ceil(8)];
+            for (idx, bit) in self.bits.into_iter().enumerate() {
+                if bit {
+                    bytes[idx / 8] |= 1u8 << (7 - (idx % 8));
+                }
+            }
+            bytes
+        }
+    }
+
+    fn with_trailer(mut bits: BitBuilder) -> (Vec<u8>, usize) {
+        let consumed_bits = bits.len();
+        bits.push_bits(0b1010_0101, 8);
+        (bits.into_bytes(), consumed_bits)
+    }
+
+    fn assert_remaining_position(remaining: (&[u8], usize), input: &[u8], consumed_bits: usize) {
+        assert_eq!(remaining.0, &input[consumed_bits / 8..]);
+        assert_eq!(remaining.1, consumed_bits % 8);
+    }
+
+    fn expect_update_params(header: FilmGrainHeader) -> FilmGrainParams {
+        match header {
+            FilmGrainHeader::UpdateGrain(params) => params,
+            other => panic!("expected UpdateGrain header, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn film_grain_params_returns_disable_without_consuming_when_not_allowed() {
+        let data = [0b1010_0000u8];
+        let input = (&data[..], 3usize);
+
+        let (remaining, parsed) = film_grain_params(input, false, FrameType::Inter, false, (0, 0))
+            .expect("expected parser to return Disable when film grain is disallowed");
+
+        assert_eq!(parsed, FilmGrainHeader::Disable);
+        assert_eq!(remaining, input);
+    }
+
+    #[test]
+    fn film_grain_params_returns_disable_when_apply_grain_is_false() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(false);
+
+        let (data, consumed_bits) = with_trailer(bits);
+        let (remaining, parsed) =
+            film_grain_params((&data, 0), true, FrameType::Inter, false, (0, 0))
+                .expect("expected parser to read apply_grain and disable film grain");
+
+        assert_eq!(parsed, FilmGrainHeader::Disable);
+        assert_remaining_position(remaining, &data, consumed_bits);
+    }
+
+    #[test]
+    fn film_grain_params_returns_copy_ref_frame_when_inter_frame_disables_update() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true);
+        bits.push_bits(0x1234, 16);
+        bits.push_bool(false);
+        bits.push_bits(0b101, 3);
+
+        let (data, consumed_bits) = with_trailer(bits);
+        let (remaining, parsed) =
+            film_grain_params((&data, 0), true, FrameType::Inter, false, (0, 0))
+                .expect("expected parser to parse inter-frame copy-from-reference mode");
+
+        assert_eq!(parsed, FilmGrainHeader::CopyRefFrame);
+        assert_remaining_position(remaining, &data, consumed_bits);
+    }
+
+    #[test]
+    fn film_grain_params_key_frame_forces_update_and_uses_420_zero_luma_shortcut() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true);
+        bits.push_bits(0xBEEF, 16);
+        bits.push_bits(0, 4);
+        bits.push_bool(false);
+        bits.push_bits(0b10, 2);
+        bits.push_bits(0, 2);
+        bits.push_bits(0b01, 2);
+        bits.push_bits(0b10, 2);
+        bits.push_bool(true);
+        bits.push_bool(false);
+
+        let (data, consumed_bits) = with_trailer(bits);
+        let (remaining, parsed) =
+            film_grain_params((&data, 0), true, FrameType::Key, false, (1, 1))
+                .expect("expected parser to parse key-frame update-grain payload");
+
+        assert_remaining_position(remaining, &data, consumed_bits);
+        let params = expect_update_params(parsed);
+        assert_eq!(params.grain_seed, 0xBEEF);
+        assert!(params.scaling_points_y.is_empty());
+        assert!(!params.chroma_scaling_from_luma);
+        assert!(params.scaling_points_cb.is_empty());
+        assert!(params.scaling_points_cr.is_empty());
+        assert_eq!(params.ar_coeff_lag, 0);
+        assert_eq!(params.ar_coeffs_y.as_slice(), &[]);
+        assert_eq!(params.ar_coeffs_cb.as_slice(), &[0]);
+        assert_eq!(params.ar_coeffs_cr.as_slice(), &[0]);
+        assert_eq!(params.scaling_shift, 8);
+        assert_eq!(params.ar_coeff_shift, 7);
+        assert_eq!(params.grain_scale_shift, 2);
+        assert_eq!(params.cb_mult, 0);
+        assert_eq!(params.cb_luma_mult, 0);
+        assert_eq!(params.cb_offset, 0);
+        assert_eq!(params.cr_mult, 0);
+        assert_eq!(params.cr_luma_mult, 0);
+        assert_eq!(params.cr_offset, 0);
+        assert!(params.overlap_flag);
+        assert!(!params.clip_to_restricted_range);
+    }
+
+    #[test]
+    fn film_grain_params_monochrome_skips_chroma_fields() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true);
+        bits.push_bits(0x2345, 16);
+        bits.push_bool(true);
+        bits.push_bits(1, 4);
+        bits.push_scaling_point(10, 20);
+        bits.push_bits(0b11, 2);
+        bits.push_bits(0b01, 2);
+        for coeff in [0, 1, -1, 2] {
+            bits.push_signed_coeff(coeff);
+        }
+        bits.push_bits(0b00, 2);
+        bits.push_bits(0b11, 2);
+        bits.push_bool(false);
+        bits.push_bool(true);
+
+        let (data, consumed_bits) = with_trailer(bits);
+        let (remaining, parsed) =
+            film_grain_params((&data, 0), true, FrameType::Inter, true, (0, 0))
+                .expect("expected parser to parse monochrome film-grain update");
+
+        assert_remaining_position(remaining, &data, consumed_bits);
+        let params = expect_update_params(parsed);
+        assert_eq!(params.grain_seed, 0x2345);
+        assert_eq!(params.scaling_points_y.as_slice(), &[[10, 20]]);
+        assert!(!params.chroma_scaling_from_luma);
+        assert!(params.scaling_points_cb.is_empty());
+        assert!(params.scaling_points_cr.is_empty());
+        assert_eq!(params.ar_coeff_lag, 1);
+        assert_eq!(params.ar_coeffs_y.as_slice(), &[0, 1, -1, 2]);
+        assert_eq!(params.ar_coeffs_cb.as_slice(), &[0]);
+        assert_eq!(params.ar_coeffs_cr.as_slice(), &[0]);
+        assert_eq!(params.ar_coeff_shift, 6);
+        assert_eq!(params.grain_scale_shift, 3);
+        assert_eq!(params.cb_mult, 0);
+        assert_eq!(params.cb_luma_mult, 0);
+        assert_eq!(params.cb_offset, 0);
+        assert_eq!(params.cr_mult, 0);
+        assert_eq!(params.cr_luma_mult, 0);
+        assert_eq!(params.cr_offset, 0);
+        assert!(!params.overlap_flag);
+        assert!(params.clip_to_restricted_range);
+    }
+
+    #[test]
+    fn film_grain_params_chroma_scaling_from_luma_reads_chroma_ar_coeffs_without_points() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true);
+        bits.push_bits(0x3456, 16);
+        bits.push_bool(true);
+        bits.push_bits(1, 4);
+        bits.push_scaling_point(7, 9);
+        bits.push_bool(true);
+        bits.push_bits(0b00, 2);
+        bits.push_bits(0b01, 2);
+        for coeff in [1, 2, 3, 4] {
+            bits.push_signed_coeff(coeff);
+        }
+        for coeff in [5, 6, 7, 8, 9] {
+            bits.push_signed_coeff(coeff);
+        }
+        for coeff in [-1, -2, -3, -4, -5] {
+            bits.push_signed_coeff(coeff);
+        }
+        bits.push_bits(0b11, 2);
+        bits.push_bits(0b01, 2);
+        bits.push_bool(true);
+        bits.push_bool(false);
+
+        let (data, consumed_bits) = with_trailer(bits);
+        let (remaining, parsed) =
+            film_grain_params((&data, 0), true, FrameType::Inter, false, (0, 0))
+                .expect("expected parser to parse chroma_scaling_from_luma branch");
+
+        assert_remaining_position(remaining, &data, consumed_bits);
+        let params = expect_update_params(parsed);
+        assert_eq!(params.scaling_points_y.as_slice(), &[[7, 9]]);
+        assert!(params.chroma_scaling_from_luma);
+        assert!(params.scaling_points_cb.is_empty());
+        assert!(params.scaling_points_cr.is_empty());
+        assert_eq!(params.ar_coeff_lag, 1);
+        assert_eq!(params.ar_coeffs_y.as_slice(), &[1, 2, 3, 4]);
+        assert_eq!(params.ar_coeffs_cb.as_slice(), &[5, 6, 7, 8, 9]);
+        assert_eq!(params.ar_coeffs_cr.as_slice(), &[-1, -2, -3, -4, -5]);
+        assert_eq!(params.ar_coeff_shift, 9);
+        assert_eq!(params.grain_scale_shift, 1);
+        assert_eq!(params.cb_mult, 0);
+        assert_eq!(params.cb_luma_mult, 0);
+        assert_eq!(params.cb_offset, 0);
+        assert_eq!(params.cr_mult, 0);
+        assert_eq!(params.cr_luma_mult, 0);
+        assert_eq!(params.cr_offset, 0);
+        assert!(params.overlap_flag);
+        assert!(!params.clip_to_restricted_range);
+    }
+
+    #[test]
+    fn film_grain_params_reads_chroma_points_and_multiplier_fields_when_present() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true);
+        bits.push_bits(0x4567, 16);
+        bits.push_bool(true);
+        bits.push_bits(1, 4);
+        bits.push_scaling_point(1, 2);
+        bits.push_bool(false);
+        bits.push_bits(1, 4);
+        bits.push_scaling_point(30, 40);
+        bits.push_bits(1, 4);
+        bits.push_scaling_point(50, 60);
+        bits.push_bits(0b01, 2);
+        bits.push_bits(0b00, 2);
+        bits.push_signed_coeff(3);
+        bits.push_signed_coeff(-3);
+        bits.push_bits(0b10, 2);
+        bits.push_bits(0b10, 2);
+        bits.push_bits(11, 8);
+        bits.push_bits(22, 8);
+        bits.push_bits(0x1AB, 9);
+        bits.push_bits(33, 8);
+        bits.push_bits(44, 8);
+        bits.push_bits(0x055, 9);
+        bits.push_bool(true);
+        bits.push_bool(true);
+
+        let (data, consumed_bits) = with_trailer(bits);
+        let (remaining, parsed) =
+            film_grain_params((&data, 0), true, FrameType::Inter, false, (0, 0))
+                .expect("expected parser to parse explicit chroma points and multipliers");
+
+        assert_remaining_position(remaining, &data, consumed_bits);
+        let params = expect_update_params(parsed);
+        assert_eq!(params.scaling_points_y.as_slice(), &[[1, 2]]);
+        assert!(!params.chroma_scaling_from_luma);
+        assert_eq!(params.scaling_points_cb.as_slice(), &[[30, 40]]);
+        assert_eq!(params.scaling_points_cr.as_slice(), &[[50, 60]]);
+        assert_eq!(params.ar_coeff_lag, 0);
+        assert_eq!(params.ar_coeffs_y.as_slice(), &[]);
+        assert_eq!(params.ar_coeffs_cb.as_slice(), &[3]);
+        assert_eq!(params.ar_coeffs_cr.as_slice(), &[-3]);
+        assert_eq!(params.ar_coeff_shift, 8);
+        assert_eq!(params.grain_scale_shift, 2);
+        assert_eq!(params.cb_mult, 11);
+        assert_eq!(params.cb_luma_mult, 22);
+        assert_eq!(params.cb_offset, 0x1AB);
+        assert_eq!(params.cr_mult, 33);
+        assert_eq!(params.cr_luma_mult, 44);
+        assert_eq!(params.cr_offset, 0x055);
+        assert!(params.overlap_flag);
+        assert!(params.clip_to_restricted_range);
+    }
+
+    #[test]
+    fn film_grain_params_uses_num_pos_luma_for_chroma_when_no_luma_points() {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true);
+        bits.push_bits(0x5678, 16);
+        bits.push_bool(true);
+        bits.push_bits(0, 4);
+        bits.push_bool(false);
+        bits.push_bits(1, 4);
+        bits.push_scaling_point(70, 80);
+        bits.push_bits(1, 4);
+        bits.push_scaling_point(90, 100);
+        bits.push_bits(0b00, 2);
+        bits.push_bits(0b01, 2);
+        for coeff in [10, 11, 12, 13] {
+            bits.push_signed_coeff(coeff);
+        }
+        for coeff in [-10, -11, -12, -13] {
+            bits.push_signed_coeff(coeff);
+        }
+        bits.push_bits(0b01, 2);
+        bits.push_bits(0b00, 2);
+        bits.push_bits(1, 8);
+        bits.push_bits(2, 8);
+        bits.push_bits(3, 9);
+        bits.push_bits(4, 8);
+        bits.push_bits(5, 8);
+        bits.push_bits(6, 9);
+        bits.push_bool(false);
+        bits.push_bool(false);
+
+        let (data, consumed_bits) = with_trailer(bits);
+        let (remaining, parsed) =
+            film_grain_params((&data, 0), true, FrameType::Inter, false, (0, 0))
+                .expect("expected parser to use num_pos_luma for chroma when no luma points");
+
+        assert_remaining_position(remaining, &data, consumed_bits);
+        let params = expect_update_params(parsed);
+        assert!(params.scaling_points_y.is_empty());
+        assert_eq!(params.scaling_points_cb.as_slice(), &[[70, 80]]);
+        assert_eq!(params.scaling_points_cr.as_slice(), &[[90, 100]]);
+        assert_eq!(params.ar_coeff_lag, 1);
+        assert_eq!(params.ar_coeffs_y.as_slice(), &[]);
+        assert_eq!(params.ar_coeffs_cb.as_slice(), &[10, 11, 12, 13]);
+        assert_eq!(params.ar_coeffs_cr.as_slice(), &[-10, -11, -12, -13]);
+        assert_eq!(params.ar_coeff_shift, 7);
+        assert_eq!(params.grain_scale_shift, 0);
+        assert_eq!(params.cb_mult, 1);
+        assert_eq!(params.cb_luma_mult, 2);
+        assert_eq!(params.cb_offset, 3);
+        assert_eq!(params.cr_mult, 4);
+        assert_eq!(params.cr_luma_mult, 5);
+        assert_eq!(params.cr_offset, 6);
+        assert!(!params.overlap_flag);
+        assert!(!params.clip_to_restricted_range);
+    }
+}
