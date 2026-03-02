@@ -931,6 +931,7 @@ fn superres_params<'a, 'b>(
 }
 
 /// Converts frame dimensions into MI (mode info) grid dimensions.
+#[must_use]
 const fn compute_image_size(frame_size: Dimensions) -> (u32, u32) {
     let mi_cols = 2 * ((frame_size.width + 7) >> 3u8);
     let mi_rows = 2 * ((frame_size.height + 7) >> 3u8);
@@ -1111,6 +1112,7 @@ pub struct TileInfo {
 ///
 /// RATIONALE: AV1 tile derivation is specified as an iterative loop, so this
 /// implementation mirrors the spec wording for readability and auditability.
+#[must_use]
 fn tile_log2<T: PrimInt>(blk_size: T, target: T) -> T {
     let mut k = 0;
     while (blk_size << k) < target {
@@ -1534,6 +1536,7 @@ fn skip_mode_params<'a, 'b>(
 /// Computes wrapped signed distance between two order hints.
 ///
 /// This matches AV1 modular arithmetic for picture order comparison.
+#[must_use]
 const fn get_relative_dist(a: i64, b: i64, order_hint_bits: usize) -> i64 {
     if order_hint_bits == 0 {
         return 0;
@@ -1557,6 +1560,7 @@ const ROTZOOM: usize = 2;
 const AFFINE: usize = 3;
 
 /// Initializes global motion parameters to identity transforms.
+#[must_use]
 fn initialize_prev_gm_params() -> Vec<Vec<i32>> {
     let mut prev_gm_params = vec![vec![0i32; 6]; 8]; // Assuming 8 references and 6 indices
 
@@ -1678,6 +1682,7 @@ fn decode_subexp(input: BitInput, num_syms: i32) -> IResult<BitInput, i32, Error
 }
 
 /// Applies AV1 inverse recenter mapping.
+#[must_use]
 const fn inverse_recenter(r: i32, v: i32) -> i32 {
     if v > 2 * r {
         v
@@ -1769,6 +1774,7 @@ pub enum RefType {
 ///
 /// This applies segmentation `ALT_Q` offsets and optionally uses
 /// `current_q_index` when delta-q is active.
+#[must_use]
 fn get_qindex(
     ignore_delta_q: bool,
     segment_id: usize,
@@ -1794,10 +1800,15 @@ fn get_qindex(
 }
 
 /// Returns whether a segmentation feature is enabled for `segment_id`.
+#[must_use]
 const fn seg_feature_active_idx(
     segment_id: usize,
     feature: usize,
     feature_data: Option<&SegmentationData>,
 ) -> bool {
-    feature_data.is_some() && feature_data.unwrap()[segment_id][feature].is_some()
+    if let Some(feature_data) = feature_data {
+        feature_data[segment_id][feature].is_some()
+    } else {
+        false
+    }
 }
