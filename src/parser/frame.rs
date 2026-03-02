@@ -774,7 +774,6 @@ impl FrameType {
     }
 }
 
-#[inline(always)]
 #[allow(clippy::unnecessary_wraps)]
 const fn decode_frame_wrapup(input: &[u8]) -> IResult<&[u8], (), Error<&[u8]>> {
     // I don't believe this actually parses anything
@@ -834,7 +833,6 @@ fn render_size(
     Ok((input, Dimensions { width, height }))
 }
 
-#[inline(always)]
 #[allow(clippy::unnecessary_wraps)]
 const fn set_frame_refs(input: BitInput) -> IResult<BitInput, (), Error<BitInput>> {
     // Does nothing that we care about
@@ -921,35 +919,30 @@ fn read_interpolation_filter(input: BitInput) -> IResult<BitInput, (), Error<Bit
     Ok((input, ()))
 }
 
-#[inline(always)]
 #[allow(clippy::unnecessary_wraps)]
 const fn init_non_coeff_cdfs(input: BitInput) -> IResult<BitInput, (), Error<BitInput>> {
     // We don't care about this
     Ok((input, ()))
 }
 
-#[inline(always)]
 #[allow(clippy::unnecessary_wraps)]
 const fn setup_past_independence(input: BitInput) -> IResult<BitInput, (), Error<BitInput>> {
     // We don't care about this
     Ok((input, ()))
 }
 
-#[inline(always)]
 #[allow(clippy::unnecessary_wraps)]
 const fn load_cdfs(input: BitInput) -> IResult<BitInput, (), Error<BitInput>> {
     // We don't care about this
     Ok((input, ()))
 }
 
-#[inline(always)]
 #[allow(clippy::unnecessary_wraps)]
 const fn load_previous(input: BitInput) -> IResult<BitInput, (), Error<BitInput>> {
     // We don't care about this
     Ok((input, ()))
 }
 
-#[inline(always)]
 #[allow(clippy::unnecessary_wraps)]
 const fn motion_field_estimation(input: BitInput) -> IResult<BitInput, (), Error<BitInput>> {
     // We don't care about this
@@ -1259,14 +1252,12 @@ fn delta_lf_params(
     Ok((input, ()))
 }
 
-#[inline(always)]
 #[allow(clippy::unnecessary_wraps)]
 const fn init_coeff_cdfs(input: BitInput) -> IResult<BitInput, (), Error<BitInput>> {
     // We don't care about this
     Ok((input, ()))
 }
 
-#[inline(always)]
 #[allow(clippy::unnecessary_wraps)]
 const fn load_previous_segment_ids(input: BitInput) -> IResult<BitInput, (), Error<BitInput>> {
     // We don't care about this
@@ -1737,7 +1728,6 @@ fn get_qindex(
     base_q_idx
 }
 
-#[inline(always)]
 const fn seg_feature_active_idx(
     segment_id: usize,
     feature: usize,

@@ -1,0 +1,2 @@
+# Caused by transitive dependencies
+allowed-duplicate-crates = ["hashbrown"]
