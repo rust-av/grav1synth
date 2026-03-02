@@ -219,7 +219,7 @@ mod tests {
     use nom::Err;
     use quickcheck_macros::quickcheck;
 
-    use super::{leb128, leb128_write, ns, take_bool_bit, take_zero_bit, take_zero_bits, uvlc};
+    use super::{leb128, leb128_write, ns, su, take_bool_bit, take_zero_bit, take_zero_bits, uvlc};
 
     #[test]
     fn take_bool_bit_reads_false_and_advances_input() {
@@ -429,6 +429,66 @@ mod tests {
     fn ns_panics_when_n_is_zero_in_debug_builds() {
         let data = [0u8];
         _ = ns((&data, 0), 0);
+    }
+
+    #[test]
+    fn su_returns_value_when_sign_bit_is_clear() {
+        // n = 4 and parsed bits are 0b0111.
+        let data = [0b0111_0000u8];
+        let (remaining, value) = su((&data, 0), 4).expect("expected su() to decode positive value");
+
+        assert_eq!(value, 7);
+        assert_eq!(remaining, (&data[..], 4));
+    }
+
+    #[test]
+    fn su_decodes_most_negative_value_for_width() {
+        // n = 4 and parsed bits are 0b1000, which is -8 in two's-complement.
+        let data = [0b1000_0000u8];
+        let (remaining, value) =
+            su((&data, 0), 4).expect("expected su() to decode most negative value");
+
+        assert_eq!(value, -8);
+        assert_eq!(remaining, (&data[..], 4));
+    }
+
+    #[test]
+    fn su_decodes_negative_one_for_all_ones_payload() {
+        // n = 5 and parsed bits are 0b1_1111.
+        let data = [0b1111_1000u8];
+        let (remaining, value) = su((&data, 0), 5).expect("expected su() to decode -1");
+
+        assert_eq!(value, -1);
+        assert_eq!(remaining, (&data[..], 5));
+    }
+
+    #[test]
+    fn su_handles_single_bit_width() {
+        let zero_data = [0b0000_0000u8];
+        let (remaining_zero, zero) =
+            su((&zero_data, 0), 1).expect("expected su(1) with bit 0 to decode zero");
+        assert_eq!(zero, 0);
+        assert_eq!(remaining_zero, (&zero_data[..], 1));
+
+        let one_data = [0b1000_0000u8];
+        let (remaining_one, minus_one) =
+            su((&one_data, 0), 1).expect("expected su(1) with bit 1 to decode -1");
+        assert_eq!(minus_one, -1);
+        assert_eq!(remaining_one, (&one_data[..], 1));
+    }
+
+    #[test]
+    fn su_returns_error_when_input_is_too_short() {
+        let data = [0u8];
+        assert!(su((&data, 7), 2).is_err());
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic]
+    fn su_panics_when_n_is_zero_in_debug_builds() {
+        let data = [0u8];
+        _ = su((&data, 0), 0);
     }
 
     #[quickcheck]
