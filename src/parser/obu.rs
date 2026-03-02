@@ -342,3 +342,110 @@ fn obu_type(input: BitInput) -> IResult<BitInput, ObuType, Error<BitInput>> {
         .map_res(|output: u8| ObuType::try_from(output))
         .parse(input)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_obu_header_byte(
+        forbidden_bit: u8,
+        obu_type: ObuType,
+        extension_flag: bool,
+        has_size_field: bool,
+        reserved_bit: u8,
+    ) -> u8 {
+        (forbidden_bit << 7)
+            | ((obu_type as u8) << 3)
+            | (u8::from(extension_flag) << 2)
+            | (u8::from(has_size_field) << 1)
+            | reserved_bit
+    }
+
+    fn make_obu_extension_byte(temporal_id: u8, spatial_id: u8, reserved: u8) -> u8 {
+        (temporal_id << 5) | (spatial_id << 3) | reserved
+    }
+
+    #[test]
+    fn parse_obu_header_without_extension_parses_expected_fields() {
+        let header = make_obu_header_byte(0, ObuType::Frame, false, true, 0);
+        let input = [header, 0xAA];
+
+        let (remaining, parsed) = parse_obu_header(&input).expect("header should parse");
+
+        assert_eq!(parsed.obu_type, ObuType::Frame);
+        assert!(parsed.has_size_field);
+        assert!(parsed.extension.is_none());
+        assert_eq!(remaining, &input[1..]);
+    }
+
+    #[test]
+    fn parse_obu_header_with_extension_parses_extension_payload() {
+        let header = make_obu_header_byte(0, ObuType::SequenceHeader, true, false, 0);
+        let extension = make_obu_extension_byte(5, 2, 0b111);
+        let input = [header, extension, 0xAA];
+
+        let (remaining, parsed) = parse_obu_header(&input).expect("header should parse");
+
+        assert_eq!(parsed.obu_type, ObuType::SequenceHeader);
+        assert!(!parsed.has_size_field);
+        let extension = parsed.extension.expect("extension should be present");
+        assert_eq!(extension.temporal_id, 5);
+        assert_eq!(extension.spatial_id, 2);
+        assert_eq!(remaining, &input[2..]);
+    }
+
+    #[test]
+    fn parse_obu_header_rejects_non_zero_forbidden_bit() {
+        let header = make_obu_header_byte(1, ObuType::Padding, false, true, 0);
+        assert!(parse_obu_header(&[header]).is_err());
+    }
+
+    #[test]
+    fn parse_obu_header_rejects_non_zero_reserved_bit() {
+        let header = make_obu_header_byte(0, ObuType::Padding, false, true, 1);
+        assert!(parse_obu_header(&[header]).is_err());
+    }
+
+    #[test]
+    fn parse_obu_header_with_extension_flag_requires_extension_byte() {
+        let header = make_obu_header_byte(0, ObuType::FrameHeader, true, true, 0);
+        assert!(parse_obu_header(&[header]).is_err());
+    }
+
+    #[test]
+    fn obu_extension_parses_temporal_and_spatial_ids() {
+        let extension = make_obu_extension_byte(7, 3, 0b101);
+        let input = [extension, 0xAA];
+
+        let (remaining, parsed) = obu_extension((&input, 0)).expect("extension should parse");
+
+        assert_eq!(parsed.temporal_id, 7);
+        assert_eq!(parsed.spatial_id, 3);
+        assert_eq!(remaining.0, &input[1..]);
+        assert_eq!(remaining.1, 0);
+    }
+
+    #[test]
+    fn obu_extension_errors_when_insufficient_bits_are_available() {
+        assert!(obu_extension((&[], 0)).is_err());
+    }
+
+    #[test]
+    fn obu_type_maps_all_valid_discriminants() {
+        for value in 0_u8..=15 {
+            let input = [value << 4];
+            let expected = ObuType::try_from(value).expect("all 4-bit values map to an obu type");
+
+            let (remaining, parsed) = obu_type((&input, 0)).expect("obu type should parse");
+
+            assert_eq!(parsed, expected);
+            assert_eq!(remaining.0, &input);
+            assert_eq!(remaining.1, 4);
+        }
+    }
+
+    #[test]
+    fn obu_type_errors_when_insufficient_bits_are_available() {
+        assert!(obu_type((&[], 0)).is_err());
+    }
+}
