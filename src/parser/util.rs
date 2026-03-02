@@ -219,7 +219,7 @@ mod tests {
     use nom::Err;
     use quickcheck_macros::quickcheck;
 
-    use super::{leb128, leb128_write, take_bool_bit, take_zero_bit, take_zero_bits};
+    use super::{leb128, leb128_write, take_bool_bit, take_zero_bit, take_zero_bits, uvlc};
 
     #[test]
     fn take_bool_bit_reads_false_and_advances_input() {
@@ -291,6 +291,67 @@ mod tests {
     fn take_zero_bits_returns_error_when_input_is_too_short() {
         let data = [0u8];
         assert!(take_zero_bits((&data, 0), 9).is_err());
+    }
+
+    #[test]
+    fn uvlc_decodes_zero_when_stop_bit_is_first() {
+        let data = [0b1000_0000u8];
+        let (remaining, value) = uvlc((&data, 0)).expect("expected single-bit uvlc to decode");
+
+        assert_eq!(value, 0);
+        assert_eq!(remaining, (&data[..], 1));
+    }
+
+    #[test]
+    fn uvlc_decodes_payload_when_leading_zeros_are_present() {
+        let data = [0b0001_1010u8];
+        let (remaining, value) =
+            uvlc((&data, 0)).expect("expected uvlc with 3 leading zeros and payload 0b101");
+
+        assert_eq!(value, 12);
+        assert_eq!(remaining, (&data[..], 7));
+    }
+
+    #[test]
+    fn uvlc_decodes_31_leading_zeros_without_saturating() {
+        let data = [0u8, 0u8, 0u8, 0b0000_0001u8, 0u8, 0u8, 0u8, 0u8];
+        let (remaining, value) =
+            uvlc((&data, 0)).expect("expected uvlc with 31 leading zeros to decode normally");
+
+        assert_eq!(value, (1u32 << 31) - 1);
+        assert_eq!(remaining, (&data[7..], 7));
+    }
+
+    #[test]
+    fn uvlc_saturates_to_u32_max_with_32_leading_zeros() {
+        let data = [0u8, 0u8, 0u8, 0u8, 0b1010_1010u8];
+        let (remaining, value) =
+            uvlc((&data, 0)).expect("expected saturated uvlc for 32 leading zeros");
+
+        assert_eq!(value, u32::MAX);
+        assert_eq!(remaining, (&data[4..], 1));
+    }
+
+    #[test]
+    fn uvlc_saturates_to_u32_max_with_more_than_32_leading_zeros() {
+        let data = [0u8, 0u8, 0u8, 0u8, 0b0101_0101u8];
+        let (remaining, value) =
+            uvlc((&data, 0)).expect("expected saturated uvlc for more than 32 leading zeros");
+
+        assert_eq!(value, u32::MAX);
+        assert_eq!(remaining, (&data[4..], 2));
+    }
+
+    #[test]
+    fn uvlc_returns_error_when_terminator_bit_is_missing() {
+        let data = [0u8];
+        assert!(uvlc((&data, 0)).is_err());
+    }
+
+    #[test]
+    fn uvlc_returns_error_when_payload_bits_are_missing() {
+        let data = [0b0000_0001u8];
+        assert!(uvlc((&data, 5)).is_err());
     }
 
     #[quickcheck]
