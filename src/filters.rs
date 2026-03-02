@@ -180,3 +180,185 @@ impl Filter {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_new_error_contains(filters: &str, expected: &str) {
+        let Err(err) = FilterChain::new(filters) else {
+            panic!("expected parsing error for \"{filters}\"")
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains(expected),
+            "expected error to contain \"{expected}\", got \"{message}\""
+        );
+    }
+
+    #[test]
+    fn new_accepts_empty_filter_chain() {
+        let chain = FilterChain::new("").unwrap();
+        assert!(chain.filters.is_empty());
+    }
+
+    #[test]
+    fn new_parses_crop_filter_args() {
+        let chain = FilterChain::new("crop:top=1,bottom=2,left=3,right=4").unwrap();
+        assert_eq!(chain.filters.len(), 1);
+
+        match &chain.filters[0] {
+            Filter::Crop {
+                top,
+                bottom,
+                left,
+                right,
+            } => {
+                assert_eq!(*top, 1);
+                assert_eq!(*bottom, 2);
+                assert_eq!(*left, 3);
+                assert_eq!(*right, 4);
+            }
+            Filter::Resize { .. } => panic!("expected crop filter"),
+        }
+    }
+
+    #[test]
+    fn new_parses_resize_filter_with_default_algorithm() {
+        let chain = FilterChain::new("resize:width=1920,height=1080").unwrap();
+        assert_eq!(chain.filters.len(), 1);
+
+        match &chain.filters[0] {
+            Filter::Resize { width, height, alg } => {
+                assert_eq!(width.get(), 1920);
+                assert_eq!(height.get(), 1080);
+                assert_eq!(*alg, "catmullrom");
+            }
+            Filter::Crop { .. } => panic!("expected resize filter"),
+        }
+    }
+
+    #[test]
+    fn new_parses_resize_filter_with_all_supported_algorithms() {
+        for alg in ["hermite", "catmullrom", "mitchell", "lanczos", "spline36"] {
+            let filter = format!("resize:width=640,height=360,alg={alg}");
+            let chain = FilterChain::new(&filter).unwrap();
+
+            match &chain.filters[0] {
+                Filter::Resize {
+                    width,
+                    height,
+                    alg: parsed_alg,
+                } => {
+                    assert_eq!(width.get(), 640);
+                    assert_eq!(height.get(), 360);
+                    assert_eq!(*parsed_alg, alg);
+                }
+                Filter::Crop { .. } => panic!("expected resize filter"),
+            }
+        }
+    }
+
+    #[test]
+    fn new_parses_multiple_filters_in_order() {
+        let chain = FilterChain::new("crop:top=4;resize:width=320,height=240,alg=lanczos").unwrap();
+        assert_eq!(chain.filters.len(), 2);
+
+        match &chain.filters[0] {
+            Filter::Crop {
+                top,
+                bottom,
+                left,
+                right,
+            } => {
+                assert_eq!(*top, 4);
+                assert_eq!(*bottom, 0);
+                assert_eq!(*left, 0);
+                assert_eq!(*right, 0);
+            }
+            Filter::Resize { .. } => panic!("expected crop filter"),
+        }
+
+        match &chain.filters[1] {
+            Filter::Resize { width, height, alg } => {
+                assert_eq!(width.get(), 320);
+                assert_eq!(height.get(), 240);
+                assert_eq!(*alg, "lanczos");
+            }
+            Filter::Crop { .. } => panic!("expected resize filter"),
+        }
+    }
+
+    #[test]
+    fn new_rejects_filter_without_colon_separator() {
+        assert_new_error_contains("crop", "Invalid filter syntax in \"crop\"");
+    }
+
+    #[test]
+    fn new_rejects_unrecognized_filter() {
+        assert_new_error_contains("rotate:degrees=90", "Unrecognized filter \"rotate\"");
+    }
+
+    #[test]
+    fn new_rejects_crop_arg_without_equals_separator() {
+        assert_new_error_contains("crop:top", "Invalid filter syntax in \"top\"");
+    }
+
+    #[test]
+    fn new_rejects_unrecognized_crop_arg() {
+        assert_new_error_contains("crop:width=12", "Unrecognized crop arg \"width\"");
+    }
+
+    #[test]
+    fn new_rejects_non_numeric_crop_value() {
+        assert_new_error_contains("crop:top=abc", "invalid digit found in string");
+    }
+
+    #[test]
+    fn new_rejects_resize_arg_without_equals_separator() {
+        assert_new_error_contains(
+            "resize:width=640,height",
+            "Invalid filter syntax in \"height\"",
+        );
+    }
+
+    #[test]
+    fn new_rejects_unrecognized_resize_arg() {
+        assert_new_error_contains(
+            "resize:width=640,height=360,scale=2",
+            "Unrecognized resize arg \"scale\"",
+        );
+    }
+
+    #[test]
+    fn new_rejects_unrecognized_resize_algorithm() {
+        assert_new_error_contains(
+            "resize:width=640,height=360,alg=nearest",
+            "Unrecognized resize algorithm \"nearest\"",
+        );
+    }
+
+    #[test]
+    fn new_rejects_resize_when_width_or_height_missing() {
+        assert_new_error_contains(
+            "resize:width=640",
+            "Both width and height must be provided to resize filter",
+        );
+        assert_new_error_contains(
+            "resize:height=360",
+            "Both width and height must be provided to resize filter",
+        );
+    }
+
+    #[test]
+    fn new_rejects_non_numeric_resize_dimensions() {
+        assert_new_error_contains(
+            "resize:width=wide,height=360",
+            "invalid digit found in string",
+        );
+        assert_new_error_contains(
+            "resize:width=640,height=tall",
+            "invalid digit found in string",
+        );
+    }
+}
