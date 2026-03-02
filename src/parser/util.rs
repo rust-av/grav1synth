@@ -219,7 +219,7 @@ mod tests {
     use nom::Err;
     use quickcheck_macros::quickcheck;
 
-    use super::{leb128, leb128_write, take_bool_bit, take_zero_bit, take_zero_bits, uvlc};
+    use super::{leb128, leb128_write, ns, take_bool_bit, take_zero_bit, take_zero_bits, uvlc};
 
     #[test]
     fn take_bool_bit_reads_false_and_advances_input() {
@@ -352,6 +352,83 @@ mod tests {
     fn uvlc_returns_error_when_payload_bits_are_missing() {
         let data = [0b0000_0001u8];
         assert!(uvlc((&data, 5)).is_err());
+    }
+
+    #[test]
+    fn ns_returns_v_when_v_is_less_than_m() {
+        // n = 5 => w = 3, m = 3. Prefix v = 0b10 = 2 (< m), so result is v.
+        let data = [0b1000_0000u8];
+        let (remaining, value) = ns((&data, 0), 5).expect("expected ns() to return v directly");
+
+        assert_eq!(value, 2);
+        assert_eq!(remaining, (&data[..], 2));
+    }
+
+    #[test]
+    fn ns_reads_extra_bit_when_v_is_not_less_than_m() {
+        // n = 5 => w = 3, m = 3. Prefix v = 0b11 = 3 (>= m), so one extra bit is read.
+        let data = [0b1110_0000u8];
+        let (remaining, value) = ns((&data, 0), 5).expect("expected ns() to read extra bit");
+
+        assert_eq!(value, 4);
+        assert_eq!(remaining, (&data[..], 3));
+    }
+
+    #[test]
+    fn ns_reads_zero_extra_bit_when_v_is_not_less_than_m() {
+        // n = 5 => w = 3, m = 3. Prefix v = 3 and extra_bit = 0 should decode to 3.
+        let data = [0b1100_0000u8];
+        let (remaining, value) =
+            ns((&data, 0), 5).expect("expected ns() to decode value using zero extra bit");
+
+        assert_eq!(value, 3);
+        assert_eq!(remaining, (&data[..], 3));
+    }
+
+    #[test]
+    fn ns_for_power_of_two_n_does_not_consume_an_extra_bit() {
+        // n = 8 => w = 4, m = 8. Prefix v is 3 bits and is always < m, so no extra bit.
+        let data = [0b1111_0000u8];
+        let (remaining, value) =
+            ns((&data, 0), 8).expect("expected power-of-two ns() to use only w - 1 bits");
+
+        assert_eq!(value, 7);
+        assert_eq!(remaining, (&data[..], 3));
+    }
+
+    #[test]
+    fn ns_with_n_equal_one_returns_zero_without_consuming_bits() {
+        // n = 1 => w = 1, m = 1, and the prefix width is zero bits.
+        let data = [0b1010_0000u8];
+        let input = (&data[..], 3usize);
+        let (remaining, value) =
+            ns(input, 1).expect("expected ns(1) to decode without reading bits");
+
+        assert_eq!(value, 0);
+        assert_eq!(remaining, input);
+    }
+
+    #[test]
+    fn ns_returns_error_when_prefix_bits_are_missing() {
+        // n = 5 requires reading 2 prefix bits. Only one bit remains at offset 7.
+        let data = [0u8];
+        assert!(ns((&data, 7), 5).is_err());
+    }
+
+    #[test]
+    fn ns_returns_error_when_extra_bit_is_missing() {
+        // n = 5 => need 2 prefix bits and maybe one extra. Offset 6 gives exactly 2 bits (11),
+        // so parsing reaches the extra-bit read and must fail.
+        let data = [0b0000_0011u8];
+        assert!(ns((&data, 6), 5).is_err());
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic]
+    fn ns_panics_when_n_is_zero_in_debug_builds() {
+        let data = [0u8];
+        _ = ns((&data, 0), 0);
     }
 
     #[quickcheck]
