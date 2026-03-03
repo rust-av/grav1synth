@@ -171,7 +171,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 show_existing_frame,
                 error_resilient_mode,
             ) = if sequence_header.reduced_still_picture_header {
-                (input, FrameType::Inter, true, true, false, false)
+                (input, FrameType::Key, true, true, false, false)
             } else {
                 let (input, show_existing_frame) = take_bool_bit(input)?;
                 if show_existing_frame {

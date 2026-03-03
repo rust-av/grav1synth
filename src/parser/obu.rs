@@ -184,7 +184,9 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                         }
                     }
                     let adjustment = obu_size - (pre_len - input.len());
-                    self.packet_out.extend(input.iter().take(adjustment));
+                    if WRITE {
+                        self.packet_out.extend(input.iter().take(adjustment));
+                    }
                     input = &input[adjustment..];
                 }
 
@@ -447,5 +449,705 @@ mod tests {
     #[test]
     fn obu_type_errors_when_insufficient_bits_are_available() {
         assert!(obu_type((&[], 0)).is_err());
+    }
+
+    // =================================================================
+    // BitstreamParser method tests — helpers and groups 1–8
+    // =================================================================
+
+    use super::super::{
+        BitstreamParser,
+        sequence::{
+            ColorConfig, ColorPrimaries, ColorRange, MatrixCoefficients, SequenceHeader,
+            TransferCharacteristics,
+        },
+        util::leb128_write,
+    };
+    use arrayvec::ArrayVec;
+
+    fn make_parser<const WRITE: bool>(
+        size: usize,
+        seen_frame_header: bool,
+        sequence_header: Option<SequenceHeader>,
+        packet_out: Vec<u8>,
+    ) -> BitstreamParser<WRITE> {
+        BitstreamParser {
+            reader: None,
+            writer: None,
+            packet_out,
+            incoming_grain_header: None,
+            parsed: false,
+            size,
+            seen_frame_header,
+            sequence_header,
+            previous_frame_header: None,
+            ref_frame_idx: Default::default(),
+            ref_order_hint: Default::default(),
+            big_ref_order_hint: Default::default(),
+            big_ref_valid: Default::default(),
+            big_order_hints: Default::default(),
+            grain_headers: Vec::new(),
+        }
+    }
+
+    /// Build a complete OBU byte sequence from its parts.
+    ///
+    /// `obu_type` and flags determine the header byte. `extension` provides the
+    /// optional extension byte. When `has_size_field` is true the payload length
+    /// is LEB128-encoded between the header and the payload.
+    fn build_obu_bytes(
+        obu_type: ObuType,
+        extension: Option<ObuExtension>,
+        has_size_field: bool,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let header = make_obu_header_byte(0, obu_type, extension.is_some(), has_size_field, 0);
+        let mut buf = vec![header];
+        if let Some(ext) = extension {
+            buf.push(make_obu_extension_byte(ext.temporal_id, ext.spatial_id, 0));
+        }
+        if has_size_field {
+            buf.extend_from_slice(&leb128_write(payload.len() as u32));
+        }
+        buf.extend_from_slice(payload);
+        buf
+    }
+
+    fn sequence_header_with_idc(idc: u16) -> SequenceHeader {
+        SequenceHeader {
+            reduced_still_picture_header: false,
+            frame_id_numbers_present: false,
+            additional_frame_id_len_minus_1: 0,
+            delta_frame_id_len_minus_2: 0,
+            film_grain_params_present: false,
+            new_film_grain_state: false,
+            force_screen_content_tools: 1,
+            force_integer_mv: 1,
+            order_hint_bits: 0,
+            frame_width_bits_minus_1: 0,
+            frame_height_bits_minus_1: 0,
+            max_frame_width_minus_1: 7,
+            max_frame_height_minus_1: 7,
+            decoder_model_info: None,
+            decoder_model_present_for_op: ArrayVec::new(),
+            operating_points_cnt_minus_1: 0,
+            operating_point_idc: ArrayVec::new(),
+            cur_operating_point_idc: idc,
+            timing_info: None,
+            enable_ref_frame_mvs: false,
+            enable_warped_motion: false,
+            enable_superres: false,
+            enable_cdef: false,
+            enable_restoration: false,
+            use_128x128_superblock: false,
+            color_config: ColorConfig {
+                color_primaries: ColorPrimaries::Unspecified,
+                transfer_characteristics: TransferCharacteristics::Unspecified,
+                matrix_coefficients: MatrixCoefficients::Unspecified,
+                color_range: ColorRange::Full,
+                num_planes: 1,
+                separate_uv_delta_q: false,
+                subsampling: (0, 0),
+            },
+        }
+    }
+
+    /// Minimal bit-level builder duplicated from the `sequence` test module
+    /// (which is private). Only the subset needed for building a reduced
+    /// sequence header bitstream.
+    #[derive(Default)]
+    struct BitBuilder {
+        bits: Vec<bool>,
+    }
+
+    impl BitBuilder {
+        fn push_bool(&mut self, bit: bool) {
+            self.bits.push(bit);
+        }
+
+        fn push_bits(&mut self, value: u64, width: usize) {
+            for shift in (0..width).rev() {
+                self.bits.push(((value >> shift) & 1) == 1);
+            }
+        }
+
+        fn into_bytes(self) -> Vec<u8> {
+            let mut bytes = vec![0u8; self.bits.len().div_ceil(8)];
+            for (idx, bit) in self.bits.into_iter().enumerate() {
+                if bit {
+                    bytes[idx / 8] |= 1u8 << (7 - (idx % 8));
+                }
+            }
+            bytes
+        }
+    }
+
+    /// Build a minimal valid reduced-still-picture sequence header payload.
+    ///
+    /// Profile 0, 8-bit, no grain. The parser will consume this via `bits()`
+    /// so it must be byte-aligned (the builder zero-pads).
+    fn build_reduced_sequence_header_bytes() -> Vec<u8> {
+        let mut b = BitBuilder::default();
+        b.push_bits(0, 3); // seq_profile = 0
+        b.push_bool(true); // still_picture
+        b.push_bool(true); // reduced_still_picture_header
+        b.push_bits(4, 5); // seq_level_idx = 4
+        b.push_bits(0, 4); // frame_width_bits_minus_1 = 0
+        b.push_bits(0, 4); // frame_height_bits_minus_1 = 0
+        b.push_bits(0, 1); // max_frame_width_minus_1 = 0
+        b.push_bits(0, 1); // max_frame_height_minus_1 = 0
+        // Reduced suffix: use_128x128_superblock, enable_filter_intra,
+        // enable_intra_edge_filter, enable_superres, enable_cdef,
+        // enable_restoration
+        b.push_bool(false); // use_128x128_superblock
+        b.push_bool(false); // enable_filter_intra
+        b.push_bool(false); // enable_intra_edge_filter
+        b.push_bool(false); // enable_superres
+        b.push_bool(false); // enable_cdef
+        b.push_bool(false); // enable_restoration
+        // color_config for profile 0, 8-bit
+        b.push_bool(false); // high_bitdepth
+        b.push_bool(false); // monochrome
+        b.push_bool(false); // color_description_present_flag
+        b.push_bool(false); // color_range = limited
+        b.push_bits(0, 2); // chroma_sample_position
+        b.push_bool(false); // separate_uv_delta_q
+        // film_grain_params_present
+        b.push_bool(false);
+        b.into_bytes()
+    }
+
+    // ===== Group 1: adjust_obu_size =====
+
+    #[test]
+    fn adjust_obu_size_same_encoding_length() {
+        let mut parser = make_parser::<true>(0, false, None, Vec::new());
+        // [0xAA] [LEB(10) = 0x0A] [0xBB]
+        parser.packet_out = vec![0xAA, 0x0A, 0xBB];
+        let original_len = parser.packet_out.len();
+        parser.adjust_obu_size(1, 1, 12);
+        assert_eq!(parser.packet_out.len(), original_len);
+        assert_eq!(parser.packet_out[0], 0xAA);
+        assert_eq!(parser.packet_out[1], 12); // 12 < 128, single-byte LEB
+        assert_eq!(parser.packet_out[2], 0xBB);
+    }
+
+    #[test]
+    fn adjust_obu_size_encoding_shrinks() {
+        let mut parser = make_parser::<true>(0, false, None, Vec::new());
+        // LEB128(128) = [0x80, 0x01] — 2-byte encoding
+        let leb_128 = leb128_write(128);
+        assert_eq!(leb_128.len(), 2);
+        parser.packet_out = vec![0xAA];
+        parser.packet_out.extend_from_slice(&leb_128);
+        parser.packet_out.push(0xBB);
+        let original_len = parser.packet_out.len();
+
+        parser.adjust_obu_size(1, 2, 5);
+
+        // 5 encodes as 1 byte, so buffer shrinks by 1
+        assert_eq!(parser.packet_out.len(), original_len - 1);
+        assert_eq!(parser.packet_out[0], 0xAA);
+        assert_eq!(parser.packet_out[1], 5);
+        assert_eq!(parser.packet_out[2], 0xBB);
+    }
+
+    #[test]
+    fn adjust_obu_size_encoding_grows() {
+        let mut parser = make_parser::<true>(0, false, None, Vec::new());
+        // Start with 1-byte LEB for value 100
+        parser.packet_out = vec![0xAA, 100, 0xBB];
+        let original_len = parser.packet_out.len();
+
+        parser.adjust_obu_size(1, 1, 200);
+
+        let leb_200 = leb128_write(200);
+        assert_eq!(leb_200.len(), 2);
+        // Buffer grows by 1
+        assert_eq!(parser.packet_out.len(), original_len + 1);
+        assert_eq!(parser.packet_out[0], 0xAA);
+        assert_eq!(&parser.packet_out[1..3], leb_200.as_slice());
+        assert_eq!(parser.packet_out[3], 0xBB);
+    }
+
+    #[test]
+    fn adjust_obu_size_at_start_of_buffer() {
+        let mut parser = make_parser::<true>(0, false, None, Vec::new());
+        parser.packet_out = vec![42, 0xCC, 0xDD];
+
+        parser.adjust_obu_size(0, 1, 99);
+
+        assert_eq!(parser.packet_out[0], 99);
+        assert_eq!(parser.packet_out[1], 0xCC);
+        assert_eq!(parser.packet_out[2], 0xDD);
+    }
+
+    #[test]
+    fn adjust_obu_size_preserves_surrounding_bytes() {
+        let mut parser = make_parser::<true>(0, false, None, Vec::new());
+        parser.packet_out = vec![0x11, 0x22, 50, 0x33, 0x44];
+
+        parser.adjust_obu_size(2, 1, 60);
+
+        assert_eq!(parser.packet_out[0], 0x11);
+        assert_eq!(parser.packet_out[1], 0x22);
+        assert_eq!(parser.packet_out[2], 60);
+        assert_eq!(parser.packet_out[3], 0x33);
+        assert_eq!(parser.packet_out[4], 0x44);
+    }
+
+    #[test]
+    fn adjust_obu_size_zero_value() {
+        let mut parser = make_parser::<true>(0, false, None, Vec::new());
+        parser.packet_out = vec![10, 0xFF];
+
+        parser.adjust_obu_size(0, 1, 0);
+
+        assert_eq!(parser.packet_out[0], 0x00);
+        assert_eq!(parser.packet_out[1], 0xFF);
+    }
+
+    #[test]
+    fn adjust_obu_size_large_value() {
+        let mut parser = make_parser::<true>(0, false, None, Vec::new());
+        // Start with 1-byte LEB
+        parser.packet_out = vec![0xAA, 1, 0xBB];
+
+        parser.adjust_obu_size(1, 1, 16384);
+
+        let leb_16384 = leb128_write(16384);
+        assert_eq!(leb_16384.len(), 3);
+        assert_eq!(parser.packet_out.len(), 2 + 3); // 0xAA + 3-byte LEB + 0xBB
+        assert_eq!(parser.packet_out[0], 0xAA);
+        assert_eq!(&parser.packet_out[1..4], leb_16384.as_slice());
+        assert_eq!(parser.packet_out[4], 0xBB);
+    }
+
+    // ===== Group 2: parse_obu — TemporalDelimiter dispatch =====
+
+    #[test]
+    fn parse_obu_temporal_delimiter_with_size_field_returns_none() {
+        let obu = build_obu_bytes(ObuType::TemporalDelimiter, None, true, &[]);
+        let mut parser = make_parser::<false>(0, false, None, Vec::new());
+
+        let (remaining, result) = parser.parse_obu(&obu, 0).expect("should parse TD");
+
+        assert!(remaining.is_empty());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_obu_temporal_delimiter_clears_seen_frame_header() {
+        let obu = build_obu_bytes(ObuType::TemporalDelimiter, None, true, &[]);
+        let mut parser = make_parser::<false>(0, true, None, Vec::new());
+
+        let _ = parser.parse_obu(&obu, 0).expect("should parse TD");
+
+        assert!(!parser.seen_frame_header);
+    }
+
+    #[test]
+    fn parse_obu_temporal_delimiter_advances_input_by_obu_size() {
+        let trailing = [0xDE, 0xAD];
+        let mut obu = build_obu_bytes(ObuType::TemporalDelimiter, None, true, &[0x00, 0x01]);
+        obu.extend_from_slice(&trailing);
+        let mut parser = make_parser::<false>(0, false, None, Vec::new());
+
+        let (remaining, _) = parser.parse_obu(&obu, 0).expect("should parse TD");
+
+        assert_eq!(remaining, &trailing);
+    }
+
+    #[test]
+    fn parse_obu_temporal_delimiter_write_copies_full_obu() {
+        let payload = [0x42, 0x43];
+        let obu = build_obu_bytes(ObuType::TemporalDelimiter, None, true, &payload);
+        let mut parser = make_parser::<true>(0, false, None, Vec::new());
+
+        let _ = parser.parse_obu(&obu, 0).expect("should parse TD");
+
+        // packet_out should contain the header + LEB size + payload
+        assert_eq!(parser.packet_out, obu);
+    }
+
+    #[test]
+    fn parse_obu_temporal_delimiter_read_does_not_write_packet_out() {
+        let obu = build_obu_bytes(ObuType::TemporalDelimiter, None, true, &[0x42]);
+        let mut parser = make_parser::<false>(0, false, None, Vec::new());
+
+        let _ = parser.parse_obu(&obu, 0).expect("should parse TD");
+
+        assert!(parser.packet_out.is_empty());
+    }
+
+    // ===== Group 3: parse_obu — Unknown/catch-all types =====
+
+    #[test]
+    fn parse_obu_padding_type_returns_none() {
+        let obu = build_obu_bytes(ObuType::Padding, None, true, &[0xFF; 4]);
+        let mut parser = make_parser::<false>(0, false, None, Vec::new());
+
+        let (_, result) = parser.parse_obu(&obu, 0).expect("should parse Padding");
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_obu_metadata_type_returns_none() {
+        let obu = build_obu_bytes(ObuType::Metadata, None, true, &[0x01, 0x02]);
+        let mut parser = make_parser::<false>(0, false, None, Vec::new());
+
+        let (_, result) = parser.parse_obu(&obu, 0).expect("should parse Metadata");
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_obu_unknown_type_write_copies_full_obu() {
+        let payload = [0xAA, 0xBB, 0xCC];
+        let obu = build_obu_bytes(ObuType::Reserved0, None, true, &payload);
+        let mut parser = make_parser::<true>(0, false, None, Vec::new());
+
+        let _ = parser.parse_obu(&obu, 0).expect("should parse Reserved0");
+
+        assert_eq!(parser.packet_out, obu);
+    }
+
+    #[test]
+    fn parse_obu_unknown_type_advances_input_correctly() {
+        let trailing = [0xFE, 0xED];
+        let mut obu = build_obu_bytes(ObuType::Padding, None, true, &[0x01, 0x02, 0x03]);
+        obu.extend_from_slice(&trailing);
+        let mut parser = make_parser::<false>(0, false, None, Vec::new());
+
+        let (remaining, _) = parser.parse_obu(&obu, 0).expect("should parse Padding");
+
+        assert_eq!(remaining, &trailing);
+    }
+
+    // ===== Group 4: parse_obu — Size field handling =====
+
+    #[test]
+    fn parse_obu_without_size_field_uses_parser_size() {
+        // has_size_field=false, no extension → obu_size = self.size - 1
+        let header = make_obu_header_byte(0, ObuType::Padding, false, false, 0);
+        let payload = [0xAA, 0xBB];
+        let mut input = vec![header];
+        input.extend_from_slice(&payload);
+        // parser.size = 1 (header byte) + 2 (payload) = 3
+        // obu_size = self.size - 1 - 0(no ext) = 2
+        let mut parser = make_parser::<false>(3, false, None, Vec::new());
+
+        let (remaining, result) = parser.parse_obu(&input, 0).expect("should parse");
+
+        assert!(remaining.is_empty());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_obu_without_size_field_with_extension_uses_parser_size() {
+        // has_size_field=false, with extension → obu_size = self.size - 2
+        let ext = ObuExtension {
+            temporal_id: 0,
+            spatial_id: 0,
+        };
+        let header = make_obu_header_byte(0, ObuType::Padding, true, false, 0);
+        let ext_byte = make_obu_extension_byte(ext.temporal_id, ext.spatial_id, 0);
+        let payload = [0xCC, 0xDD, 0xEE];
+        let mut input = vec![header, ext_byte];
+        input.extend_from_slice(&payload);
+        // parser.size = 2 (header+ext) + 3 (payload) = 5
+        // obu_size = self.size - 1 - 1(ext) = 3
+        let mut parser = make_parser::<false>(5, false, None, Vec::new());
+
+        let (remaining, result) = parser.parse_obu(&input, 0).expect("should parse");
+
+        assert!(remaining.is_empty());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_obu_sets_self_size_to_obu_size() {
+        let payload = [0x01; 10];
+        let obu = build_obu_bytes(ObuType::Padding, None, true, &payload);
+        let mut parser = make_parser::<false>(999, false, None, Vec::new());
+
+        let _ = parser.parse_obu(&obu, 0).expect("should parse");
+
+        assert_eq!(parser.size, payload.len());
+    }
+
+    // ===== Group 5: parse_obu — Layer filtering =====
+
+    #[test]
+    fn parse_obu_layer_filter_skips_when_not_in_temporal_layer() {
+        // temporal_id=1 requires bit 1 of op_pt_idc to be set
+        // op_pt_idc=0b01 has bit 0 set but not bit 1
+        let ext = ObuExtension {
+            temporal_id: 1,
+            spatial_id: 0,
+        };
+        let payload = [0xAA, 0xBB];
+        let obu = build_obu_bytes(ObuType::Padding, Some(ext), true, &payload);
+        let seq = sequence_header_with_idc(0b01);
+        let mut parser = make_parser::<false>(0, false, Some(seq), Vec::new());
+
+        let (remaining, result) = parser.parse_obu(&obu, 0).expect("should parse");
+
+        assert!(remaining.is_empty());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_obu_layer_filter_skips_when_not_in_spatial_layer() {
+        // spatial_id=1 requires bit 9 (8+1) of op_pt_idc
+        // op_pt_idc=0b01 has only bit 0 set
+        let ext = ObuExtension {
+            temporal_id: 0,
+            spatial_id: 1,
+        };
+        let payload = [0xCC];
+        let obu = build_obu_bytes(ObuType::Padding, Some(ext), true, &payload);
+        let seq = sequence_header_with_idc(0b01);
+        let mut parser = make_parser::<false>(0, false, Some(seq), Vec::new());
+
+        let (remaining, result) = parser.parse_obu(&obu, 0).expect("should parse");
+
+        assert!(remaining.is_empty());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_obu_layer_filter_passes_when_in_both_layers() {
+        // temporal_id=0 → bit 0, spatial_id=0 → bit 8
+        // op_pt_idc = 0b1_0000_0001 = 0x101
+        let ext = ObuExtension {
+            temporal_id: 0,
+            spatial_id: 0,
+        };
+        let payload = [0xDD; 3];
+        let obu = build_obu_bytes(ObuType::Padding, Some(ext), true, &payload);
+        let seq = sequence_header_with_idc(0x101);
+        let mut parser = make_parser::<false>(0, false, Some(seq), Vec::new());
+
+        let (remaining, result) = parser.parse_obu(&obu, 0).expect("should parse");
+
+        assert!(remaining.is_empty());
+        // Padding reaches the catch-all arm and returns None
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_obu_layer_filter_inactive_when_op_pt_idc_zero() {
+        let ext = ObuExtension {
+            temporal_id: 3,
+            spatial_id: 2,
+        };
+        let payload = [0xEE];
+        let obu = build_obu_bytes(ObuType::Padding, Some(ext), true, &payload);
+        // idc=0 disables filtering regardless of temporal/spatial ids
+        let seq = sequence_header_with_idc(0);
+        let mut parser = make_parser::<false>(0, false, Some(seq), Vec::new());
+
+        let (remaining, result) = parser.parse_obu(&obu, 0).expect("should parse");
+
+        assert!(remaining.is_empty());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_obu_layer_filter_inactive_when_no_extension() {
+        // No extension byte → no filtering even with active idc
+        let payload = [0xFF; 2];
+        let obu = build_obu_bytes(ObuType::Padding, None, true, &payload);
+        let seq = sequence_header_with_idc(0x01);
+        let mut parser = make_parser::<false>(0, false, Some(seq), Vec::new());
+
+        let (remaining, result) = parser.parse_obu(&obu, 0).expect("should parse");
+
+        assert!(remaining.is_empty());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_obu_layer_filter_inactive_when_no_sequence_header() {
+        let ext = ObuExtension {
+            temporal_id: 1,
+            spatial_id: 1,
+        };
+        let payload = [0x11];
+        let obu = build_obu_bytes(ObuType::Padding, Some(ext), true, &payload);
+        // No sequence header → filtering guard short-circuits
+        let mut parser = make_parser::<false>(0, false, None, Vec::new());
+
+        let (remaining, result) = parser.parse_obu(&obu, 0).expect("should parse");
+
+        assert!(remaining.is_empty());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_obu_layer_filter_inactive_for_temporal_delimiter() {
+        // TemporalDelimiter is exempt from layer filtering
+        let ext = ObuExtension {
+            temporal_id: 1,
+            spatial_id: 1,
+        };
+        let payload = [0x00];
+        let obu = build_obu_bytes(ObuType::TemporalDelimiter, Some(ext), true, &payload);
+        // idc that would filter out temporal_id=1, spatial_id=1
+        let seq = sequence_header_with_idc(0b01);
+        let mut parser = make_parser::<false>(0, true, Some(seq), Vec::new());
+
+        let (remaining, result) = parser.parse_obu(&obu, 0).expect("should parse TD");
+
+        assert!(remaining.is_empty());
+        assert!(result.is_none());
+        // TD also clears seen_frame_header
+        assert!(!parser.seen_frame_header);
+    }
+
+    #[test]
+    fn parse_obu_layer_filter_skip_write_copies_payload() {
+        let ext = ObuExtension {
+            temporal_id: 1,
+            spatial_id: 0,
+        };
+        let payload = [0xAA, 0xBB];
+        let obu = build_obu_bytes(ObuType::Padding, Some(ext), true, &payload);
+        let seq = sequence_header_with_idc(0b01); // bit 1 not set → skip
+        let mut parser = make_parser::<true>(0, false, Some(seq), Vec::new());
+
+        let _ = parser.parse_obu(&obu, 0).expect("should parse");
+
+        // WRITE mode copies the full OBU (header + ext + size + payload)
+        assert_eq!(parser.packet_out, obu);
+    }
+
+    #[test]
+    fn parse_obu_layer_filter_skip_advances_input() {
+        let ext = ObuExtension {
+            temporal_id: 1,
+            spatial_id: 0,
+        };
+        let payload = [0xAA];
+        let trailing = [0xFE, 0xED];
+        let mut obu = build_obu_bytes(ObuType::Padding, Some(ext), true, &payload);
+        obu.extend_from_slice(&trailing);
+        let seq = sequence_header_with_idc(0b01);
+        let mut parser = make_parser::<false>(0, false, Some(seq), Vec::new());
+
+        let (remaining, _) = parser.parse_obu(&obu, 0).expect("should parse");
+
+        assert_eq!(remaining, &trailing);
+    }
+
+    // ===== Group 6: parse_obu — Write path header copying =====
+
+    #[test]
+    fn parse_obu_write_copies_one_byte_header() {
+        let payload = [0x42; 2];
+        let obu = build_obu_bytes(ObuType::Padding, None, true, &payload);
+        let mut parser = make_parser::<true>(0, false, None, Vec::new());
+
+        let _ = parser.parse_obu(&obu, 0).expect("should parse");
+
+        // First byte is the header, then LEB size, then payload
+        assert_eq!(parser.packet_out[0], obu[0]);
+        assert_eq!(parser.packet_out, obu);
+    }
+
+    #[test]
+    fn parse_obu_write_copies_two_byte_header_with_extension() {
+        let ext = ObuExtension {
+            temporal_id: 0,
+            spatial_id: 0,
+        };
+        let payload = [0x55];
+        let obu = build_obu_bytes(ObuType::Padding, Some(ext), true, &payload);
+        // idc=0 so no filtering
+        let seq = sequence_header_with_idc(0);
+        let mut parser = make_parser::<true>(0, false, Some(seq), Vec::new());
+
+        let _ = parser.parse_obu(&obu, 0).expect("should parse");
+
+        // First 2 bytes are header + extension
+        assert_eq!(&parser.packet_out[..2], &obu[..2]);
+        assert_eq!(parser.packet_out, obu);
+    }
+
+    // ===== Group 7: parse_obu — SequenceHeader dispatch =====
+
+    #[test]
+    fn parse_obu_sequence_header_returns_obu_sequence_header() {
+        let seq_payload = build_reduced_sequence_header_bytes();
+        let obu = build_obu_bytes(ObuType::SequenceHeader, None, true, &seq_payload);
+        let mut parser = make_parser::<false>(0, false, None, Vec::new());
+
+        let (_, result) = parser
+            .parse_obu(&obu, 0)
+            .expect("should parse seq header OBU");
+
+        assert!(
+            matches!(result, Some(Obu::SequenceHeader(_))),
+            "expected Obu::SequenceHeader variant"
+        );
+    }
+
+    #[test]
+    fn parse_obu_sequence_header_skips_trailing_alignment_bytes() {
+        let seq_payload = build_reduced_sequence_header_bytes();
+        // Add extra trailing bytes within the OBU size to simulate alignment padding
+        let mut padded_payload = seq_payload;
+        padded_payload.extend_from_slice(&[0x00; 4]);
+        let trailing = [0xBE, 0xEF];
+        let mut obu = build_obu_bytes(ObuType::SequenceHeader, None, true, &padded_payload);
+        obu.extend_from_slice(&trailing);
+        let mut parser = make_parser::<false>(0, false, None, Vec::new());
+
+        let (remaining, result) = parser.parse_obu(&obu, 0).expect("should parse");
+
+        assert!(matches!(result, Some(Obu::SequenceHeader(_))));
+        assert_eq!(remaining, &trailing);
+    }
+
+    #[test]
+    fn parse_obu_sequence_header_write_populates_packet_out() {
+        let seq_payload = build_reduced_sequence_header_bytes();
+        let obu = build_obu_bytes(ObuType::SequenceHeader, None, true, &seq_payload);
+        let mut parser = make_parser::<true>(0, false, None, Vec::new());
+
+        let _ = parser
+            .parse_obu(&obu, 0)
+            .expect("should parse seq header OBU");
+
+        assert!(!parser.packet_out.is_empty());
+    }
+
+    // ===== Group 8: parse_obu — TileGroup panic + error conditions =====
+
+    #[test]
+    #[should_panic(expected = "This should only be called from within a frame OBU")]
+    fn parse_obu_tile_group_panics() {
+        let obu = build_obu_bytes(ObuType::TileGroup, None, true, &[0x00]);
+        let mut parser = make_parser::<false>(0, false, None, Vec::new());
+
+        let _ = parser.parse_obu(&obu, 0);
+    }
+
+    #[test]
+    fn parse_obu_rejects_empty_input() {
+        let mut parser = make_parser::<false>(0, false, None, Vec::new());
+
+        assert!(parser.parse_obu(&[], 0).is_err());
+    }
+
+    #[test]
+    fn parse_obu_rejects_truncated_leb_size() {
+        // Header says has_size_field=true, but no LEB128 bytes follow
+        let header = make_obu_header_byte(0, ObuType::Padding, false, true, 0);
+        let mut parser = make_parser::<false>(0, false, None, Vec::new());
+
+        assert!(parser.parse_obu(&[header], 0).is_err());
     }
 }
