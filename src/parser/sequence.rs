@@ -176,7 +176,13 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 timing_info,
             ) = if reduced_still_picture_header {
                 let (input, _seq_level_idx): (_, u8) = bit_parsers::take(5usize)(input)?;
-                (input, None, 0, ArrayVec::new(), ArrayVec::new(), None)
+                // AV1 spec: reduced_still_picture_header implies a single
+                // operating point with idc=0 and no decoder model.
+                let mut op_idc = ArrayVec::new();
+                op_idc.push(0);
+                let mut dm_present = ArrayVec::new();
+                dm_present.push(false);
+                (input, None, 0, dm_present, op_idc, None)
             } else {
                 let (input, timing_info_present_flag) = take_bool_bit(input)?;
                 let (input, decoder_model_info, timing_info) = if timing_info_present_flag {
@@ -588,9 +594,11 @@ const fn choose_operating_point() -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        ColorPrimaries, ColorRange, MatrixCoefficients, TransferCharacteristics, color_config,
-        decoder_model_info, operating_parameters_info, timing_info,
+        BitstreamParser, ColorPrimaries, ColorRange, MatrixCoefficients, SELECT_INTEGER_MV,
+        SELECT_SCREEN_CONTENT_TOOLS, TransferCharacteristics, color_config, decoder_model_info,
+        operating_parameters_info, timing_info,
     };
+    use crate::GrainTableSegment;
 
     #[derive(Default)]
     struct BitBuilder {
@@ -927,5 +935,509 @@ mod tests {
 
         let data = bits.into_bytes();
         _ = color_config((&data, 0), 0);
+    }
+
+    // --- parse_sequence_header helpers ---
+
+    fn make_parser<const WRITE: bool>(
+        size: usize,
+        incoming_grain_header: Option<Vec<GrainTableSegment>>,
+    ) -> BitstreamParser<WRITE> {
+        BitstreamParser {
+            reader: None,
+            writer: None,
+            packet_out: Vec::new(),
+            incoming_grain_header,
+            parsed: false,
+            size,
+            seen_frame_header: false,
+            sequence_header: None,
+            previous_frame_header: None,
+            ref_frame_idx: Default::default(),
+            ref_order_hint: Default::default(),
+            big_ref_order_hint: Default::default(),
+            big_ref_valid: Default::default(),
+            big_order_hints: Default::default(),
+            grain_headers: Vec::new(),
+        }
+    }
+
+    /// Appends a minimal profile-0 8-bit color_config (7 bits).
+    fn push_color_config_profile0_8bit(bits: &mut BitBuilder) {
+        bits.push_bool(false); // high_bitdepth → 8-bit
+        bits.push_bool(false); // monochrome (profile 0 reads this bit)
+        bits.push_bool(false); // color_description_present_flag
+        bits.push_bool(false); // color_range = limited
+        bits.push_bits(0, 2); // chroma_sample_position (profile 0: ss_x=1, ss_y=1)
+        bits.push_bool(false); // separate_uv_delta_q
+    }
+
+    /// Appends the reduced-path tail: superblock flags through film_grain.
+    fn push_reduced_suffix(bits: &mut BitBuilder, film_grain: bool) {
+        bits.push_bool(false); // use_128x128_superblock
+        bits.push_bool(false); // enable_filter_intra
+        bits.push_bool(false); // enable_intra_edge_filter
+        // Reduced: force_screen_content_tools=SELECT, force_integer_mv=SELECT,
+        // order_hint_bits=0, enable_ref_frame_mvs=false, enable_warped_motion=false
+        // (no bits consumed for capability fields)
+        bits.push_bool(false); // enable_superres
+        bits.push_bool(false); // enable_cdef
+        bits.push_bool(false); // enable_restoration
+        push_color_config_profile0_8bit(bits);
+        bits.push_bool(film_grain);
+    }
+
+    /// Appends the non-reduced tail from use_128x128_superblock through
+    /// film_grain with the simplest branch choices: no order hint,
+    /// choose_screen_content_tools=true, choose_integer_mv=true.
+    fn push_minimal_non_reduced_suffix(bits: &mut BitBuilder, film_grain: bool) {
+        bits.push_bool(false); // use_128x128_superblock
+        bits.push_bool(false); // enable_filter_intra
+        bits.push_bool(false); // enable_intra_edge_filter
+        bits.push_bool(false); // enable_interintra_compound
+        bits.push_bool(false); // enable_masked_compound
+        bits.push_bool(false); // enable_warped_motion
+        bits.push_bool(false); // enable_dual_filter
+        bits.push_bool(false); // enable_order_hint
+        bits.push_bool(true); // seq_choose_screen_content_tools → SELECT
+        bits.push_bool(true); // seq_choose_integer_mv → SELECT
+        bits.push_bool(false); // enable_superres
+        bits.push_bool(false); // enable_cdef
+        bits.push_bool(false); // enable_restoration
+        push_color_config_profile0_8bit(bits);
+        bits.push_bool(film_grain);
+    }
+
+    // --- parse_sequence_header read-mode tests ---
+
+    #[test]
+    fn reduced_still_picture_header_sets_defaults() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(0, 3); // seq_profile = 0
+        bits.push_bool(true); // still_picture
+        bits.push_bool(true); // reduced_still_picture_header
+        bits.push_bits(4, 5); // seq_level_idx = 4
+        bits.push_bits(0, 4); // frame_width_bits_minus_1 = 0
+        bits.push_bits(0, 4); // frame_height_bits_minus_1 = 0
+        bits.push_bits(0, 1); // max_frame_width_minus_1 = 0
+        bits.push_bits(0, 1); // max_frame_height_minus_1 = 0
+        push_reduced_suffix(&mut bits, false);
+
+        let data = bits.into_bytes();
+        let mut parser = make_parser::<false>(0, None);
+        let (_, seq) = parser
+            .parse_sequence_header(&data)
+            .expect("reduced still picture header should parse");
+
+        assert!(seq.reduced_still_picture_header);
+        assert!(!seq.frame_id_numbers_present);
+        assert_eq!(seq.delta_frame_id_len_minus_2, 0);
+        assert_eq!(seq.additional_frame_id_len_minus_1, 0);
+        assert_eq!(seq.force_screen_content_tools, SELECT_SCREEN_CONTENT_TOOLS);
+        assert_eq!(seq.force_integer_mv, SELECT_INTEGER_MV);
+        assert_eq!(seq.order_hint_bits, 0);
+        assert!(!seq.enable_order_hint());
+        assert!(!seq.enable_ref_frame_mvs);
+        assert!(!seq.enable_warped_motion);
+        assert!(!seq.enable_superres);
+        assert!(!seq.enable_cdef);
+        assert!(!seq.enable_restoration);
+        assert!(!seq.film_grain_params_present);
+        assert!(!seq.new_film_grain_state);
+        assert!(seq.timing_info.is_none());
+        assert!(seq.decoder_model_info.is_none());
+        assert_eq!(seq.operating_points_cnt_minus_1, 0);
+        assert_eq!(seq.frame_width_bits_minus_1, 0);
+        assert_eq!(seq.frame_height_bits_minus_1, 0);
+        assert_eq!(seq.max_frame_width_minus_1, 0);
+        assert_eq!(seq.max_frame_height_minus_1, 0);
+    }
+
+    #[test]
+    fn non_reduced_no_timing_info_single_op() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(0, 3); // seq_profile = 0
+        bits.push_bool(false); // still_picture
+        bits.push_bool(false); // reduced_still_picture_header
+        bits.push_bool(false); // timing_info_present_flag
+        bits.push_bool(false); // initial_display_delay_present_flag
+        bits.push_bits(0, 5); // operating_points_cnt_minus_1 = 0
+        bits.push_bits(0, 12); // operating_point_idc[0] = 0
+        bits.push_bits(4, 5); // seq_level_idx = 4 (≤7, no tier)
+        bits.push_bits(3, 4); // frame_width_bits_minus_1 = 3
+        bits.push_bits(2, 4); // frame_height_bits_minus_1 = 2
+        bits.push_bits(10, 4); // max_frame_width_minus_1 = 10 (4 bits)
+        bits.push_bits(5, 3); // max_frame_height_minus_1 = 5 (3 bits)
+        bits.push_bool(false); // frame_id_numbers_present
+        push_minimal_non_reduced_suffix(&mut bits, false);
+
+        let data = bits.into_bytes();
+        let mut parser = make_parser::<false>(0, None);
+        let (_, seq) = parser
+            .parse_sequence_header(&data)
+            .expect("non-reduced single op should parse");
+
+        assert!(!seq.reduced_still_picture_header);
+        assert!(seq.timing_info.is_none());
+        assert!(seq.decoder_model_info.is_none());
+        assert_eq!(seq.operating_points_cnt_minus_1, 0);
+        assert_eq!(seq.operating_point_idc.as_slice(), &[0]);
+        assert!(!seq.frame_id_numbers_present);
+        assert_eq!(seq.force_screen_content_tools, SELECT_SCREEN_CONTENT_TOOLS);
+        assert_eq!(seq.force_integer_mv, SELECT_INTEGER_MV);
+        assert_eq!(seq.order_hint_bits, 0);
+        assert!(!seq.enable_ref_frame_mvs);
+        assert!(!seq.enable_warped_motion);
+        assert_eq!(seq.frame_width_bits_minus_1, 3);
+        assert_eq!(seq.frame_height_bits_minus_1, 2);
+        assert_eq!(seq.max_frame_width_minus_1, 10);
+        assert_eq!(seq.max_frame_height_minus_1, 5);
+        assert!(!seq.film_grain_params_present);
+    }
+
+    #[test]
+    fn non_reduced_with_timing_info_no_decoder_model() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(0, 3); // seq_profile = 0
+        bits.push_bool(false); // still_picture
+        bits.push_bool(false); // reduced
+        bits.push_bool(true); // timing_info_present_flag
+        // timing_info:
+        bits.push_bits(1000, 32); // num_units_in_display_tick
+        bits.push_bits(24000, 32); // time_scale
+        bits.push_bool(false); // equal_picture_interval
+        bits.push_bool(false); // decoder_model_present_flag
+        bits.push_bool(false); // initial_display_delay_present_flag
+        bits.push_bits(0, 5); // operating_points_cnt_minus_1 = 0
+        bits.push_bits(0, 12); // operating_point_idc[0]
+        bits.push_bits(4, 5); // seq_level_idx = 4
+        bits.push_bits(0, 4); // frame_width_bits_minus_1 = 0
+        bits.push_bits(0, 4); // frame_height_bits_minus_1 = 0
+        bits.push_bits(0, 1); // max_frame_width_minus_1 = 0
+        bits.push_bits(0, 1); // max_frame_height_minus_1 = 0
+        bits.push_bool(false); // frame_id_numbers_present
+        push_minimal_non_reduced_suffix(&mut bits, false);
+
+        let data = bits.into_bytes();
+        let mut parser = make_parser::<false>(0, None);
+        let (_, seq) = parser
+            .parse_sequence_header(&data)
+            .expect("timing info without decoder model should parse");
+
+        let ti = seq.timing_info.expect("timing_info should be Some");
+        assert!(!ti.equal_picture_interval);
+        assert!(seq.decoder_model_info.is_none());
+    }
+
+    #[test]
+    fn non_reduced_with_decoder_model_and_multi_op() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(0, 3); // seq_profile = 0
+        bits.push_bool(false); // still_picture
+        bits.push_bool(false); // reduced
+        bits.push_bool(true); // timing_info_present_flag
+        // timing_info:
+        bits.push_bits(0, 32); // num_units_in_display_tick
+        bits.push_bits(0, 32); // time_scale
+        bits.push_bool(false); // equal_picture_interval
+        bits.push_bool(true); // decoder_model_present_flag
+        // decoder_model_info:
+        bits.push_bits(0, 5); // buffer_delay_length_minus_1 = 0
+        bits.push_bits(0, 32); // num_units_in_decoding_tick
+        bits.push_bits(0, 5); // buffer_removal_time_length_minus_1 = 0
+        bits.push_bits(0, 5); // frame_presentation_time_length_minus_1 = 0
+        bits.push_bool(true); // initial_display_delay_present_flag
+        bits.push_bits(1, 5); // operating_points_cnt_minus_1 = 1
+        // --- op 0: seq_level_idx=8 (>7), tier read, decoder model present
+        bits.push_bits(0, 12); // operating_point_idc[0] = 0
+        bits.push_bits(8, 5); // seq_level_idx = 8 (>7)
+        bits.push_bool(false); // seq_tier
+        bits.push_bool(true); // decoder_model_present_for_op[0]
+        // operating_parameters_info (buffer_delay_length=1):
+        bits.push_bits(0, 1); // decoder_buffer_delay
+        bits.push_bits(0, 1); // encoder_buffer_delay
+        bits.push_bool(false); // low_delay_mode_flag
+        bits.push_bool(true); // initial_display_delay_present_for_op[0]
+        bits.push_bits(5, 4); // initial_display_delay_minus_1 = 5
+        // --- op 1: seq_level_idx=4 (≤7), no tier, no decoder model
+        bits.push_bits(0x100, 12); // operating_point_idc[1] = 0x100
+        bits.push_bits(4, 5); // seq_level_idx = 4 (≤7, no tier)
+        bits.push_bool(false); // decoder_model_present_for_op[1]
+        bits.push_bool(false); // initial_display_delay_present_for_op[1]
+        // --- dimensions
+        bits.push_bits(0, 4); // frame_width_bits_minus_1 = 0
+        bits.push_bits(0, 4); // frame_height_bits_minus_1 = 0
+        bits.push_bits(0, 1); // max_frame_width_minus_1
+        bits.push_bits(0, 1); // max_frame_height_minus_1
+        bits.push_bool(false); // frame_id_numbers_present
+        push_minimal_non_reduced_suffix(&mut bits, false);
+
+        let data = bits.into_bytes();
+        let mut parser = make_parser::<false>(0, None);
+        let (_, seq) = parser
+            .parse_sequence_header(&data)
+            .expect("decoder model with multi-op should parse");
+
+        let ti = seq.timing_info.expect("timing_info should be Some");
+        assert!(!ti.equal_picture_interval);
+        let dmi = seq
+            .decoder_model_info
+            .expect("decoder_model_info should be Some");
+        assert_eq!(dmi.buffer_delay_length_minus_1, 0);
+        assert_eq!(dmi.buffer_removal_time_length_minus_1, 0);
+        assert_eq!(dmi.frame_presentation_time_length_minus_1, 0);
+        assert_eq!(seq.operating_points_cnt_minus_1, 1);
+        assert_eq!(seq.operating_point_idc.as_slice(), &[0, 0x100]);
+        assert_eq!(seq.decoder_model_present_for_op.as_slice(), &[true, false]);
+    }
+
+    #[test]
+    fn frame_id_numbers_present_parses_lengths() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(0, 3); // seq_profile = 0
+        bits.push_bool(false); // still_picture
+        bits.push_bool(false); // reduced
+        bits.push_bool(false); // timing_info_present
+        bits.push_bool(false); // initial_display_delay_present
+        bits.push_bits(0, 5); // operating_points_cnt_minus_1 = 0
+        bits.push_bits(0, 12); // operating_point_idc[0]
+        bits.push_bits(4, 5); // seq_level_idx = 4
+        bits.push_bits(0, 4); // frame_width_bits_minus_1 = 0
+        bits.push_bits(0, 4); // frame_height_bits_minus_1 = 0
+        bits.push_bits(0, 1); // max_frame_width_minus_1
+        bits.push_bits(0, 1); // max_frame_height_minus_1
+        bits.push_bool(true); // frame_id_numbers_present
+        bits.push_bits(5, 4); // delta_frame_id_len_minus_2 = 5
+        bits.push_bits(3, 3); // additional_frame_id_len_minus_1 = 3
+        push_minimal_non_reduced_suffix(&mut bits, false);
+
+        let data = bits.into_bytes();
+        let mut parser = make_parser::<false>(0, None);
+        let (_, seq) = parser
+            .parse_sequence_header(&data)
+            .expect("frame id numbers present should parse");
+
+        assert!(seq.frame_id_numbers_present);
+        assert_eq!(seq.delta_frame_id_len_minus_2, 5);
+        assert_eq!(seq.additional_frame_id_len_minus_1, 3);
+    }
+
+    #[test]
+    fn enable_order_hint_parses_ref_frame_mvs_and_bits() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(0, 3); // seq_profile = 0
+        bits.push_bool(false); // still_picture
+        bits.push_bool(false); // reduced
+        bits.push_bool(false); // timing_info_present
+        bits.push_bool(false); // initial_display_delay_present
+        bits.push_bits(0, 5); // operating_points_cnt_minus_1 = 0
+        bits.push_bits(0, 12); // operating_point_idc[0]
+        bits.push_bits(4, 5); // seq_level_idx = 4
+        bits.push_bits(0, 4); // frame_width_bits_minus_1 = 0
+        bits.push_bits(0, 4); // frame_height_bits_minus_1 = 0
+        bits.push_bits(0, 1); // max_frame_width_minus_1
+        bits.push_bits(0, 1); // max_frame_height_minus_1
+        bits.push_bool(false); // frame_id_numbers_present
+        bits.push_bool(false); // use_128x128_superblock
+        bits.push_bool(false); // enable_filter_intra
+        bits.push_bool(false); // enable_intra_edge_filter
+        bits.push_bool(false); // enable_interintra_compound
+        bits.push_bool(false); // enable_masked_compound
+        bits.push_bool(true); // enable_warped_motion
+        bits.push_bool(false); // enable_dual_filter
+        bits.push_bool(true); // enable_order_hint
+        bits.push_bool(false); // enable_jnt_comp
+        bits.push_bool(true); // enable_ref_frame_mvs
+        bits.push_bool(true); // seq_choose_screen_content_tools → SELECT
+        bits.push_bool(true); // seq_choose_integer_mv → SELECT
+        bits.push_bits(5, 3); // order_hint_bits_minus_1 = 5 → order_hint_bits = 6
+        bits.push_bool(false); // enable_superres
+        bits.push_bool(false); // enable_cdef
+        bits.push_bool(false); // enable_restoration
+        push_color_config_profile0_8bit(&mut bits);
+        bits.push_bool(false); // film_grain_params_present
+
+        let data = bits.into_bytes();
+        let mut parser = make_parser::<false>(0, None);
+        let (_, seq) = parser
+            .parse_sequence_header(&data)
+            .expect("order hint with ref_frame_mvs should parse");
+
+        assert!(seq.enable_order_hint());
+        assert_eq!(seq.order_hint_bits, 6);
+        assert!(seq.enable_ref_frame_mvs);
+        assert!(seq.enable_warped_motion);
+        assert_eq!(seq.force_screen_content_tools, SELECT_SCREEN_CONTENT_TOOLS);
+        assert_eq!(seq.force_integer_mv, SELECT_INTEGER_MV);
+    }
+
+    #[test]
+    fn explicit_screen_content_tools_and_integer_mv() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(0, 3); // seq_profile = 0
+        bits.push_bool(false); // still_picture
+        bits.push_bool(false); // reduced
+        bits.push_bool(false); // timing_info_present
+        bits.push_bool(false); // initial_display_delay_present
+        bits.push_bits(0, 5); // operating_points_cnt_minus_1 = 0
+        bits.push_bits(0, 12); // operating_point_idc[0]
+        bits.push_bits(4, 5); // seq_level_idx = 4
+        bits.push_bits(0, 4); // frame_width_bits_minus_1 = 0
+        bits.push_bits(0, 4); // frame_height_bits_minus_1 = 0
+        bits.push_bits(0, 1); // max_frame_width_minus_1
+        bits.push_bits(0, 1); // max_frame_height_minus_1
+        bits.push_bool(false); // frame_id_numbers_present
+        bits.push_bool(false); // use_128x128_superblock
+        bits.push_bool(false); // enable_filter_intra
+        bits.push_bool(false); // enable_intra_edge_filter
+        bits.push_bool(false); // enable_interintra_compound
+        bits.push_bool(false); // enable_masked_compound
+        bits.push_bool(false); // enable_warped_motion
+        bits.push_bool(false); // enable_dual_filter
+        bits.push_bool(false); // enable_order_hint
+        bits.push_bool(false); // seq_choose_screen_content_tools
+        bits.push_bits(1, 1); // seq_force_screen_content_tools = 1
+        bits.push_bool(false); // seq_choose_integer_mv
+        bits.push_bits(0, 1); // seq_force_integer_mv = 0
+        bits.push_bool(false); // enable_superres
+        bits.push_bool(false); // enable_cdef
+        bits.push_bool(false); // enable_restoration
+        push_color_config_profile0_8bit(&mut bits);
+        bits.push_bool(false); // film_grain_params_present
+
+        let data = bits.into_bytes();
+        let mut parser = make_parser::<false>(0, None);
+        let (_, seq) = parser
+            .parse_sequence_header(&data)
+            .expect("explicit screen content tools and integer mv should parse");
+
+        assert_eq!(seq.force_screen_content_tools, 1);
+        assert_eq!(seq.force_integer_mv, 0);
+    }
+
+    #[test]
+    fn zero_screen_content_tools_forces_select_integer_mv() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(0, 3); // seq_profile = 0
+        bits.push_bool(false); // still_picture
+        bits.push_bool(false); // reduced
+        bits.push_bool(false); // timing_info_present
+        bits.push_bool(false); // initial_display_delay_present
+        bits.push_bits(0, 5); // operating_points_cnt_minus_1 = 0
+        bits.push_bits(0, 12); // operating_point_idc[0]
+        bits.push_bits(4, 5); // seq_level_idx = 4
+        bits.push_bits(0, 4); // frame_width_bits_minus_1 = 0
+        bits.push_bits(0, 4); // frame_height_bits_minus_1 = 0
+        bits.push_bits(0, 1); // max_frame_width_minus_1
+        bits.push_bits(0, 1); // max_frame_height_minus_1
+        bits.push_bool(false); // frame_id_numbers_present
+        bits.push_bool(false); // use_128x128_superblock
+        bits.push_bool(false); // enable_filter_intra
+        bits.push_bool(false); // enable_intra_edge_filter
+        bits.push_bool(false); // enable_interintra_compound
+        bits.push_bool(false); // enable_masked_compound
+        bits.push_bool(false); // enable_warped_motion
+        bits.push_bool(false); // enable_dual_filter
+        bits.push_bool(false); // enable_order_hint
+        bits.push_bool(false); // seq_choose_screen_content_tools
+        bits.push_bits(0, 1); // seq_force_screen_content_tools = 0
+        // force=0 → force_integer_mv=SELECT without reading bits
+        bits.push_bool(false); // enable_superres
+        bits.push_bool(false); // enable_cdef
+        bits.push_bool(false); // enable_restoration
+        push_color_config_profile0_8bit(&mut bits);
+        bits.push_bool(false); // film_grain_params_present
+
+        let data = bits.into_bytes();
+        let mut parser = make_parser::<false>(0, None);
+        let (_, seq) = parser
+            .parse_sequence_header(&data)
+            .expect("zero screen content tools should force select integer mv");
+
+        assert_eq!(seq.force_screen_content_tools, 0);
+        assert_eq!(seq.force_integer_mv, SELECT_INTEGER_MV);
+    }
+
+    #[test]
+    fn film_grain_params_present_true() {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(0, 3); // seq_profile = 0
+        bits.push_bool(false); // still_picture
+        bits.push_bool(false); // reduced
+        bits.push_bool(false); // timing_info_present
+        bits.push_bool(false); // initial_display_delay_present
+        bits.push_bits(0, 5); // operating_points_cnt_minus_1 = 0
+        bits.push_bits(0, 12); // operating_point_idc[0]
+        bits.push_bits(4, 5); // seq_level_idx = 4
+        bits.push_bits(0, 4); // frame_width_bits_minus_1 = 0
+        bits.push_bits(0, 4); // frame_height_bits_minus_1 = 0
+        bits.push_bits(0, 1); // max_frame_width_minus_1
+        bits.push_bits(0, 1); // max_frame_height_minus_1
+        bits.push_bool(false); // frame_id_numbers_present
+        push_minimal_non_reduced_suffix(&mut bits, true);
+
+        let data = bits.into_bytes();
+        let mut parser = make_parser::<false>(0, None);
+        let (_, seq) = parser
+            .parse_sequence_header(&data)
+            .expect("film grain present should parse");
+
+        assert!(seq.film_grain_params_present);
+    }
+
+    // --- parse_sequence_header write-mode tests ---
+
+    /// Builds the minimal non-reduced sequence header bitstream used by
+    /// WRITE mode tests. Returns `(data, size)` where `size` is the OBU
+    /// payload length covering through the film_grain_params_present byte.
+    fn build_write_test_bitstream(film_grain: bool) -> (Vec<u8>, usize) {
+        let mut bits = BitBuilder::default();
+        bits.push_bits(0, 3); // seq_profile = 0
+        bits.push_bool(false); // still_picture
+        bits.push_bool(false); // reduced
+        bits.push_bool(false); // timing_info_present
+        bits.push_bool(false); // initial_display_delay_present
+        bits.push_bits(0, 5); // operating_points_cnt_minus_1 = 0
+        bits.push_bits(0, 12); // operating_point_idc[0]
+        bits.push_bits(4, 5); // seq_level_idx = 4
+        bits.push_bits(0, 4); // frame_width_bits_minus_1 = 0
+        bits.push_bits(0, 4); // frame_height_bits_minus_1 = 0
+        bits.push_bits(0, 1); // max_frame_width_minus_1
+        bits.push_bits(0, 1); // max_frame_height_minus_1
+        bits.push_bool(false); // frame_id_numbers_present
+        push_minimal_non_reduced_suffix(&mut bits, film_grain);
+        let data = bits.into_bytes();
+        let size = data.len();
+        (data, size)
+    }
+
+    #[test]
+    fn write_mode_sets_grain_bit_when_grain_present() {
+        let (data, size) = build_write_test_bitstream(false);
+        let mut parser = make_parser::<true>(size, Some(Vec::new()));
+        let (_, seq) = parser
+            .parse_sequence_header(&data)
+            .expect("write mode with grain present should parse");
+
+        assert!(!seq.film_grain_params_present);
+        assert!(seq.new_film_grain_state);
+        assert_eq!(parser.packet_out.len(), size);
+        // Film grain bit is at bit 60 → byte 7, bit 3 (0=LSB).
+        assert_ne!(parser.packet_out[7] & (1 << 3), 0);
+    }
+
+    #[test]
+    fn write_mode_clears_grain_bit_when_grain_absent() {
+        let (data, size) = build_write_test_bitstream(true);
+        let mut parser = make_parser::<true>(size, None);
+        let (_, seq) = parser
+            .parse_sequence_header(&data)
+            .expect("write mode without grain should parse");
+
+        assert!(seq.film_grain_params_present);
+        assert!(!seq.new_film_grain_state);
+        assert_eq!(parser.packet_out.len(), size);
+        // Film grain bit at byte 7, bit 3 should be cleared.
+        assert_eq!(parser.packet_out[7] & (1 << 3), 0);
     }
 }
