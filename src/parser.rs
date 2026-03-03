@@ -290,3 +290,346 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ===== Helpers =====
+
+    fn make_parser<const WRITE: bool>() -> BitstreamParser<WRITE> {
+        BitstreamParser {
+            reader: None,
+            writer: None,
+            packet_out: Vec::new(),
+            incoming_grain_header: None,
+            parsed: false,
+            size: 0,
+            seen_frame_header: false,
+            sequence_header: None,
+            previous_frame_header: None,
+            ref_frame_idx: Default::default(),
+            ref_order_hint: Default::default(),
+            big_ref_order_hint: Default::default(),
+            big_ref_valid: Default::default(),
+            big_order_hints: Default::default(),
+            grain_headers: Vec::new(),
+        }
+    }
+
+    fn make_parsed_parser<const WRITE: bool>(
+        headers: Vec<FilmGrainHeader>,
+    ) -> BitstreamParser<WRITE> {
+        BitstreamParser {
+            reader: None,
+            writer: None,
+            packet_out: Vec::new(),
+            incoming_grain_header: None,
+            parsed: true,
+            size: 0,
+            seen_frame_header: false,
+            sequence_header: None,
+            previous_frame_header: None,
+            ref_frame_idx: Default::default(),
+            ref_order_hint: Default::default(),
+            big_ref_order_hint: Default::default(),
+            big_ref_valid: Default::default(),
+            big_order_hints: Default::default(),
+            grain_headers: headers,
+        }
+    }
+
+    fn sample_grain_params() -> grain::FilmGrainParams {
+        grain::FilmGrainParams {
+            grain_seed: 42,
+            scaling_points_y: Default::default(),
+            scaling_points_cb: Default::default(),
+            scaling_points_cr: Default::default(),
+            scaling_shift: 8,
+            ar_coeff_lag: 0,
+            ar_coeffs_y: Default::default(),
+            ar_coeffs_cb: Default::default(),
+            ar_coeffs_cr: Default::default(),
+            ar_coeff_shift: 6,
+            cb_mult: 0,
+            cb_luma_mult: 0,
+            cb_offset: 0,
+            cr_mult: 0,
+            cr_luma_mult: 0,
+            cr_offset: 0,
+            chroma_scaling_from_luma: false,
+            grain_scale_shift: 0,
+            overlap_flag: false,
+            clip_to_restricted_range: false,
+        }
+    }
+
+    // ===== Part 1: Pure Unit Tests =====
+
+    #[test]
+    fn ff_to_av1_ts_shift_is_10000() {
+        assert_eq!(FF_TO_AV1_TS_SHIFT, 10_000);
+    }
+
+    #[test]
+    fn get_grain_headers_returns_cached_when_already_parsed() {
+        let headers = vec![
+            FilmGrainHeader::Disable,
+            FilmGrainHeader::UpdateGrain(sample_grain_params()),
+        ];
+        let mut parser = make_parsed_parser::<false>(headers);
+
+        let result = parser
+            .get_grain_headers()
+            .expect("should return cached headers");
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], FilmGrainHeader::Disable);
+    }
+
+    #[test]
+    fn get_grain_headers_returns_empty_when_parsed_with_no_grain() {
+        let mut parser = make_parsed_parser::<false>(Vec::new());
+
+        let result = parser.get_grain_headers().expect("should return empty");
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn get_grain_headers_preserves_all_grain_variants() {
+        let headers = vec![
+            FilmGrainHeader::Disable,
+            FilmGrainHeader::CopyRefFrame,
+            FilmGrainHeader::UpdateGrain(sample_grain_params()),
+        ];
+        let mut parser = make_parsed_parser::<false>(headers);
+
+        let result = parser
+            .get_grain_headers()
+            .expect("should preserve variants");
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0], FilmGrainHeader::Disable);
+        assert_eq!(result[1], FilmGrainHeader::CopyRefFrame);
+        assert!(matches!(result[2], FilmGrainHeader::UpdateGrain(_)));
+    }
+
+    #[test]
+    fn get_grain_headers_second_call_returns_same_result() {
+        let headers = vec![FilmGrainHeader::CopyRefFrame, FilmGrainHeader::Disable];
+        let mut parser = make_parsed_parser::<false>(headers);
+
+        let first = parser.get_grain_headers().expect("first call").to_vec();
+        let second = parser.get_grain_headers().expect("second call").to_vec();
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    #[should_panic]
+    fn get_grain_headers_panics_when_reader_is_none() {
+        let mut parser = make_parser::<false>();
+        // parsed=false, reader=None → .take().unwrap() panics
+        let _ = parser.get_grain_headers();
+    }
+
+    #[test]
+    #[should_panic(expected = "Can only modify headers")]
+    fn modify_grain_headers_panics_when_write_is_false() {
+        let mut parser = make_parser::<false>();
+        let _ = parser.modify_grain_headers();
+    }
+
+    #[test]
+    fn modify_grain_headers_returns_ok_when_already_parsed() {
+        let mut parser = make_parsed_parser::<true>(Vec::new());
+
+        let result = parser.modify_grain_headers();
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    #[should_panic]
+    fn modify_grain_headers_panics_when_reader_is_none() {
+        let mut parser = make_parser::<true>();
+        // WRITE=true, parsed=false, reader=None → .take().unwrap() panics
+        let _ = parser.modify_grain_headers();
+    }
+
+    // ===== Part 2: I/O Tests =====
+
+    #[cfg(feature = "dav1d_tests")]
+    mod io {
+        use super::*;
+        use crate::reader::BitstreamReader;
+        use std::path::PathBuf;
+
+        fn test_data_path(relative: &str) -> PathBuf {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("dav1d-test-data")
+                .join(relative)
+        }
+
+        #[test]
+        fn new_creates_read_only_parser() {
+            let reader = BitstreamReader::open(test_data_path("8-bit/data/00000000.ivf"))
+                .expect("test file should open");
+            let parser = BitstreamParser::<false>::new(reader);
+            assert!(!parser.parsed);
+        }
+
+        #[test]
+        #[should_panic(expected = "WRITE set to true")]
+        fn new_panics_when_write_is_true() {
+            let reader = BitstreamReader::open(test_data_path("8-bit/data/00000000.ivf"))
+                .expect("test file should open");
+            let _ = BitstreamParser::<true>::new(reader);
+        }
+
+        #[test]
+        fn with_writer_creates_write_parser() {
+            let reader = BitstreamReader::open(test_data_path("8-bit/data/00000000.ivf"))
+                .expect("test file should open");
+            let output = tempfile::Builder::new().suffix(".ivf").tempfile().unwrap();
+            let writer = ffmpeg::format::output(output.path()).expect("output should open");
+
+            let parser = BitstreamParser::<true>::with_writer(reader, writer, None);
+
+            assert!(!parser.parsed);
+            assert!(parser.writer.is_some());
+            assert!(parser.incoming_grain_header.is_none());
+        }
+
+        #[test]
+        fn with_writer_stores_incoming_grain_header() {
+            let reader = BitstreamReader::open(test_data_path("8-bit/data/00000000.ivf"))
+                .expect("test file should open");
+            let output = tempfile::Builder::new().suffix(".ivf").tempfile().unwrap();
+            let writer = ffmpeg::format::output(output.path()).expect("output should open");
+            let segments = vec![];
+
+            let parser = BitstreamParser::<true>::with_writer(reader, writer, Some(segments));
+
+            assert!(parser.incoming_grain_header.is_some());
+        }
+
+        #[test]
+        #[should_panic(expected = "WRITE generic is true")]
+        fn with_writer_panics_when_write_is_false() {
+            let reader = BitstreamReader::open(test_data_path("8-bit/data/00000000.ivf"))
+                .expect("test file should open");
+            let output = tempfile::Builder::new().suffix(".ivf").tempfile().unwrap();
+            let writer = ffmpeg::format::output(output.path()).expect("output should open");
+            let _ = BitstreamParser::<false>::with_writer(reader, writer, None);
+        }
+
+        #[test]
+        fn get_grain_headers_parses_valid_file() {
+            let reader = BitstreamReader::open(test_data_path("8-bit/data/00000000.ivf"))
+                .expect("test file should open");
+            let mut parser = BitstreamParser::<false>::new(reader);
+
+            let result = parser.get_grain_headers();
+
+            assert!(result.is_ok());
+            assert!(!result.unwrap().is_empty());
+        }
+
+        #[test]
+        fn get_grain_headers_sets_parsed_flag() {
+            let reader = BitstreamReader::open(test_data_path("8-bit/data/00000000.ivf"))
+                .expect("test file should open");
+            let mut parser = BitstreamParser::<false>::new(reader);
+            assert!(!parser.parsed);
+
+            let _ = parser.get_grain_headers().expect("should parse");
+
+            assert!(parser.parsed);
+        }
+
+        #[test]
+        fn get_grain_headers_consumes_reader_then_caches() {
+            let reader = BitstreamReader::open(test_data_path("8-bit/data/00000000.ivf"))
+                .expect("test file should open");
+            let mut parser = BitstreamParser::<false>::new(reader);
+
+            let first = parser.get_grain_headers().expect("first call").to_vec();
+            assert!(parser.reader.is_none(), "reader should be consumed");
+
+            let second = parser
+                .get_grain_headers()
+                .expect("second call (cached)")
+                .to_vec();
+            assert_eq!(first, second);
+        }
+
+        #[test]
+        fn get_grain_headers_stores_sequence_header() {
+            let reader = BitstreamReader::open(test_data_path("8-bit/data/00000000.ivf"))
+                .expect("test file should open");
+            let mut parser = BitstreamParser::<false>::new(reader);
+
+            let _ = parser.get_grain_headers().expect("should parse");
+
+            assert!(parser.sequence_header.is_some());
+        }
+
+        #[test]
+        fn get_grain_headers_stores_previous_frame_header() {
+            let reader = BitstreamReader::open(test_data_path("8-bit/data/00000000.ivf"))
+                .expect("test file should open");
+            let mut parser = BitstreamParser::<false>::new(reader);
+
+            let _ = parser.get_grain_headers().expect("should parse");
+
+            assert!(parser.previous_frame_header.is_some());
+        }
+
+        #[test]
+        fn modify_grain_headers_processes_file() {
+            let reader = BitstreamReader::open(test_data_path("8-bit/data/00000000.ivf"))
+                .expect("test file should open");
+            let output = tempfile::Builder::new().suffix(".ivf").tempfile().unwrap();
+            let writer = ffmpeg::format::output(output.path()).expect("output should open");
+            let mut parser = BitstreamParser::<true>::with_writer(reader, writer, None);
+
+            let result = parser.modify_grain_headers();
+
+            assert!(result.is_ok());
+            let metadata = std::fs::metadata(output.path()).expect("output file should exist");
+            assert!(metadata.len() > 0, "output file should be non-empty");
+        }
+
+        #[test]
+        fn modify_grain_headers_sets_parsed_flag() {
+            let reader = BitstreamReader::open(test_data_path("8-bit/data/00000000.ivf"))
+                .expect("test file should open");
+            let output = tempfile::Builder::new().suffix(".ivf").tempfile().unwrap();
+            let writer = ffmpeg::format::output(output.path()).expect("output should open");
+            let mut parser = BitstreamParser::<true>::with_writer(reader, writer, None);
+            assert!(!parser.parsed);
+
+            let _ = parser.modify_grain_headers().expect("should process");
+
+            assert!(parser.parsed);
+        }
+
+        #[test]
+        fn modify_grain_headers_does_not_populate_grain_headers() {
+            let reader = BitstreamReader::open(test_data_path("8-bit/data/00000000.ivf"))
+                .expect("test file should open");
+            let output = tempfile::Builder::new().suffix(".ivf").tempfile().unwrap();
+            let writer = ffmpeg::format::output(output.path()).expect("output should open");
+            let mut parser = BitstreamParser::<true>::with_writer(reader, writer, None);
+
+            let _ = parser.modify_grain_headers().expect("should process");
+
+            assert!(
+                parser.grain_headers.is_empty(),
+                "write path should not collect grain headers"
+            );
+        }
+    }
+}
