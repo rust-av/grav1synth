@@ -3590,4 +3590,772 @@ mod tests {
         data[2][3] = Some(42);
         assert!(seg_feature_active_idx(2, 3, Some(&data)));
     }
+
+    // ===================================================================
+    // BitstreamParser method tests — infrastructure and groups A–E
+    // ===================================================================
+
+    use super::super::{
+        BitstreamParser,
+        grain::{FilmGrainHeader, FilmGrainParams, film_grain_params},
+        obu::{ObuHeader, ObuType},
+        sequence::{
+            ColorConfig, ColorPrimaries, ColorRange, MatrixCoefficients, SequenceHeader,
+            TransferCharacteristics,
+        },
+    };
+    use super::{FrameHeader, NUM_REF_FRAMES, TileInfo};
+    use crate::GrainTableSegment;
+    use arrayvec::ArrayVec;
+    use av1_grain::DEFAULT_GRAIN_SEED;
+
+    fn make_parser<const WRITE: bool>() -> BitstreamParser<WRITE> {
+        BitstreamParser {
+            reader: None,
+            writer: None,
+            packet_out: Vec::new(),
+            incoming_grain_header: None,
+            parsed: false,
+            size: 0,
+            seen_frame_header: false,
+            sequence_header: None,
+            previous_frame_header: None,
+            ref_frame_idx: Default::default(),
+            ref_order_hint: Default::default(),
+            big_ref_order_hint: Default::default(),
+            big_ref_valid: Default::default(),
+            big_order_hints: Default::default(),
+            grain_headers: Vec::new(),
+        }
+    }
+
+    fn minimal_sequence_header() -> SequenceHeader {
+        SequenceHeader {
+            reduced_still_picture_header: false,
+            frame_id_numbers_present: false,
+            additional_frame_id_len_minus_1: 0,
+            delta_frame_id_len_minus_2: 0,
+            film_grain_params_present: false,
+            new_film_grain_state: false,
+            force_screen_content_tools: 1,
+            force_integer_mv: 1,
+            order_hint_bits: 0,
+            frame_width_bits_minus_1: 0,
+            frame_height_bits_minus_1: 0,
+            max_frame_width_minus_1: 7,
+            max_frame_height_minus_1: 7,
+            decoder_model_info: None,
+            decoder_model_present_for_op: ArrayVec::new(),
+            operating_points_cnt_minus_1: 0,
+            operating_point_idc: ArrayVec::new(),
+            cur_operating_point_idc: 0,
+            timing_info: None,
+            enable_ref_frame_mvs: false,
+            enable_warped_motion: false,
+            enable_superres: false,
+            enable_cdef: false,
+            enable_restoration: false,
+            use_128x128_superblock: false,
+            color_config: ColorConfig {
+                color_primaries: ColorPrimaries::Unspecified,
+                transfer_characteristics: TransferCharacteristics::Unspecified,
+                matrix_coefficients: MatrixCoefficients::Unspecified,
+                color_range: ColorRange::Full,
+                num_planes: 1,
+                separate_uv_delta_q: false,
+                subsampling: (0, 0),
+            },
+        }
+    }
+
+    fn simple_obu_header() -> ObuHeader {
+        ObuHeader {
+            obu_type: ObuType::Frame,
+            has_size_field: false,
+            extension: None,
+        }
+    }
+
+    fn minimal_grain_params() -> FilmGrainParams {
+        // RATIONALE: The film_grain_params parser always pushes a default [0]
+        // into ar_coeffs_cb/cr when no chroma coefficients are signaled
+        // (monochrome or no cb/cr points). Pre-populate these so roundtrip
+        // comparisons match.
+        let mut ar_coeffs_cb = ArrayVec::new();
+        ar_coeffs_cb.push(0i8);
+        let mut ar_coeffs_cr = ArrayVec::new();
+        ar_coeffs_cr.push(0i8);
+        FilmGrainParams {
+            grain_seed: 0,
+            scaling_points_y: ArrayVec::new(),
+            scaling_points_cb: ArrayVec::new(),
+            scaling_points_cr: ArrayVec::new(),
+            scaling_shift: 8,
+            ar_coeff_lag: 0,
+            ar_coeffs_y: ArrayVec::new(),
+            ar_coeffs_cb,
+            ar_coeffs_cr,
+            ar_coeff_shift: 6,
+            cb_mult: 0,
+            cb_luma_mult: 0,
+            cb_offset: 0,
+            cr_mult: 0,
+            cr_luma_mult: 0,
+            cr_offset: 0,
+            chroma_scaling_from_luma: false,
+            grain_scale_shift: 0,
+            overlap_flag: false,
+            clip_to_restricted_range: false,
+        }
+    }
+
+    /// Builds the bits for a minimal Key frame header (shown or hidden)
+    /// against `minimal_sequence_header()`.
+    fn build_minimal_key_frame_bits(show_frame: bool) -> BitBuilder {
+        let mut bits = BitBuilder::default();
+        bits.push_bool(false); // show_existing_frame = 0
+        bits.push_bits(0, 2); // frame_type = Key (00)
+        bits.push_bool(show_frame);
+        if !show_frame {
+            bits.push_bool(false); // showable_frame = 0
+            bits.push_bool(false); // error_resilient_mode = 0
+        }
+        // Key+show → error_resilient implicit true, no bit
+        bits.push_bool(false); // disable_cdf_update
+        // force_screen_content_tools=1 → allow_screen_content_tools=true, no bit
+        // force_integer_mv=1, not SELECT_INTEGER_MV → no bit
+        // frame_id_numbers_present=false → no bit
+        bits.push_bool(false); // frame_size_override_flag
+        // order_hint_bits=0 → 0 bits for order_hint
+        // intra → primary_ref_frame=PRIMARY_REF_NONE, no bit
+        // no decoder_model_info → skip
+        if !show_frame {
+            bits.push_bits(0xFF, 8); // refresh_frame_flags
+        }
+        // Key+show → REFRESH_ALL_FRAMES implicit, no bit
+        // Intra path: frame_size(no override, no superres)=no bits
+        bits.push_bool(false); // render_different = 0
+        // allow_screen_content_tools && width==width → allow_intrabc bit
+        bits.push_bool(false); // allow_intrabc = 0
+        // disable_frame_end_update_cdf: not reduced_still, not disable_cdf → read bit
+        bits.push_bool(false); // disable_frame_end_update_cdf = 0
+        // primary_ref=NONE → init_non_coeff_cdfs + setup_past_independence (no-ops)
+        // use_ref_frame_mvs=false → skip
+        bits.push_bool(true); // uniform_tile_spacing_flag = 1
+        // With 8x8 frame, sb_cols=sb_rows=1 → tile_cols_log2=0, no increment loops
+        // tile_cols_log2+tile_rows_log2=0 → no context_update_tile_id
+        bits.push_bits(0, 8); // base_q_idx = 0
+        bits.push_bool(false); // deltaq_y_dc_coded = 0
+        // num_planes=1 → no chroma delta-q
+        bits.push_bool(false); // using_qmatrix = 0
+        bits.push_bool(false); // seg_enabled = 0
+        // base_q_idx=0 → delta_q_params returns false, no bit
+        // coded_lossless=true → loop_filter, cdef, lr, tx_mode all early-return
+        // intra → frame_reference_mode=false, skip_mode=false, warped=false, no bits
+        bits.push_bool(false); // reduced_tx_set = 0
+        // intra → global_motion_params no-op
+        // film_grain_params_present=false → no grain bits
+        bits
+    }
+
+    // -----------------------------------------------------------------------
+    // Group A: write_film_grain_disabled_bit
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn write_grain_disabled_no_extra_bits() {
+        let mut parser = make_parser::<true>();
+        parser.sequence_header = Some(minimal_sequence_header());
+        parser.write_film_grain_disabled_bit(0x00, 0);
+        assert_eq!(parser.packet_out, vec![0x00]);
+    }
+
+    #[test]
+    fn write_grain_disabled_3_extra_bits() {
+        let mut parser = make_parser::<true>();
+        parser.sequence_header = Some(minimal_sequence_header());
+        // extra_byte=0b1101_0000, 3 bits → 1,1,0 then apply_grain=0
+        parser.write_film_grain_disabled_bit(0b1101_0000, 3);
+        // Result: bits 1,1,0,0 → 0b1100_0000 = 0xC0
+        assert_eq!(parser.packet_out, vec![0xC0]);
+    }
+
+    #[test]
+    fn write_grain_disabled_7_extra_bits() {
+        let mut parser = make_parser::<true>();
+        parser.sequence_header = Some(minimal_sequence_header());
+        // extra_byte=0b1111_1110, 7 bits → 1,1,1,1,1,1,1 then apply_grain=0
+        parser.write_film_grain_disabled_bit(0b1111_1110, 7);
+        // Result: bits 1,1,1,1,1,1,1,0 → 0b1111_1110 = 0xFE
+        assert_eq!(parser.packet_out, vec![0xFE]);
+    }
+
+    #[test]
+    fn write_grain_disabled_1_extra_bit() {
+        let mut parser = make_parser::<true>();
+        parser.sequence_header = Some(minimal_sequence_header());
+        // extra_byte=0b1000_0000, 1 bit → 1 then apply_grain=0
+        parser.write_film_grain_disabled_bit(0b1000_0000, 1);
+        // Result: bits 1,0 → 0b1000_0000 = 0x80
+        assert_eq!(parser.packet_out, vec![0x80]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group B: write_film_grain_bits roundtrip tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn write_grain_roundtrip_monochrome_key_minimal() {
+        let mut parser = make_parser::<true>();
+        parser.sequence_header = Some(minimal_sequence_header());
+        let mut params = minimal_grain_params();
+        params.grain_seed = 0xABCD;
+        let segment = GrainTableSegment {
+            start_time: 0,
+            end_time: 0,
+            grain_params: params.clone(),
+        };
+        let result = parser.write_film_grain_bits(0, 0, &segment, FrameType::Key);
+        assert!(matches!(result, FilmGrainHeader::UpdateGrain(_)));
+
+        // Parse the written output as grain params
+        let data = &parser.packet_out;
+        let (_, parsed) =
+            film_grain_params((data.as_slice(), 0), true, FrameType::Key, true, (0, 0)).unwrap();
+        if let FilmGrainHeader::UpdateGrain(parsed_params) = parsed {
+            assert_eq!(parsed_params, params);
+        } else {
+            panic!("expected UpdateGrain, got {parsed:?}");
+        }
+    }
+
+    #[test]
+    fn write_grain_roundtrip_inter_adds_update_grain() {
+        let mut parser = make_parser::<true>();
+        parser.sequence_header = Some(minimal_sequence_header());
+        let mut params = minimal_grain_params();
+        params.grain_seed = 0x1234;
+        let segment = GrainTableSegment {
+            start_time: 0,
+            end_time: 0,
+            grain_params: params.clone(),
+        };
+        let result = parser.write_film_grain_bits(0, 0, &segment, FrameType::Inter);
+        assert!(matches!(result, FilmGrainHeader::UpdateGrain(_)));
+
+        let data = &parser.packet_out;
+        let (_, parsed) =
+            film_grain_params((data.as_slice(), 0), true, FrameType::Inter, true, (0, 0)).unwrap();
+        if let FilmGrainHeader::UpdateGrain(parsed_params) = parsed {
+            assert_eq!(parsed_params, params);
+        } else {
+            panic!("expected UpdateGrain, got {parsed:?}");
+        }
+    }
+
+    #[test]
+    fn write_grain_roundtrip_y_scaling_points() {
+        let mut parser = make_parser::<true>();
+        parser.sequence_header = Some(minimal_sequence_header());
+        let mut params = minimal_grain_params();
+        params.grain_seed = 0x5678;
+        params.scaling_points_y.push([10, 20]);
+        params.scaling_points_y.push([30, 40]);
+        let segment = GrainTableSegment {
+            start_time: 0,
+            end_time: 0,
+            grain_params: params.clone(),
+        };
+        let result = parser.write_film_grain_bits(0, 0, &segment, FrameType::Key);
+        assert!(matches!(result, FilmGrainHeader::UpdateGrain(_)));
+
+        let data = &parser.packet_out;
+        let (_, parsed) =
+            film_grain_params((data.as_slice(), 0), true, FrameType::Key, true, (0, 0)).unwrap();
+        if let FilmGrainHeader::UpdateGrain(parsed_params) = parsed {
+            assert_eq!(parsed_params.scaling_points_y.len(), 2);
+            assert_eq!(parsed_params.scaling_points_y[0], [10, 20]);
+            assert_eq!(parsed_params.scaling_points_y[1], [30, 40]);
+            assert_eq!(parsed_params, params);
+        } else {
+            panic!("expected UpdateGrain, got {parsed:?}");
+        }
+    }
+
+    #[test]
+    fn write_grain_roundtrip_non_mono_chroma_points() {
+        let mut parser = make_parser::<true>();
+        let mut seq = minimal_sequence_header();
+        seq.color_config.num_planes = 3;
+        seq.color_config.subsampling = (0, 0);
+        parser.sequence_header = Some(seq);
+        let mut params = minimal_grain_params();
+        params.grain_seed = 0x9ABC;
+        params.scaling_points_y.push([50, 60]);
+        params.scaling_points_cb.push([70, 80]);
+        params.scaling_points_cr.push([90, 100]);
+        params.cb_mult = 128;
+        params.cb_luma_mult = 192;
+        params.cb_offset = 256;
+        params.cr_mult = 64;
+        params.cr_luma_mult = 32;
+        params.cr_offset = 128;
+        let segment = GrainTableSegment {
+            start_time: 0,
+            end_time: 0,
+            grain_params: params.clone(),
+        };
+        let result = parser.write_film_grain_bits(0, 0, &segment, FrameType::Key);
+        assert!(matches!(result, FilmGrainHeader::UpdateGrain(_)));
+
+        let data = &parser.packet_out;
+        let (_, parsed) =
+            film_grain_params((data.as_slice(), 0), true, FrameType::Key, false, (0, 0)).unwrap();
+        if let FilmGrainHeader::UpdateGrain(parsed_params) = parsed {
+            assert_eq!(parsed_params.scaling_points_cb[0], [70, 80]);
+            assert_eq!(parsed_params.scaling_points_cr[0], [90, 100]);
+            assert_eq!(parsed_params.cb_mult, 128);
+            assert_eq!(parsed_params.cr_offset, 128);
+            assert_eq!(parsed_params, params);
+        } else {
+            panic!("expected UpdateGrain, got {parsed:?}");
+        }
+    }
+
+    #[test]
+    fn write_grain_roundtrip_chroma_scaling_from_luma() {
+        let mut parser = make_parser::<true>();
+        let mut seq = minimal_sequence_header();
+        seq.color_config.num_planes = 3;
+        seq.color_config.subsampling = (0, 0);
+        parser.sequence_header = Some(seq);
+        let mut params = minimal_grain_params();
+        params.grain_seed = 0xDEF0;
+        params.scaling_points_y.push([15, 25]);
+        params.chroma_scaling_from_luma = true;
+        params.ar_coeff_lag = 1;
+        // ar_coeff_lag=1 → num_pos_luma = 2*1*2 = 4
+        // num_y_points>0 → num_pos_chroma = 4+1 = 5
+        for _ in 0..4 {
+            params.ar_coeffs_y.push(0);
+        }
+        // chroma_scaling_from_luma → need ar_coeffs_cb and ar_coeffs_cr of len num_pos_chroma=5
+        params.ar_coeffs_cb.clear();
+        params.ar_coeffs_cr.clear();
+        for _ in 0..5 {
+            params.ar_coeffs_cb.push(0);
+            params.ar_coeffs_cr.push(0);
+        }
+        let segment = GrainTableSegment {
+            start_time: 0,
+            end_time: 0,
+            grain_params: params.clone(),
+        };
+        let result = parser.write_film_grain_bits(0, 0, &segment, FrameType::Key);
+        assert!(matches!(result, FilmGrainHeader::UpdateGrain(_)));
+
+        let data = &parser.packet_out;
+        let (_, parsed) =
+            film_grain_params((data.as_slice(), 0), true, FrameType::Key, false, (0, 0)).unwrap();
+        if let FilmGrainHeader::UpdateGrain(parsed_params) = parsed {
+            assert!(parsed_params.chroma_scaling_from_luma);
+            assert!(parsed_params.scaling_points_cb.is_empty());
+            assert!(parsed_params.scaling_points_cr.is_empty());
+            assert_eq!(parsed_params, params);
+        } else {
+            panic!("expected UpdateGrain, got {parsed:?}");
+        }
+    }
+
+    #[test]
+    fn write_grain_extra_bits_prefix_preserved() {
+        let mut parser = make_parser::<true>();
+        parser.sequence_header = Some(minimal_sequence_header());
+        let mut params = minimal_grain_params();
+        params.grain_seed = 0;
+        let segment = GrainTableSegment {
+            start_time: 0,
+            end_time: 0,
+            grain_params: params,
+        };
+        // extra_byte=0b11100000, extra_bits_used=3 → prefix bits: 1,1,1
+        parser.write_film_grain_bits(0b1110_0000, 3, &segment, FrameType::Key);
+        // First 3 bits should be 111, bit 3 should be apply_grain=1
+        let first_byte = parser.packet_out[0];
+        assert_eq!(first_byte >> 5, 0b111); // top 3 bits
+        assert_eq!((first_byte >> 4) & 1, 1); // apply_grain=1 at bit 3
+    }
+
+    // -----------------------------------------------------------------------
+    // Group C: parse_frame_header
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_frame_header_seen_flag_short_circuits() {
+        let mut parser = make_parser::<false>();
+        parser.sequence_header = Some(minimal_sequence_header());
+        parser.seen_frame_header = true;
+        let input: &[u8] = &[0xAB, 0xCD];
+        let (remaining, result) = parser
+            .parse_frame_header(input, simple_obu_header(), 0)
+            .unwrap();
+        assert!(result.is_none());
+        assert_eq!(
+            remaining.len(),
+            input.len(),
+            "input pointer should be unchanged"
+        );
+    }
+
+    #[test]
+    fn parse_frame_header_show_existing_frame() {
+        let mut parser = make_parser::<false>();
+        parser.sequence_header = Some(minimal_sequence_header());
+        parser.previous_frame_header = Some(FrameHeader {
+            show_frame: true,
+            show_existing_frame: false,
+            film_grain_params: FilmGrainHeader::Disable,
+            tile_info: TileInfo {
+                tile_cols: 2,
+                tile_rows: 3,
+                tile_cols_log2: 1,
+                tile_rows_log2: 2,
+            },
+        });
+        // show_existing_frame=1 (1 bit), frame_to_show_map_idx=000 (3 bits)
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // show_existing_frame
+        bits.push_bits(0, 3); // frame_to_show_map_idx
+        let (data, _) = with_trailer(bits);
+        let (_, result) = parser
+            .parse_frame_header(&data, simple_obu_header(), 0)
+            .unwrap();
+        let header = result.expect("shown existing frame should return Some");
+        assert!(header.show_existing_frame);
+        assert_eq!(header.film_grain_params, FilmGrainHeader::CopyRefFrame);
+        // seen_frame_header should be cleared for show_existing_frame
+        assert!(!parser.seen_frame_header);
+    }
+
+    #[test]
+    fn parse_frame_header_shown_key_frame() {
+        let mut parser = make_parser::<false>();
+        parser.sequence_header = Some(minimal_sequence_header());
+        let bits = build_minimal_key_frame_bits(true);
+        let (data, _) = with_trailer(bits);
+        let (_, result) = parser
+            .parse_frame_header(&data, simple_obu_header(), 0)
+            .unwrap();
+        let header = result.expect("shown Key frame should return Some");
+        assert!(header.show_frame);
+        assert!(!header.show_existing_frame);
+        assert!(parser.seen_frame_header);
+    }
+
+    #[test]
+    fn parse_frame_header_hidden_frame_returns_none() {
+        let mut parser = make_parser::<false>();
+        parser.sequence_header = Some(minimal_sequence_header());
+        let bits = build_minimal_key_frame_bits(false);
+        let (data, _) = with_trailer(bits);
+        let (_, result) = parser
+            .parse_frame_header(&data, simple_obu_header(), 0)
+            .unwrap();
+        assert!(result.is_none(), "hidden frame should return None");
+        assert!(parser.seen_frame_header);
+    }
+
+    #[test]
+    fn parse_frame_header_show_existing_carries_tile_info() {
+        let mut parser = make_parser::<false>();
+        parser.sequence_header = Some(minimal_sequence_header());
+        let expected_tile_info = TileInfo {
+            tile_cols: 4,
+            tile_rows: 5,
+            tile_cols_log2: 2,
+            tile_rows_log2: 3,
+        };
+        parser.previous_frame_header = Some(FrameHeader {
+            show_frame: true,
+            show_existing_frame: false,
+            film_grain_params: FilmGrainHeader::Disable,
+            tile_info: expected_tile_info,
+        });
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // show_existing_frame
+        bits.push_bits(0, 3); // frame_to_show_map_idx
+        let (data, _) = with_trailer(bits);
+        let (_, result) = parser
+            .parse_frame_header(&data, simple_obu_header(), 0)
+            .unwrap();
+        let header = result.unwrap();
+        assert_eq!(header.tile_info.tile_cols, expected_tile_info.tile_cols);
+        assert_eq!(header.tile_info.tile_rows, expected_tile_info.tile_rows);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group D: uncompressed_header specifics
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn uncompressed_header_key_show_resets_refs() {
+        let mut parser = make_parser::<false>();
+        parser.sequence_header = Some(minimal_sequence_header());
+        // Pre-populate ref state
+        for i in 0..NUM_REF_FRAMES {
+            parser.big_ref_valid[i] = true;
+            parser.big_ref_order_hint[i] = 99;
+        }
+        let bits = build_minimal_key_frame_bits(true);
+        let (data, _) = with_trailer(bits);
+        let _ = parser
+            .parse_frame_header(&data, simple_obu_header(), 0)
+            .unwrap();
+        // Key+show clears refs first, then refreshes all (order_hint=0, valid=true)
+        for i in 0..NUM_REF_FRAMES {
+            assert!(
+                parser.big_ref_valid[i],
+                "ref {i} should be valid after refresh"
+            );
+            assert_eq!(
+                parser.big_ref_order_hint[i], 0,
+                "ref {i} order_hint should be 0"
+            );
+        }
+    }
+
+    #[test]
+    fn uncompressed_header_hidden_key_does_not_reset_refs() {
+        let mut parser = make_parser::<false>();
+        parser.sequence_header = Some(minimal_sequence_header());
+        // Pre-populate ref state
+        for i in 0..NUM_REF_FRAMES {
+            parser.big_ref_valid[i] = true;
+            parser.big_ref_order_hint[i] = 99;
+        }
+        let bits = build_minimal_key_frame_bits(false);
+        let (data, _) = with_trailer(bits);
+        let _ = parser
+            .parse_frame_header(&data, simple_obu_header(), 0)
+            .unwrap();
+        // Hidden Key frame: no clear step (Key+show_frame required), but
+        // refresh_frame_flags=0xFF refreshes all → valid=true, order_hint=0
+        for i in 0..NUM_REF_FRAMES {
+            assert!(parser.big_ref_valid[i]);
+            assert_eq!(
+                parser.big_ref_order_hint[i], 0,
+                "ref {i} should be refreshed to order_hint=0"
+            );
+        }
+    }
+
+    #[test]
+    fn uncompressed_header_write_copies_prefix_to_packet_out() {
+        let mut parser = make_parser::<true>();
+        parser.sequence_header = Some(minimal_sequence_header());
+        let bits = build_minimal_key_frame_bits(true);
+        let (data, consumed) = with_trailer(bits);
+        let _ = parser
+            .parse_frame_header(&data, simple_obu_header(), 0)
+            .unwrap();
+        // WRITE mode should copy the header bytes to packet_out.
+        // film_grain_params_present=false and new_film_grain_state=false,
+        // so the writer flushes partial byte with unused bits zeroed.
+        let expected_bytes = consumed.div_ceil(8);
+        assert_eq!(
+            parser.packet_out.len(),
+            expected_bytes,
+            "packet_out should contain header bytes (consumed {consumed} bits = {expected_bytes} bytes)"
+        );
+    }
+
+    #[test]
+    fn uncompressed_header_write_show_existing_copies_bytes() {
+        let mut parser = make_parser::<true>();
+        parser.sequence_header = Some(minimal_sequence_header());
+        parser.previous_frame_header = Some(FrameHeader {
+            show_frame: true,
+            show_existing_frame: false,
+            film_grain_params: FilmGrainHeader::Disable,
+            tile_info: TileInfo {
+                tile_cols: 1,
+                tile_rows: 1,
+                tile_cols_log2: 0,
+                tile_rows_log2: 0,
+            },
+        });
+        let mut bits = BitBuilder::default();
+        bits.push_bool(true); // show_existing_frame
+        bits.push_bits(0, 3); // frame_to_show_map_idx
+        let (data, _) = with_trailer(bits);
+        let _ = parser
+            .parse_frame_header(&data, simple_obu_header(), 0)
+            .unwrap();
+        // 4 bits → 1 byte written to packet_out
+        assert_eq!(parser.packet_out.len(), 1);
+    }
+
+    #[test]
+    fn uncompressed_header_write_injects_grain_from_matching_segment() {
+        let mut parser = make_parser::<true>();
+        let mut seq = minimal_sequence_header();
+        seq.film_grain_params_present = true;
+        seq.new_film_grain_state = true;
+        parser.sequence_header = Some(seq);
+        let mut grain = minimal_grain_params();
+        grain.grain_seed = 100;
+        parser.incoming_grain_header = Some(vec![GrainTableSegment {
+            start_time: 0,
+            end_time: 1000,
+            grain_params: grain,
+        }]);
+        // Build key frame bits + 1 bit for apply_grain=false (original stream)
+        let mut bits = build_minimal_key_frame_bits(true);
+        bits.push_bool(false); // apply_grain = false in original stream
+        let (data, _) = with_trailer(bits);
+        let (_, result) = parser
+            .parse_frame_header(&data, simple_obu_header(), 500)
+            .unwrap();
+        let header = result.unwrap();
+        match &header.film_grain_params {
+            FilmGrainHeader::UpdateGrain(params) => {
+                assert_eq!(
+                    params.grain_seed,
+                    100u16.wrapping_add(DEFAULT_GRAIN_SEED),
+                    "grain seed should be original + DEFAULT_GRAIN_SEED"
+                );
+            }
+            other => panic!("expected UpdateGrain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn uncompressed_header_write_disables_grain_no_matching_segment() {
+        let mut parser = make_parser::<true>();
+        let mut seq = minimal_sequence_header();
+        seq.film_grain_params_present = true;
+        seq.new_film_grain_state = true;
+        parser.sequence_header = Some(seq);
+        let mut grain = minimal_grain_params();
+        grain.grain_seed = 100;
+        // Segment time range doesn't cover packet_ts=5000
+        parser.incoming_grain_header = Some(vec![GrainTableSegment {
+            start_time: 0,
+            end_time: 1000,
+            grain_params: grain,
+        }]);
+        let mut bits = build_minimal_key_frame_bits(true);
+        bits.push_bool(false); // apply_grain = false
+        let (data, _) = with_trailer(bits);
+        let (_, result) = parser
+            .parse_frame_header(&data, simple_obu_header(), 5000)
+            .unwrap();
+        let header = result.unwrap();
+        assert_eq!(header.film_grain_params, FilmGrainHeader::Disable);
+    }
+
+    #[test]
+    fn uncompressed_header_write_disables_grain_no_incoming_header() {
+        let mut parser = make_parser::<true>();
+        let mut seq = minimal_sequence_header();
+        seq.film_grain_params_present = true;
+        seq.new_film_grain_state = true;
+        parser.sequence_header = Some(seq);
+        parser.incoming_grain_header = None;
+        let mut bits = build_minimal_key_frame_bits(true);
+        bits.push_bool(false); // apply_grain = false
+        let (data, _) = with_trailer(bits);
+        let (_, result) = parser
+            .parse_frame_header(&data, simple_obu_header(), 0)
+            .unwrap();
+        let header = result.unwrap();
+        assert_eq!(header.film_grain_params, FilmGrainHeader::Disable);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group E: parse_frame_obu
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_frame_obu_shown_key_returns_some() {
+        let mut parser = make_parser::<false>();
+        parser.sequence_header = Some(minimal_sequence_header());
+        let bits = build_minimal_key_frame_bits(true);
+        let mut data = bits.into_bytes();
+        data.extend_from_slice(&[0xAA, 0xBB]); // tile payload
+        parser.size = data.len();
+        let (remaining, result) = parser
+            .parse_frame_obu(&data, simple_obu_header(), 0)
+            .unwrap();
+        let header = result.expect("shown Key frame should return Some");
+        assert!(header.show_frame);
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn parse_frame_obu_seen_header_uses_previous() {
+        let mut parser = make_parser::<false>();
+        parser.sequence_header = Some(minimal_sequence_header());
+        parser.seen_frame_header = true;
+        parser.previous_frame_header = Some(FrameHeader {
+            show_frame: true,
+            show_existing_frame: false,
+            film_grain_params: FilmGrainHeader::Disable,
+            tile_info: TileInfo {
+                tile_cols: 1,
+                tile_rows: 1,
+                tile_cols_log2: 0,
+                tile_rows_log2: 0,
+            },
+        });
+        let data = vec![0xAA, 0xBB]; // just tile payload
+        parser.size = data.len();
+        let (remaining, result) = parser
+            .parse_frame_obu(&data, simple_obu_header(), 0)
+            .unwrap();
+        assert!(
+            result.is_none(),
+            "seen_frame_header should yield None from header"
+        );
+        assert!(remaining.is_empty());
+        // Tile group should have cleared seen_frame_header (single tile)
+        assert!(!parser.seen_frame_header);
+    }
+
+    #[test]
+    fn parse_frame_obu_size_calculation() {
+        let mut parser = make_parser::<false>();
+        parser.sequence_header = Some(minimal_sequence_header());
+        let bits = build_minimal_key_frame_bits(true);
+        let header_bytes = bits.into_bytes();
+        let header_len = header_bytes.len(); // 3 bytes for 22-bit header
+        let tile_payload_len = 4;
+        let mut data = header_bytes;
+        data.extend(vec![0u8; tile_payload_len]);
+        parser.size = header_len + tile_payload_len;
+        // Should not panic: tile_group receives exactly tile_payload_len bytes
+        let (remaining, _) = parser
+            .parse_frame_obu(&data, simple_obu_header(), 0)
+            .unwrap();
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn parse_frame_obu_write_accumulates_header_and_tile() {
+        let mut parser = make_parser::<true>();
+        parser.sequence_header = Some(minimal_sequence_header());
+        let bits = build_minimal_key_frame_bits(true);
+        let mut data = bits.into_bytes();
+        let tile_payload = [0xCA, 0xFE];
+        data.extend_from_slice(&tile_payload);
+        parser.size = data.len();
+        let _ = parser
+            .parse_frame_obu(&data, simple_obu_header(), 0)
+            .unwrap();
+        // packet_out should contain header + tile group bytes
+        assert!(parser.packet_out.len() > tile_payload.len());
+        // Tile payload should be the last bytes in packet_out
+        let tail = &parser.packet_out[parser.packet_out.len() - tile_payload.len()..];
+        assert_eq!(tail, &tile_payload);
+    }
 }
