@@ -3,7 +3,7 @@ use nom::{IResult, bits::bits, error::Error};
 use super::{
     BitstreamParser,
     frame::TileInfo,
-    trace::{TraceCtx, trace_bool, trace_take_u32},
+    trace::{TraceCtx, trace_bool, trace_byte_alignment, trace_take_u32},
 };
 
 impl<const WRITE: bool> BitstreamParser<WRITE> {
@@ -44,11 +44,13 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 (input, false)
             };
             if num_tiles == 1 || !tile_start_and_end_present {
+                let input = trace_byte_alignment(input, ctx)?.0;
                 Ok((input, (num_tiles, num_tiles - 1)))
             } else {
                 let tile_bits = (tile_info.tile_cols_log2 + tile_info.tile_rows_log2) as usize;
                 let (input, _tg_start) = trace_take_u32(input, ctx, tile_bits, "tg_start")?;
                 let (input, tg_end) = trace_take_u32(input, ctx, tile_bits, "tg_end")?;
+                let input = trace_byte_alignment(input, ctx)?.0;
                 Ok((input, (num_tiles, tg_end)))
             }
         })(input)?;
@@ -166,6 +168,21 @@ mod tests {
 
         assert_eq!(remaining, &input[size..]);
         assert!(!parser.seen_frame_header);
+    }
+
+    #[test]
+    fn parse_tile_group_obu_multi_tile_errors_on_non_zero_alignment_bits() {
+        let mut parser = make_parser::<false>(true, Vec::new());
+        // Bits: tile_start_and_end_present=0. Remaining 7 bits contain a non-zero bit.
+        // 0b0100_0000 → flag=0, then padding bits = 100_0000 → non-zero.
+        let input = [0b0100_0000u8, 0xAA];
+        let size = 1;
+
+        let result = parser.parse_tile_group_obu(&input, size, tile_info(2, 2, 1, 1), 0);
+        assert!(
+            result.is_err(),
+            "non-zero alignment padding bits should cause a parse error"
+        );
     }
 
     #[test]

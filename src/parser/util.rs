@@ -35,6 +35,23 @@ pub fn take_zero_bits(input: BitInput, bits: usize) -> IResult<BitInput, (), Err
     bit_parsers::tag(0u8, bits).map(|_| ()).parse(input)
 }
 
+/// AV1 `byte_alignment()`: consumes zero-valued padding bits until the next
+/// byte boundary.
+///
+/// If the input is already byte-aligned (bit offset `== 0`), this is a no-op.
+/// Otherwise it verifies that all remaining bits in the current byte are `0`.
+///
+/// # Errors
+/// Returns an error if any padding bit is non-zero.
+pub fn byte_alignment(input: BitInput) -> IResult<BitInput, (), Error<BitInput>> {
+    let bits_to_align = if input.1 == 0 { 0 } else { 8 - input.1 };
+    if bits_to_align > 0 {
+        take_zero_bits(input, bits_to_align)
+    } else {
+        Ok((input, ()))
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ReadResult<T>
 where
@@ -219,7 +236,10 @@ mod tests {
     use nom::Err;
     use quickcheck_macros::quickcheck;
 
-    use super::{leb128, leb128_write, ns, su, take_bool_bit, take_zero_bit, take_zero_bits, uvlc};
+    use super::{
+        byte_alignment, leb128, leb128_write, ns, su, take_bool_bit, take_zero_bit, take_zero_bits,
+        uvlc,
+    };
 
     #[test]
     fn take_bool_bit_reads_false_and_advances_input() {
@@ -489,6 +509,38 @@ mod tests {
     fn su_panics_when_n_is_zero_in_debug_builds() {
         let data = [0u8];
         _ = su((&data, 0), 0);
+    }
+
+    #[test]
+    fn byte_alignment_at_offset_zero_is_noop() {
+        let data = [0b1010_1010u8];
+        let input = (&data[..], 0usize);
+        let (remaining, ()) =
+            byte_alignment(input).expect("already aligned input should succeed as no-op");
+        assert_eq!(remaining, input);
+    }
+
+    #[test]
+    fn byte_alignment_consumes_zero_padding_at_each_offset() {
+        for offset in 1..=7usize {
+            // All padding bits are zero.
+            let data = [0u8, 0xABu8];
+            let input = (&data[..], offset);
+            let (remaining, ()) = byte_alignment(input)
+                .unwrap_or_else(|_| panic!("byte_alignment should succeed at offset {offset}"));
+            assert_eq!(remaining, (&data[1..], 0), "failed at offset {offset}");
+        }
+    }
+
+    #[test]
+    fn byte_alignment_errors_on_non_zero_padding() {
+        // Offset 4: remaining 4 bits are 0b0001, not all zero.
+        let data = [0b0000_0001u8];
+        let input = (&data[..], 4usize);
+        assert!(
+            byte_alignment(input).is_err(),
+            "non-zero padding bits should cause an error"
+        );
     }
 
     #[quickcheck]

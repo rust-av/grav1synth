@@ -174,8 +174,11 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 debug!("Parsing frame header");
                 let pre_len = input.len();
                 let (mut input, header) = context("Failed parsing frame header", |input| {
-                    // Writing handled within this function
-                    self.parse_frame_header(input, obu_header, packet_ts, obu_bit_offset)
+                    // Writing handled within this function.
+                    // RATIONALE: Standalone FrameHeader OBUs use trailing_bits()
+                    // (starting with a 1 bit) instead of byte_alignment() (all zeros),
+                    // so we skip alignment verification here.
+                    self.parse_frame_header(input, obu_header, packet_ts, obu_bit_offset, false)
                 })
                 .parse(input)?;
                 debug!(

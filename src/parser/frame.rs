@@ -18,8 +18,8 @@ use super::{
     obu::ObuHeader,
     sequence::{SELECT_INTEGER_MV, SELECT_SCREEN_CONTENT_TOOLS},
     trace::{
-        TraceCtx, trace_bool, trace_field, trace_field_signed, trace_su, trace_take_u8,
-        trace_take_u32, trace_take_u64, trace_take_usize,
+        TraceCtx, trace_bool, trace_byte_alignment, trace_field, trace_field_signed, trace_su,
+        trace_take_u8, trace_take_u32, trace_take_u64, trace_take_usize,
     },
     util::{BitInput, ns, su, take_bool_bit},
 };
@@ -86,7 +86,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
     ) -> IResult<&'a [u8], Option<FrameHeader>, Error<&'a [u8]>> {
         let input_len = input.len();
         let (input, frame_header) = context("Failed parsing frame header", |input| {
-            self.parse_frame_header(input, obu_header, packet_ts, obu_bit_offset)
+            self.parse_frame_header(input, obu_header, packet_ts, obu_bit_offset, true)
         })
         .parse(input)?;
         let ref_frame_header = frame_header
@@ -117,6 +117,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         // Once again, this is in 10,000,000ths of a second
         packet_ts: u64,
         obu_bit_offset: usize,
+        verify_byte_alignment: bool,
     ) -> IResult<&'a [u8], Option<FrameHeader>, Error<&'a [u8]>> {
         if self.seen_frame_header {
             debug!("Seen frame header, exiting frame header parsing");
@@ -126,8 +127,13 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         self.seen_frame_header = true;
 
         let pre_len = input.len();
-        let (input, header) =
-            self.uncompressed_header(input, obu_header, packet_ts, obu_bit_offset)?;
+        let (input, header) = self.uncompressed_header(
+            input,
+            obu_header,
+            packet_ts,
+            obu_bit_offset,
+            verify_byte_alignment,
+        )?;
         debug!(
             "Consumed {} bytes in uncompressed header",
             pre_len - input.len()
@@ -160,6 +166,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         // Once again, this is in 10,000,000ths of a second
         packet_ts: u64,
         obu_bit_offset: usize,
+        verify_byte_alignment: bool,
     ) -> IResult<&'a [u8], FrameHeader, Error<&'a [u8]>> {
         let orig_input = input;
 
@@ -198,6 +205,11 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                         let len = orig_input.len() - input.0.len() + usize::from(input.1 > 0);
                         self.packet_out.extend_from_slice(&orig_input[..len]);
                     }
+                    let input = if verify_byte_alignment {
+                        trace_byte_alignment(input, ctx)?.0
+                    } else {
+                        input
+                    };
                     return Ok((
                         input,
                         FrameHeader {
@@ -661,6 +673,12 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     self.big_ref_order_hint[i] = order_hint;
                 }
             }
+
+            let input = if verify_byte_alignment {
+                trace_byte_alignment(input, ctx)?.0
+            } else {
+                input
+            };
 
             Ok((
                 input,
@@ -4355,7 +4373,7 @@ mod tests {
         parser.seen_frame_header = true;
         let input: &[u8] = &[0xAB, 0xCD];
         let (remaining, result) = parser
-            .parse_frame_header(input, simple_obu_header(), 0, 0)
+            .parse_frame_header(input, simple_obu_header(), 0, 0, false)
             .unwrap();
         assert!(result.is_none());
         assert_eq!(
@@ -4386,7 +4404,7 @@ mod tests {
         bits.push_bits(0, 3); // frame_to_show_map_idx
         let (data, _) = with_trailer(bits);
         let (_, result) = parser
-            .parse_frame_header(&data, simple_obu_header(), 0, 0)
+            .parse_frame_header(&data, simple_obu_header(), 0, 0, false)
             .unwrap();
         let header = result.expect("shown existing frame should return Some");
         assert!(header.show_existing_frame);
@@ -4402,7 +4420,7 @@ mod tests {
         let bits = build_minimal_key_frame_bits(true);
         let (data, _) = with_trailer(bits);
         let (_, result) = parser
-            .parse_frame_header(&data, simple_obu_header(), 0, 0)
+            .parse_frame_header(&data, simple_obu_header(), 0, 0, false)
             .unwrap();
         let header = result.expect("shown Key frame should return Some");
         assert!(header.show_frame);
@@ -4417,7 +4435,7 @@ mod tests {
         let bits = build_minimal_key_frame_bits(false);
         let (data, _) = with_trailer(bits);
         let (_, result) = parser
-            .parse_frame_header(&data, simple_obu_header(), 0, 0)
+            .parse_frame_header(&data, simple_obu_header(), 0, 0, false)
             .unwrap();
         assert!(result.is_none(), "hidden frame should return None");
         assert!(parser.seen_frame_header);
@@ -4444,7 +4462,7 @@ mod tests {
         bits.push_bits(0, 3); // frame_to_show_map_idx
         let (data, _) = with_trailer(bits);
         let (_, result) = parser
-            .parse_frame_header(&data, simple_obu_header(), 0, 0)
+            .parse_frame_header(&data, simple_obu_header(), 0, 0, false)
             .unwrap();
         let header = result.unwrap();
         assert_eq!(header.tile_info.tile_cols, expected_tile_info.tile_cols);
@@ -4467,7 +4485,7 @@ mod tests {
         let bits = build_minimal_key_frame_bits(true);
         let (data, _) = with_trailer(bits);
         let _ = parser
-            .parse_frame_header(&data, simple_obu_header(), 0, 0)
+            .parse_frame_header(&data, simple_obu_header(), 0, 0, false)
             .unwrap();
         // Key+show clears refs first, then refreshes all (order_hint=0, valid=true)
         for i in 0..NUM_REF_FRAMES {
@@ -4494,7 +4512,7 @@ mod tests {
         let bits = build_minimal_key_frame_bits(false);
         let (data, _) = with_trailer(bits);
         let _ = parser
-            .parse_frame_header(&data, simple_obu_header(), 0, 0)
+            .parse_frame_header(&data, simple_obu_header(), 0, 0, false)
             .unwrap();
         // Hidden Key frame: no clear step (Key+show_frame required), but
         // refresh_frame_flags=0xFF refreshes all → valid=true, order_hint=0
@@ -4514,7 +4532,7 @@ mod tests {
         let bits = build_minimal_key_frame_bits(true);
         let (data, consumed) = with_trailer(bits);
         let _ = parser
-            .parse_frame_header(&data, simple_obu_header(), 0, 0)
+            .parse_frame_header(&data, simple_obu_header(), 0, 0, false)
             .unwrap();
         // WRITE mode should copy the header bytes to packet_out.
         // film_grain_params_present=false and new_film_grain_state=false,
@@ -4547,7 +4565,7 @@ mod tests {
         bits.push_bits(0, 3); // frame_to_show_map_idx
         let (data, _) = with_trailer(bits);
         let _ = parser
-            .parse_frame_header(&data, simple_obu_header(), 0, 0)
+            .parse_frame_header(&data, simple_obu_header(), 0, 0, false)
             .unwrap();
         // 4 bits → 1 byte written to packet_out
         assert_eq!(parser.packet_out.len(), 1);
@@ -4572,7 +4590,7 @@ mod tests {
         bits.push_bool(false); // apply_grain = false in original stream
         let (data, _) = with_trailer(bits);
         let (_, result) = parser
-            .parse_frame_header(&data, simple_obu_header(), 500, 0)
+            .parse_frame_header(&data, simple_obu_header(), 500, 0, false)
             .unwrap();
         let header = result.unwrap();
         match &header.film_grain_params {
@@ -4606,7 +4624,7 @@ mod tests {
         bits.push_bool(false); // apply_grain = false
         let (data, _) = with_trailer(bits);
         let (_, result) = parser
-            .parse_frame_header(&data, simple_obu_header(), 5000, 0)
+            .parse_frame_header(&data, simple_obu_header(), 5000, 0, false)
             .unwrap();
         let header = result.unwrap();
         assert_eq!(header.film_grain_params, FilmGrainHeader::Disable);
@@ -4624,7 +4642,7 @@ mod tests {
         bits.push_bool(false); // apply_grain = false
         let (data, _) = with_trailer(bits);
         let (_, result) = parser
-            .parse_frame_header(&data, simple_obu_header(), 0, 0)
+            .parse_frame_header(&data, simple_obu_header(), 0, 0, false)
             .unwrap();
         let header = result.unwrap();
         assert_eq!(header.film_grain_params, FilmGrainHeader::Disable);
@@ -4715,5 +4733,64 @@ mod tests {
         // Tile payload should be the last bytes in packet_out
         let tail = &parser.packet_out[parser.packet_out.len() - tile_payload.len()..];
         assert_eq!(tail, &tile_payload);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group F: byte_alignment verification in parse_frame_obu
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_frame_obu_with_zero_padding_passes_alignment() {
+        // build_minimal_key_frame_bits produces 22 bits → 2 zero padding bits.
+        // BitBuilder::into_bytes() pads with zeros, so alignment verification succeeds.
+        let mut parser = make_parser::<false>();
+        parser.sequence_header = Some(minimal_sequence_header());
+        let bits = build_minimal_key_frame_bits(true);
+        let mut data = bits.into_bytes();
+        data.extend_from_slice(&[0xAA, 0xBB]); // tile payload
+        parser.size = data.len();
+        let (remaining, result) = parser
+            .parse_frame_obu(&data, simple_obu_header(), 0, 0)
+            .expect("zero-padded frame header should pass byte_alignment");
+        assert!(result.is_some());
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn parse_frame_obu_with_non_zero_padding_errors() {
+        let mut parser = make_parser::<false>();
+        parser.sequence_header = Some(minimal_sequence_header());
+        let bits = build_minimal_key_frame_bits(true);
+        // 22 bits → occupies first 22 bits, padding is bits 22-23 (2 bits).
+        // Set a non-zero padding bit to trigger alignment failure.
+        let mut data = bits.into_bytes();
+        // Byte 2 (bits 16-23): bits 16-21 are header, bits 22-23 are padding.
+        // Set bit 22 (= bit index 6 of byte 2 = mask 0b0000_0010).
+        data[2] |= 0b0000_0010;
+        data.extend_from_slice(&[0xAA, 0xBB]); // tile payload
+        parser.size = data.len();
+        let result = parser.parse_frame_obu(&data, simple_obu_header(), 0, 0);
+        assert!(
+            result.is_err(),
+            "non-zero padding bits should cause byte_alignment to fail"
+        );
+    }
+
+    #[test]
+    fn parse_frame_header_standalone_skips_alignment_verification() {
+        // Standalone FrameHeader OBU uses trailing_bits() (starts with 1),
+        // so verify_byte_alignment=false should skip the check.
+        let mut parser = make_parser::<false>();
+        parser.sequence_header = Some(minimal_sequence_header());
+        let mut bits = build_minimal_key_frame_bits(true);
+        // Add a trailing 1-bit (simulating trailing_bits()) followed by zeros.
+        bits.push_bool(true);
+        let (data, _) = with_trailer(bits);
+        // With verify_byte_alignment=false, the non-zero padding bit is ignored.
+        let result = parser.parse_frame_header(&data, simple_obu_header(), 0, 0, false);
+        assert!(
+            result.is_ok(),
+            "standalone FrameHeader should skip alignment verification"
+        );
     }
 }

@@ -169,6 +169,18 @@ pub fn trace_su<'a>(
     Ok((input, value))
 }
 
+/// Consumes zero-valued padding bits one at a time until byte-aligned,
+/// logging each bit individually to match FFmpeg's `trace_headers` format.
+pub fn trace_byte_alignment<'a>(
+    mut input: BitInput<'a>,
+    ctx: TraceCtx,
+) -> IResult<BitInput<'a>, (), Error<BitInput<'a>>> {
+    while input.1 != 0 {
+        (input, _) = trace_zero_bit(input, ctx, "zero_bit")?;
+    }
+    Ok((input, ()))
+}
+
 /// Decodes a byte-aligned LEB128 value and logs it.
 ///
 /// `bit_offset` is the absolute bit position of the first LEB128 byte
