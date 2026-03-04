@@ -113,6 +113,14 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     continue;
                 }
 
+                debug!(
+                    target: "trace_headers",
+                    "Packet: {} bytes, pts {}, dts {}.",
+                    input.len(),
+                    packet.pts().unwrap_or_default(),
+                    packet.dts().unwrap_or_default(),
+                );
+
                 // ffmpeg gives us the packet in milliseconds.
                 // we need it to be in 10,000,000ths of a second.
                 let packet_ts = packet.pts().unwrap_or_default() as u64 * FF_TO_AV1_TS_SHIFT;
@@ -202,6 +210,14 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     self.write_packet(packet, &stream, &stream_mapping, &ist_time_bases)?;
                     continue;
                 }
+
+                debug!(
+                    target: "trace_headers",
+                    "Packet: {} bytes, pts {}, dts {}.",
+                    input.len(),
+                    packet.pts().unwrap_or_default(),
+                    packet.dts().unwrap_or_default(),
+                );
 
                 // ffmpeg gives us the packet in milliseconds.
                 // we need it to be in 10,000,000ths of a second.
