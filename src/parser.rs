@@ -18,6 +18,7 @@ pub mod grain;
 pub mod obu;
 pub mod sequence;
 pub mod tile_group;
+pub mod trace;
 pub mod util;
 
 const FF_TO_AV1_TS_SHIFT: u64 = 10_000_000 / 1_000;

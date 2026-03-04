@@ -1,10 +1,10 @@
-use nom::{
-    IResult,
-    bits::{bits, complete as bit_parsers},
-    error::Error,
-};
+use nom::{IResult, bits::bits, error::Error};
 
-use super::{BitstreamParser, frame::TileInfo, util::take_bool_bit};
+use super::{
+    BitstreamParser,
+    frame::TileInfo,
+    trace::{TraceCtx, trace_bool, trace_take_u32},
+};
 
 impl<const WRITE: bool> BitstreamParser<WRITE> {
     /// Parses the tile group OBU header and updates frame-boundary tracking state.
@@ -32,21 +32,23 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         input: &'a [u8],
         size: usize,
         tile_info: TileInfo,
+        obu_bit_offset: usize,
     ) -> IResult<&'a [u8], (), Error<&'a [u8]>> {
         // Tile group header--we only need to parse this part
         let (_, (num_tiles, tg_end)) = bits(|input| {
+            let ctx = TraceCtx::new(input, obu_bit_offset);
             let num_tiles = tile_info.tile_cols * tile_info.tile_rows;
             let (input, tile_start_and_end_present) = if num_tiles > 1 {
-                take_bool_bit(input)?
+                trace_bool(input, ctx, "tile_start_and_end_present_flag")?
             } else {
                 (input, false)
             };
             if num_tiles == 1 || !tile_start_and_end_present {
                 Ok((input, (num_tiles, num_tiles - 1)))
             } else {
-                let tile_bits = tile_info.tile_cols_log2 + tile_info.tile_rows_log2;
-                let (input, _tg_start): (_, u32) = bit_parsers::take(tile_bits)(input)?;
-                let (input, tg_end): (_, u32) = bit_parsers::take(tile_bits)(input)?;
+                let tile_bits = (tile_info.tile_cols_log2 + tile_info.tile_rows_log2) as usize;
+                let (input, _tg_start) = trace_take_u32(input, ctx, tile_bits, "tg_start")?;
+                let (input, tg_end) = trace_take_u32(input, ctx, tile_bits, "tg_end")?;
                 Ok((input, (num_tiles, tg_end)))
             }
         })(input)?;
@@ -111,7 +113,7 @@ mod tests {
         let size = 0;
 
         let (remaining, ()) = parser
-            .parse_tile_group_obu(&input, size, tile_info(1, 1, 0, 0))
+            .parse_tile_group_obu(&input, size, tile_info(1, 1, 0, 0), 0)
             .expect("single-tile tile-group OBU should parse without reading header bits");
 
         assert_eq!(remaining, &input[size..]);
@@ -126,7 +128,7 @@ mod tests {
         let size = 1;
 
         let (remaining, ()) = parser
-            .parse_tile_group_obu(&input, size, tile_info(2, 2, 1, 1))
+            .parse_tile_group_obu(&input, size, tile_info(2, 2, 1, 1), 0)
             .expect("multi-tile tile-group with tile_start_and_end_present = false should parse");
 
         assert_eq!(remaining, &input[size..]);
@@ -143,7 +145,7 @@ mod tests {
         let size = 2;
 
         let (remaining, ()) = parser
-            .parse_tile_group_obu(&input, size, tile_info(2, 2, 1, 1))
+            .parse_tile_group_obu(&input, size, tile_info(2, 2, 1, 1), 0)
             .expect("multi-tile tile-group with explicit tg_start/tg_end should parse");
 
         assert_eq!(remaining, &input[size..]);
@@ -159,7 +161,7 @@ mod tests {
         let size = 1;
 
         let (remaining, ()) = parser
-            .parse_tile_group_obu(&input, size, tile_info(2, 2, 1, 1))
+            .parse_tile_group_obu(&input, size, tile_info(2, 2, 1, 1), 0)
             .expect("multi-tile tile-group should clear seen_frame_header when tg_end is last");
 
         assert_eq!(remaining, &input[size..]);
@@ -173,7 +175,7 @@ mod tests {
         let size = 2;
 
         let (remaining, ()) = parser
-            .parse_tile_group_obu(&input, size, tile_info(1, 1, 0, 0))
+            .parse_tile_group_obu(&input, size, tile_info(1, 1, 0, 0), 0)
             .expect("write-mode tile-group parse should succeed");
 
         assert_eq!(remaining, &input[size..]);

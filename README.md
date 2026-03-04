@@ -41,6 +41,16 @@ Compares `my_source.mkv` and `denoised_source.mkv` and generates a film grain ta
 
 Analyzes `my_source.mkv` and estimates the amount of noise in the source, then generates an appropriate film grain table at `grain_file.txt`. This is less accurate than the diff method, but is significantly faster. -->
 
+## Debug Tracing
+
+To enable AV1 bitstream trace header output (similar to FFmpeg's `trace_headers` bitstream filter), set the `RUST_LOG` environment variable:
+
+```sh
+RUST_LOG=trace_headers=debug grav1synth inspect my_encode.mkv -o grain_file.txt
+```
+
+This outputs each parsed OBU field with its bit position, binary representation, and decimal value.
+
 ## Known Issues
 
 - There have been reports that certain videos will fail to apply film grain properly. This is likely related to aomenc's `--keyframe-filtering=2`.

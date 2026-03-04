@@ -10,7 +10,11 @@ use super::{
     BitstreamParser,
     frame::FrameHeader,
     sequence::SequenceHeader,
-    util::{BitInput, leb128, leb128_write, take_bool_bit, take_zero_bit},
+    trace::{
+        TraceCtx, trace_bool, trace_field, trace_leb128, trace_section, trace_take_u8,
+        trace_zero_bit,
+    },
+    util::{BitInput, leb128_write},
 };
 
 impl<const WRITE: bool> BitstreamParser<WRITE> {
@@ -41,15 +45,19 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         packet_ts: u64,
     ) -> IResult<&'a [u8], Option<Obu>, Error<&'a [u8]>> {
         debug!("Parsing OBU from remaining data of {} bytes", input.len());
+        trace_section("OBU header");
         let pre_input = input;
         let packet_start_len = self.packet_out.len();
-        let (input, obu_header) =
+        let (input, (obu_header, header_bits)) =
             context("Failed parsing obu header", parse_obu_header).parse(input)?;
         let obu_header_size = if obu_header.extension.is_some() { 2 } else { 1 };
         let obu_size_pos = packet_start_len + obu_header_size;
         let mut leb_size = 0;
         let (input, obu_size) = if obu_header.has_size_field {
-            let (input, result) = context("Failed parsing obu size", leb128).parse(input)?;
+            let (input, result) = context("Failed parsing obu size", |input| {
+                trace_leb128(input, header_bits, "obu_size")
+            })
+            .parse(input)?;
             leb_size = result.bytes_read;
             debug!("Parsed OBU size of {}", result.value);
             (input, result.value as usize)
@@ -98,13 +106,15 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             }
         }
 
+        let obu_bit_offset = header_bits + leb_size * 8;
         match obu_header.obu_type {
             ObuType::SequenceHeader => {
+                trace_section("Sequence Header");
                 debug!("Parsing sequence header");
                 let pre_len = input.len();
                 let (mut input, header) = context("Failed parsing sequence header", |input| {
                     // Writing handled within this function
-                    self.parse_sequence_header(input)
+                    self.parse_sequence_header(input, obu_bit_offset)
                 })
                 .parse(input)?;
                 debug!(
@@ -131,11 +141,12 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 Ok((input, Some(Obu::SequenceHeader(header))))
             }
             ObuType::Frame => {
+                trace_section("Frame");
                 debug!("Parsing frame");
                 let pre_len = input.len();
                 let (mut input, header) = context("Failed parsing frame obu", |input| {
                     // Writing handled within this function
-                    self.parse_frame_obu(input, obu_header, packet_ts)
+                    self.parse_frame_obu(input, obu_header, packet_ts, obu_bit_offset)
                 })
                 .parse(input)?;
                 debug!("Consumed {} bytes of data for frame", pre_len - input.len());
@@ -159,11 +170,12 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 Ok((input, header.map(Obu::FrameHeader)))
             }
             ObuType::FrameHeader => {
+                trace_section("Frame Header");
                 debug!("Parsing frame header");
                 let pre_len = input.len();
                 let (mut input, header) = context("Failed parsing frame header", |input| {
                     // Writing handled within this function
-                    self.parse_frame_header(input, obu_header, packet_ts)
+                    self.parse_frame_header(input, obu_header, packet_ts, obu_bit_offset)
                 })
                 .parse(input)?;
                 debug!(
@@ -198,6 +210,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 unreachable!("This should only be called from within a frame OBU.");
             }
             ObuType::TemporalDelimiter => {
+                trace_section("Temporal Delimiter");
                 debug!("Skipping temporal delimiter");
                 self.seen_frame_header = false;
                 if WRITE {
@@ -288,47 +301,55 @@ pub enum ObuType {
 ///
 /// The parser validates required zero bits (`forbidden_bit`, `reserved_1bit`) and conditionally
 /// parses the extension byte when `extension_flag` is set.
-fn parse_obu_header(input: &[u8]) -> IResult<&[u8], ObuHeader, Error<&[u8]>> {
-    let (input, obu_header) = bits(|input| {
-        let (input, _forbidden_bit) =
-            context("Failed parsing forbidden_bit", take_zero_bit).parse(input)?;
+///
+/// Returns the parsed header and the number of header bits consumed (8 without
+/// extension, 16 with extension) so callers can compute downstream bit offsets.
+fn parse_obu_header(input: &[u8]) -> IResult<&[u8], (ObuHeader, usize), Error<&[u8]>> {
+    let (input, result) = bits(|input| {
+        let ctx = TraceCtx::new(input, 0);
+        let (input, ()) = trace_zero_bit(input, ctx, "obu_forbidden_bit")?;
+        let pos = ctx.pos(input);
         let (input, obu_type) = context("Failed parsing obu_type", obu_type).parse(input)?;
-        let (input, extension_flag) =
-            context("Failed parsing extension_flag", take_bool_bit).parse(input)?;
-        let (input, has_size_field) =
-            context("Failed parsing has_size_field", take_bool_bit).parse(input)?;
-        let (input, _reserved_1bit) =
-            context("Failed parsing reserved_1bit", take_zero_bit).parse(input)?;
+        trace_field(pos, "obu_type", 4, u64::from(obu_type as u8));
+        let (input, extension_flag) = trace_bool(input, ctx, "obu_extension_flag")?;
+        let (input, has_size_field) = trace_bool(input, ctx, "obu_has_size_field")?;
+        let (input, ()) = trace_zero_bit(input, ctx, "obu_reserved_1bit")?;
 
         let (input, extension) = if extension_flag {
-            let (input, extension) =
-                context("Failed parsing obu extension", obu_extension).parse(input)?;
+            let (input, extension) = obu_extension(input, ctx)?;
             (input, Some(extension))
         } else {
             (input, None)
         };
 
+        let header_bits = if extension.is_some() { 16 } else { 8 };
         Ok((
             input,
-            ObuHeader {
-                obu_type,
-                has_size_field,
-                extension,
-            },
+            (
+                ObuHeader {
+                    obu_type,
+                    has_size_field,
+                    extension,
+                },
+                header_bits,
+            ),
         ))
     })(input)?;
 
-    Ok((input, obu_header))
+    Ok((input, result))
 }
 
 /// Parse the 8-bit OBU extension payload.
 ///
 /// The extension carries `temporal_id` (3 bits) and `spatial_id` (2 bits). The trailing
 /// 3 reserved bits are consumed and intentionally discarded.
-fn obu_extension(input: BitInput) -> IResult<BitInput, ObuExtension, Error<BitInput>> {
-    let (input, temporal_id) = bit_parsers::take(3usize)(input)?;
-    let (input, spatial_id) = bit_parsers::take(2usize)(input)?;
-    let (input, _reserved): (_, u8) = bit_parsers::take(3usize)(input)?;
+fn obu_extension<'a>(
+    input: BitInput<'a>,
+    ctx: TraceCtx,
+) -> IResult<BitInput<'a>, ObuExtension, Error<BitInput<'a>>> {
+    let (input, temporal_id) = trace_take_u8(input, ctx, 3, "temporal_id")?;
+    let (input, spatial_id) = trace_take_u8(input, ctx, 2, "spatial_id")?;
+    let (input, _reserved) = trace_take_u8(input, ctx, 3, "extension_header_reserved_3bits")?;
     Ok((
         input,
         ObuExtension {
@@ -372,11 +393,13 @@ mod tests {
         let header = make_obu_header_byte(0, ObuType::Frame, false, true, 0);
         let input = [header, 0xAA];
 
-        let (remaining, parsed) = parse_obu_header(&input).expect("header should parse");
+        let (remaining, (parsed, header_bits)) =
+            parse_obu_header(&input).expect("header should parse");
 
         assert_eq!(parsed.obu_type, ObuType::Frame);
         assert!(parsed.has_size_field);
         assert!(parsed.extension.is_none());
+        assert_eq!(header_bits, 8);
         assert_eq!(remaining, &input[1..]);
     }
 
@@ -386,13 +409,15 @@ mod tests {
         let extension = make_obu_extension_byte(5, 2, 0b111);
         let input = [header, extension, 0xAA];
 
-        let (remaining, parsed) = parse_obu_header(&input).expect("header should parse");
+        let (remaining, (parsed, header_bits)) =
+            parse_obu_header(&input).expect("header should parse");
 
         assert_eq!(parsed.obu_type, ObuType::SequenceHeader);
         assert!(!parsed.has_size_field);
         let extension = parsed.extension.expect("extension should be present");
         assert_eq!(extension.temporal_id, 5);
         assert_eq!(extension.spatial_id, 2);
+        assert_eq!(header_bits, 16);
         assert_eq!(remaining, &input[2..]);
     }
 
@@ -418,8 +443,10 @@ mod tests {
     fn obu_extension_parses_temporal_and_spatial_ids() {
         let extension = make_obu_extension_byte(7, 3, 0b101);
         let input = [extension, 0xAA];
+        let bit_input: BitInput = (&input, 0);
+        let ctx = TraceCtx::new(bit_input, 0);
 
-        let (remaining, parsed) = obu_extension((&input, 0)).expect("extension should parse");
+        let (remaining, parsed) = obu_extension(bit_input, ctx).expect("extension should parse");
 
         assert_eq!(parsed.temporal_id, 7);
         assert_eq!(parsed.spatial_id, 3);
@@ -429,7 +456,10 @@ mod tests {
 
     #[test]
     fn obu_extension_errors_when_insufficient_bits_are_available() {
-        assert!(obu_extension((&[], 0)).is_err());
+        let empty: &[u8] = &[];
+        let bit_input: BitInput = (empty, 0);
+        let ctx = TraceCtx::new(bit_input, 0);
+        assert!(obu_extension(bit_input, ctx).is_err());
     }
 
     #[test]

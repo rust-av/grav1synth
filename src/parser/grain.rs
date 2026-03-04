@@ -1,10 +1,11 @@
 use arrayvec::ArrayVec;
 use av1_grain::{NUM_UV_COEFFS, NUM_UV_POINTS, NUM_Y_COEFFS, NUM_Y_POINTS};
-use nom::{IResult, bits::complete as bit_parsers, error::Error};
+use nom::{IResult, error::Error};
 
 use super::{
     frame::FrameType,
-    util::{BitInput, take_bool_bit},
+    trace::{TraceCtx, trace_bool, trace_take_u8, trace_take_u16},
+    util::BitInput,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -135,38 +136,42 @@ impl From<av1_grain::GrainTableSegment> for FilmGrainParams {
 }
 
 #[allow(clippy::too_many_lines)]
-pub fn film_grain_params(
-    input: BitInput,
+pub fn film_grain_params<'a>(
+    input: BitInput<'a>,
+    ctx: TraceCtx,
     film_grain_allowed: bool,
     frame_type: FrameType,
     monochrome: bool,
     subsampling: (u8, u8),
-) -> IResult<BitInput, FilmGrainHeader, Error<BitInput>> {
+) -> IResult<BitInput<'a>, FilmGrainHeader, Error<BitInput<'a>>> {
     if !film_grain_allowed {
         return Ok((input, FilmGrainHeader::Disable));
     }
 
-    let (input, apply_grain) = take_bool_bit(input)?;
+    let (input, apply_grain) = trace_bool(input, ctx, "apply_grain")?;
     if !apply_grain {
         return Ok((input, FilmGrainHeader::Disable));
     }
 
-    let (input, grain_seed) = bit_parsers::take(16usize)(input)?;
+    let (input, grain_seed) = trace_take_u16(input, ctx, 16, "grain_seed")?;
     let (input, update_grain) = if frame_type == FrameType::Inter {
-        take_bool_bit(input)?
+        trace_bool(input, ctx, "update_grain")?
     } else {
         (input, true)
     };
     if !update_grain {
-        let (input, _film_grain_params_ref_idx): (_, u8) = bit_parsers::take(3usize)(input)?;
+        let (input, _film_grain_params_ref_idx) =
+            trace_take_u8(input, ctx, 3, "film_grain_params_ref_idx")?;
         return Ok((input, FilmGrainHeader::CopyRefFrame));
     }
 
-    let (mut input, num_y_points) = bit_parsers::take(4usize)(input)?;
+    let (mut input, num_y_points) = trace_take_u8(input, ctx, 4, "num_y_points")?;
     let mut scaling_points_y: ArrayVec<[u8; 2], NUM_Y_POINTS> = ArrayVec::new();
-    for _ in 0u8..num_y_points {
-        let (inner_input, point_y_value) = bit_parsers::take(8usize)(input)?;
-        let (inner_input, point_y_scaling) = bit_parsers::take(8usize)(inner_input)?;
+    for i in 0u8..num_y_points {
+        let (inner_input, point_y_value) =
+            trace_take_u8(input, ctx, 8, &format!("point_y_value[{i}]"))?;
+        let (inner_input, point_y_scaling) =
+            trace_take_u8(inner_input, ctx, 8, &format!("point_y_scaling[{i}]"))?;
         scaling_points_y.push([point_y_value, point_y_scaling]);
         input = inner_input;
     }
@@ -176,7 +181,7 @@ pub fn film_grain_params(
     let (input, chroma_scaling_from_luma) = if monochrome {
         (input, false)
     } else {
-        take_bool_bit(input)?
+        trace_bool(input, ctx, "chroma_scaling_from_luma")?
     };
     let (input, num_cb_points, num_cr_points) = if monochrome
         || chroma_scaling_from_luma
@@ -184,34 +189,39 @@ pub fn film_grain_params(
     {
         (input, 0u8, 0u8)
     } else {
-        let (mut input, num_cb_points) = bit_parsers::take(4usize)(input)?;
-        for _ in 0..num_cb_points {
-            let (inner_input, point_cb_value) = bit_parsers::take(8usize)(input)?;
-            let (inner_input, point_cb_scaling) = bit_parsers::take(8usize)(inner_input)?;
+        let (mut input, num_cb_points) = trace_take_u8(input, ctx, 4, "num_cb_points")?;
+        for i in 0..num_cb_points {
+            let (inner_input, point_cb_value) =
+                trace_take_u8(input, ctx, 8, &format!("point_cb_value[{i}]"))?;
+            let (inner_input, point_cb_scaling) =
+                trace_take_u8(inner_input, ctx, 8, &format!("point_cb_scaling[{i}]"))?;
             scaling_points_cb.push([point_cb_value, point_cb_scaling]);
             input = inner_input;
         }
 
-        let (mut input, num_cr_points) = bit_parsers::take(4usize)(input)?;
-        for _ in 0..num_cr_points {
-            let (inner_input, point_cr_value) = bit_parsers::take(8usize)(input)?;
-            let (inner_input, point_cr_scaling) = bit_parsers::take(8usize)(inner_input)?;
+        let (mut input, num_cr_points) = trace_take_u8(input, ctx, 4, "num_cr_points")?;
+        for i in 0..num_cr_points {
+            let (inner_input, point_cr_value) =
+                trace_take_u8(input, ctx, 8, &format!("point_cr_value[{i}]"))?;
+            let (inner_input, point_cr_scaling) =
+                trace_take_u8(inner_input, ctx, 8, &format!("point_cr_scaling[{i}]"))?;
             scaling_points_cr.push([point_cr_value, point_cr_scaling]);
             input = inner_input;
         }
         (input, num_cb_points, num_cr_points)
     };
 
-    let (input, _grain_scaling_minus_8): (_, u8) = bit_parsers::take(2usize)(input)?;
-    let (mut input, ar_coeff_lag) = bit_parsers::take(2usize)(input)?;
+    let (input, _grain_scaling_minus_8) = trace_take_u8(input, ctx, 2, "grain_scaling_minus_8")?;
+    let (mut input, ar_coeff_lag) = trace_take_u8(input, ctx, 2, "ar_coeff_lag")?;
     let mut ar_coeffs_y = ArrayVec::new();
     let mut ar_coeffs_cb = ArrayVec::new();
     let mut ar_coeffs_cr = ArrayVec::new();
     let num_pos_luma = 2 * ar_coeff_lag * (ar_coeff_lag + 1);
     let num_pos_chroma = if num_y_points > 0 {
-        for _ in 0..num_pos_luma {
-            let (inner_input, coeff_plus_128): (_, i16) = bit_parsers::take(8usize)(input)?;
-            ar_coeffs_y.push((coeff_plus_128 - 128) as i8);
+        for i in 0..num_pos_luma {
+            let (inner_input, coeff_plus_128): (_, u8) =
+                trace_take_u8(input, ctx, 8, &format!("ar_coeffs_y_plus_128[{i}]"))?;
+            ar_coeffs_y.push((i16::from(coeff_plus_128) - 128) as i8);
             input = inner_input;
         }
         num_pos_luma + 1
@@ -219,44 +229,46 @@ pub fn film_grain_params(
         num_pos_luma
     };
     if chroma_scaling_from_luma || num_cb_points > 0 {
-        for _ in 0..num_pos_chroma {
-            let (inner_input, coeff_plus_128): (_, i16) = bit_parsers::take(8usize)(input)?;
-            ar_coeffs_cb.push((coeff_plus_128 - 128) as i8);
+        for i in 0..num_pos_chroma {
+            let (inner_input, coeff_plus_128): (_, u8) =
+                trace_take_u8(input, ctx, 8, &format!("ar_coeffs_cb_plus_128[{i}]"))?;
+            ar_coeffs_cb.push((i16::from(coeff_plus_128) - 128) as i8);
             input = inner_input;
         }
     } else {
         ar_coeffs_cb.push(0);
     }
     if chroma_scaling_from_luma || num_cr_points > 0 {
-        for _ in 0..num_pos_chroma {
-            let (inner_input, coeff_plus_128): (_, i16) = bit_parsers::take(8usize)(input)?;
-            ar_coeffs_cr.push((coeff_plus_128 - 128) as i8);
+        for i in 0..num_pos_chroma {
+            let (inner_input, coeff_plus_128): (_, u8) =
+                trace_take_u8(input, ctx, 8, &format!("ar_coeffs_cr_plus_128[{i}]"))?;
+            ar_coeffs_cr.push((i16::from(coeff_plus_128) - 128) as i8);
             input = inner_input;
         }
     } else {
         ar_coeffs_cr.push(0);
     }
 
-    let (input, ar_coeff_shift_minus_6): (_, u8) = bit_parsers::take(2usize)(input)?;
-    let (input, grain_scale_shift) = bit_parsers::take(2usize)(input)?;
+    let (input, ar_coeff_shift_minus_6) = trace_take_u8(input, ctx, 2, "ar_coeff_shift_minus_6")?;
+    let (input, grain_scale_shift) = trace_take_u8(input, ctx, 2, "grain_scale_shift")?;
     let (input, cb_mult, cb_luma_mult, cb_offset) = if num_cb_points > 0 {
-        let (input, cb_mult) = bit_parsers::take(8usize)(input)?;
-        let (input, cb_luma_mult) = bit_parsers::take(8usize)(input)?;
-        let (input, cb_offset) = bit_parsers::take(9usize)(input)?;
+        let (input, cb_mult) = trace_take_u8(input, ctx, 8, "cb_mult")?;
+        let (input, cb_luma_mult) = trace_take_u8(input, ctx, 8, "cb_luma_mult")?;
+        let (input, cb_offset) = trace_take_u16(input, ctx, 9, "cb_offset")?;
         (input, cb_mult, cb_luma_mult, cb_offset)
     } else {
         (input, 0, 0, 0)
     };
     let (input, cr_mult, cr_luma_mult, cr_offset) = if num_cr_points > 0 {
-        let (input, cr_mult) = bit_parsers::take(8usize)(input)?;
-        let (input, cr_luma_mult) = bit_parsers::take(8usize)(input)?;
-        let (input, cr_offset) = bit_parsers::take(9usize)(input)?;
+        let (input, cr_mult) = trace_take_u8(input, ctx, 8, "cr_mult")?;
+        let (input, cr_luma_mult) = trace_take_u8(input, ctx, 8, "cr_luma_mult")?;
+        let (input, cr_offset) = trace_take_u16(input, ctx, 9, "cr_offset")?;
         (input, cr_mult, cr_luma_mult, cr_offset)
     } else {
         (input, 0, 0, 0)
     };
-    let (input, overlap_flag) = take_bool_bit(input)?;
-    let (input, clip_to_restricted_range) = take_bool_bit(input)?;
+    let (input, overlap_flag) = trace_bool(input, ctx, "overlap_flag")?;
+    let (input, clip_to_restricted_range) = trace_bool(input, ctx, "clip_to_restricted_range")?;
 
     Ok((
         input,
@@ -287,7 +299,13 @@ pub fn film_grain_params(
 
 #[cfg(test)]
 mod tests {
+    use super::super::trace::TraceCtx;
+    use super::super::util::BitInput;
     use super::{FilmGrainHeader, FilmGrainParams, FrameType, film_grain_params};
+
+    fn test_ctx(input: BitInput) -> TraceCtx {
+        TraceCtx::new(input, 0)
+    }
 
     #[derive(Default)]
     struct BitBuilder {
@@ -354,8 +372,15 @@ mod tests {
         let data = [0b1010_0000u8];
         let input = (&data[..], 3usize);
 
-        let (remaining, parsed) = film_grain_params(input, false, FrameType::Inter, false, (0, 0))
-            .expect("expected parser to return Disable when film grain is disallowed");
+        let (remaining, parsed) = film_grain_params(
+            input,
+            test_ctx(input),
+            false,
+            FrameType::Inter,
+            false,
+            (0, 0),
+        )
+        .expect("expected parser to return Disable when film grain is disallowed");
 
         assert_eq!(parsed, FilmGrainHeader::Disable);
         assert_eq!(remaining, input);
@@ -367,9 +392,16 @@ mod tests {
         bits.push_bool(false);
 
         let (data, consumed_bits) = with_trailer(bits);
-        let (remaining, parsed) =
-            film_grain_params((&data, 0), true, FrameType::Inter, false, (0, 0))
-                .expect("expected parser to read apply_grain and disable film grain");
+        let input: BitInput = (&data, 0);
+        let (remaining, parsed) = film_grain_params(
+            input,
+            test_ctx(input),
+            true,
+            FrameType::Inter,
+            false,
+            (0, 0),
+        )
+        .expect("expected parser to read apply_grain and disable film grain");
 
         assert_eq!(parsed, FilmGrainHeader::Disable);
         assert_remaining_position(remaining, &data, consumed_bits);
@@ -384,9 +416,16 @@ mod tests {
         bits.push_bits(0b101, 3);
 
         let (data, consumed_bits) = with_trailer(bits);
-        let (remaining, parsed) =
-            film_grain_params((&data, 0), true, FrameType::Inter, false, (0, 0))
-                .expect("expected parser to parse inter-frame copy-from-reference mode");
+        let input: BitInput = (&data, 0);
+        let (remaining, parsed) = film_grain_params(
+            input,
+            test_ctx(input),
+            true,
+            FrameType::Inter,
+            false,
+            (0, 0),
+        )
+        .expect("expected parser to parse inter-frame copy-from-reference mode");
 
         assert_eq!(parsed, FilmGrainHeader::CopyRefFrame);
         assert_remaining_position(remaining, &data, consumed_bits);
@@ -407,8 +446,9 @@ mod tests {
         bits.push_bool(false);
 
         let (data, consumed_bits) = with_trailer(bits);
+        let input: BitInput = (&data, 0);
         let (remaining, parsed) =
-            film_grain_params((&data, 0), true, FrameType::Key, false, (1, 1))
+            film_grain_params(input, test_ctx(input), true, FrameType::Key, false, (1, 1))
                 .expect("expected parser to parse key-frame update-grain payload");
 
         assert_remaining_position(remaining, &data, consumed_bits);
@@ -454,8 +494,9 @@ mod tests {
         bits.push_bool(true);
 
         let (data, consumed_bits) = with_trailer(bits);
+        let input: BitInput = (&data, 0);
         let (remaining, parsed) =
-            film_grain_params((&data, 0), true, FrameType::Inter, true, (0, 0))
+            film_grain_params(input, test_ctx(input), true, FrameType::Inter, true, (0, 0))
                 .expect("expected parser to parse monochrome film-grain update");
 
         assert_remaining_position(remaining, &data, consumed_bits);
@@ -507,9 +548,16 @@ mod tests {
         bits.push_bool(false);
 
         let (data, consumed_bits) = with_trailer(bits);
-        let (remaining, parsed) =
-            film_grain_params((&data, 0), true, FrameType::Inter, false, (0, 0))
-                .expect("expected parser to parse chroma_scaling_from_luma branch");
+        let input: BitInput = (&data, 0);
+        let (remaining, parsed) = film_grain_params(
+            input,
+            test_ctx(input),
+            true,
+            FrameType::Inter,
+            false,
+            (0, 0),
+        )
+        .expect("expected parser to parse chroma_scaling_from_luma branch");
 
         assert_remaining_position(remaining, &data, consumed_bits);
         let params = expect_update_params(parsed);
@@ -562,9 +610,16 @@ mod tests {
         bits.push_bool(true);
 
         let (data, consumed_bits) = with_trailer(bits);
-        let (remaining, parsed) =
-            film_grain_params((&data, 0), true, FrameType::Inter, false, (0, 0))
-                .expect("expected parser to parse explicit chroma points and multipliers");
+        let input: BitInput = (&data, 0);
+        let (remaining, parsed) = film_grain_params(
+            input,
+            test_ctx(input),
+            true,
+            FrameType::Inter,
+            false,
+            (0, 0),
+        )
+        .expect("expected parser to parse explicit chroma points and multipliers");
 
         assert_remaining_position(remaining, &data, consumed_bits);
         let params = expect_update_params(parsed);
@@ -620,9 +675,16 @@ mod tests {
         bits.push_bool(false);
 
         let (data, consumed_bits) = with_trailer(bits);
-        let (remaining, parsed) =
-            film_grain_params((&data, 0), true, FrameType::Inter, false, (0, 0))
-                .expect("expected parser to use num_pos_luma for chroma when no luma points");
+        let input: BitInput = (&data, 0);
+        let (remaining, parsed) = film_grain_params(
+            input,
+            test_ctx(input),
+            true,
+            FrameType::Inter,
+            false,
+            (0, 0),
+        )
+        .expect("expected parser to use num_pos_luma for chroma when no luma points");
 
         assert_remaining_position(remaining, &data, consumed_bits);
         let params = expect_update_params(parsed);

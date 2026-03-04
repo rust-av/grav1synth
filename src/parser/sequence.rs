@@ -1,12 +1,16 @@
 use arrayvec::ArrayVec;
 use bit::BitIndex;
 use log::debug;
-use nom::{IResult, bits::bits, bits::complete as bit_parsers, error::Error};
+use nom::{IResult, bits::bits, error::Error};
 use num_enum::TryFromPrimitive;
 
 use super::{
     BitstreamParser,
-    util::{BitInput, take_bool_bit, uvlc},
+    trace::{
+        TraceCtx, trace_bool, trace_field, trace_take_u8, trace_take_u16, trace_take_u32,
+        trace_take_u64, trace_take_usize,
+    },
+    util::{BitInput, uvlc},
 };
 
 pub const SELECT_SCREEN_CONTENT_TOOLS: u8 = 2;
@@ -157,6 +161,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
     pub fn parse_sequence_header<'a>(
         &mut self,
         input: &'a [u8],
+        obu_bit_offset: usize,
     ) -> IResult<&'a [u8], SequenceHeader, Error<&'a [u8]>> {
         let mut obu_out = if WRITE {
             input[..self.size].to_owned()
@@ -164,9 +169,11 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             Vec::new()
         };
         bits(move |input| {
-            let (input, seq_profile): (_, u8) = bit_parsers::take(3usize)(input)?;
-            let (input, _still_picture) = take_bool_bit(input)?;
-            let (input, reduced_still_picture_header) = take_bool_bit(input)?;
+            let ctx = TraceCtx::new(input, obu_bit_offset);
+            let (input, seq_profile) = trace_take_u8(input, ctx, 3, "seq_profile")?;
+            let (input, _still_picture) = trace_bool(input, ctx, "still_picture")?;
+            let (input, reduced_still_picture_header) =
+                trace_bool(input, ctx, "reduced_still_picture_header")?;
             let (
                 input,
                 decoder_model_info,
@@ -175,7 +182,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 operating_point_idc,
                 timing_info,
             ) = if reduced_still_picture_header {
-                let (input, _seq_level_idx): (_, u8) = bit_parsers::take(5usize)(input)?;
+                let (input, _seq_level_idx) = trace_take_u8(input, ctx, 5, "seq_level_idx[0]")?;
                 // AV1 spec: reduced_still_picture_header implies a single
                 // operating point with idc=0 and no decoder model.
                 let mut op_idc = ArrayVec::new();
@@ -184,12 +191,13 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 dm_present.push(false);
                 (input, None, 0, dm_present, op_idc, None)
             } else {
-                let (input, timing_info_present_flag) = take_bool_bit(input)?;
+                let (input, timing_info_present_flag) =
+                    trace_bool(input, ctx, "timing_info_present_flag")?;
                 let (input, decoder_model_info, timing_info) = if timing_info_present_flag {
-                    let (input, timing_info) = timing_info(input)?;
-                    let (input, flag) = take_bool_bit(input)?;
+                    let (input, timing_info) = timing_info(input, ctx)?;
+                    let (input, flag) = trace_bool(input, ctx, "decoder_model_info_present_flag")?;
                     let (input, decoder_model, timing_info) = if flag {
-                        let (input, decoder_model) = decoder_model_info(input)?;
+                        let (input, decoder_model) = decoder_model_info(input, ctx)?;
                         (input, Some(decoder_model), timing_info)
                     } else {
                         (input, None, timing_info)
@@ -198,31 +206,37 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 } else {
                     (input, None, None)
                 };
-                let (input, initial_display_delay_present_flag) = take_bool_bit(input)?;
+                let (input, initial_display_delay_present_flag) =
+                    trace_bool(input, ctx, "initial_display_delay_present_flag")?;
 
                 let mut decoder_model_present_for_op = ArrayVec::new();
                 let mut operating_point_idc = ArrayVec::new();
-                let (mut input, operating_points_cnt_minus_1): (_, usize) =
-                    bit_parsers::take(5usize)(input)?;
-                for _ in 0..=operating_points_cnt_minus_1 {
+                let (mut input, operating_points_cnt_minus_1) =
+                    trace_take_usize(input, ctx, 5, "operating_points_cnt_minus_1")?;
+                for i in 0..=operating_points_cnt_minus_1 {
                     let inner_input = input;
-                    let (inner_input, cur_operating_point_idc): (_, u16) =
-                        bit_parsers::take(12usize)(inner_input)?;
+                    let (inner_input, cur_operating_point_idc) =
+                        trace_take_u16(inner_input, ctx, 12, &format!("operating_point_idc[{i}]"))?;
                     operating_point_idc.push(cur_operating_point_idc);
-                    let (inner_input, seq_level_idx): (_, u8) =
-                        bit_parsers::take(5usize)(inner_input)?;
+                    let (inner_input, seq_level_idx) =
+                        trace_take_u8(inner_input, ctx, 5, &format!("seq_level_idx[{i}]"))?;
                     let (inner_input, _seq_tier) = if seq_level_idx > 7 {
-                        take_bool_bit(inner_input)?
+                        trace_bool(inner_input, ctx, &format!("seq_tier[{i}]"))?
                     } else {
                         (inner_input, false)
                     };
                     let (inner_input, cur_decoder_model_present_for_op) =
                         if let Some(decoder_model_info) = decoder_model_info {
-                            let (inner_input, flag) = take_bool_bit(inner_input)?;
+                            let (inner_input, flag) = trace_bool(
+                                inner_input,
+                                ctx,
+                                &format!("decoder_model_present_for_this_op[{i}]"),
+                            )?;
                             if flag {
                                 (
                                     operating_parameters_info(
                                         inner_input,
+                                        ctx,
                                         decoder_model_info.buffer_delay_length_minus_1 as usize + 1,
                                     )?
                                     .0,
@@ -237,10 +251,18 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     decoder_model_present_for_op.push(cur_decoder_model_present_for_op);
                     let (inner_input, _initial_display_delay_present_for_op) =
                         if initial_display_delay_present_flag {
-                            let (inner_input, flag) = take_bool_bit(inner_input)?;
+                            let (inner_input, flag) = trace_bool(
+                                inner_input,
+                                ctx,
+                                &format!("initial_display_delay_present_for_this_op[{i}]"),
+                            )?;
                             if flag {
-                                let (inner_input, _initial_display_delay_minus_1): (_, u8) =
-                                    bit_parsers::take(4usize)(inner_input)?;
+                                let (inner_input, _initial_display_delay_minus_1) = trace_take_u8(
+                                    inner_input,
+                                    ctx,
+                                    4,
+                                    &format!("initial_display_delay_minus_1[{i}]"),
+                                )?;
                                 (inner_input, flag)
                             } else {
                                 (inner_input, flag)
@@ -262,22 +284,33 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
 
             let operating_point = choose_operating_point();
             let cur_operating_point_idc = operating_point_idc[operating_point];
-            let (input, frame_width_bits_minus_1) = bit_parsers::take(4usize)(input)?;
-            let (input, frame_height_bits_minus_1) = bit_parsers::take(4usize)(input)?;
-            let (input, max_frame_width_minus_1) =
-                bit_parsers::take(frame_width_bits_minus_1 + 1)(input)?;
-            let (input, max_frame_height_minus_1) =
-                bit_parsers::take(frame_height_bits_minus_1 + 1)(input)?;
+            let (input, frame_width_bits_minus_1) =
+                trace_take_usize(input, ctx, 4, "frame_width_bits_minus_1")?;
+            let (input, frame_height_bits_minus_1) =
+                trace_take_usize(input, ctx, 4, "frame_height_bits_minus_1")?;
+            let (input, max_frame_width_minus_1) = trace_take_u32(
+                input,
+                ctx,
+                frame_width_bits_minus_1 + 1,
+                "max_frame_width_minus_1",
+            )?;
+            let (input, max_frame_height_minus_1) = trace_take_u32(
+                input,
+                ctx,
+                frame_height_bits_minus_1 + 1,
+                "max_frame_height_minus_1",
+            )?;
             let (input, frame_id_numbers_present) = if reduced_still_picture_header {
                 (input, false)
             } else {
-                take_bool_bit(input)?
+                trace_bool(input, ctx, "frame_id_numbers_present_flag")?
             };
             let (input, delta_frame_id_len_minus_2, additional_frame_id_len_minus_1) =
                 if frame_id_numbers_present {
-                    let (input, delta_frame_id_len_minus_2) = bit_parsers::take(4usize)(input)?;
+                    let (input, delta_frame_id_len_minus_2) =
+                        trace_take_usize(input, ctx, 4, "delta_frame_id_length_minus_2")?;
                     let (input, additional_frame_id_len_minus_1) =
-                        bit_parsers::take(3usize)(input)?;
+                        trace_take_usize(input, ctx, 3, "additional_frame_id_length_minus_1")?;
                     (
                         input,
                         delta_frame_id_len_minus_2,
@@ -286,9 +319,10 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 } else {
                     (input, 0, 0)
                 };
-            let (input, use_128x128_superblock) = take_bool_bit(input)?;
-            let (input, _enable_filter_intra) = take_bool_bit(input)?;
-            let (input, _enable_intra_edge_filter) = take_bool_bit(input)?;
+            let (input, use_128x128_superblock) = trace_bool(input, ctx, "use_128x128_superblock")?;
+            let (input, _enable_filter_intra) = trace_bool(input, ctx, "enable_filter_intra")?;
+            let (input, _enable_intra_edge_filter) =
+                trace_bool(input, ctx, "enable_intra_edge_filter")?;
             let (
                 input,
                 force_screen_content_tools,
@@ -306,39 +340,44 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     false,
                 )
             } else {
-                let (input, _enable_interintra_compound) = take_bool_bit(input)?;
-                let (input, _enable_masked_compound) = take_bool_bit(input)?;
-                let (input, enable_warped_motion) = take_bool_bit(input)?;
-                let (input, _enable_dual_filter) = take_bool_bit(input)?;
-                let (input, enable_order_hint) = take_bool_bit(input)?;
+                let (input, _enable_interintra_compound) =
+                    trace_bool(input, ctx, "enable_interintra_compound")?;
+                let (input, _enable_masked_compound) =
+                    trace_bool(input, ctx, "enable_masked_compound")?;
+                let (input, enable_warped_motion) = trace_bool(input, ctx, "enable_warped_motion")?;
+                let (input, _enable_dual_filter) = trace_bool(input, ctx, "enable_dual_filter")?;
+                let (input, enable_order_hint) = trace_bool(input, ctx, "enable_order_hint")?;
                 let (input, enable_ref_frame_mvs) = if enable_order_hint {
-                    let (input, _enable_jnt_comp) = take_bool_bit(input)?;
-                    let (input, enable_ref_frame_mvs) = take_bool_bit(input)?;
+                    let (input, _enable_jnt_comp) = trace_bool(input, ctx, "enable_jnt_comp")?;
+                    let (input, enable_ref_frame_mvs) =
+                        trace_bool(input, ctx, "enable_ref_frame_mvs")?;
                     (input, enable_ref_frame_mvs)
                 } else {
                     (input, false)
                 };
-                let (input, seq_choose_screen_content_tools) = take_bool_bit(input)?;
+                let (input, seq_choose_screen_content_tools) =
+                    trace_bool(input, ctx, "seq_choose_screen_content_tools")?;
                 let (input, seq_force_screen_content_tools): (_, u8) =
                     if seq_choose_screen_content_tools {
                         (input, SELECT_SCREEN_CONTENT_TOOLS)
                     } else {
-                        bit_parsers::take(1usize)(input)?
+                        trace_take_u8(input, ctx, 1, "seq_force_screen_content_tools")?
                     };
 
                 let (input, seq_force_integer_mv) = if seq_force_screen_content_tools > 0 {
-                    let (input, seq_choose_integer_mv) = take_bool_bit(input)?;
+                    let (input, seq_choose_integer_mv) =
+                        trace_bool(input, ctx, "seq_choose_integer_mv")?;
                     if seq_choose_integer_mv {
                         (input, SELECT_INTEGER_MV)
                     } else {
-                        bit_parsers::take(1usize)(input)?
+                        trace_take_u8(input, ctx, 1, "seq_force_integer_mv")?
                     }
                 } else {
                     (input, SELECT_INTEGER_MV)
                 };
                 let (input, order_hint_bits) = if enable_order_hint {
-                    let (input, order_hint_bits_minus_1): (_, usize) =
-                        bit_parsers::take(3usize)(input)?;
+                    let (input, order_hint_bits_minus_1) =
+                        trace_take_usize(input, ctx, 3, "order_hint_bits_minus_1")?;
                     (input, order_hint_bits_minus_1 + 1)
                 } else {
                     (input, 0)
@@ -354,10 +393,10 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 )
             };
 
-            let (input, enable_superres) = take_bool_bit(input)?;
-            let (input, enable_cdef) = take_bool_bit(input)?;
-            let (input, enable_restoration) = take_bool_bit(input)?;
-            let (input, color_config) = color_config(input, seq_profile)?;
+            let (input, enable_superres) = trace_bool(input, ctx, "enable_superres")?;
+            let (input, enable_cdef) = trace_bool(input, ctx, "enable_cdef")?;
+            let (input, enable_restoration) = trace_bool(input, ctx, "enable_restoration")?;
+            let (input, color_config) = color_config(input, ctx, seq_profile)?;
 
             if WRITE {
                 // Toggle the film grain params present flag
@@ -376,7 +415,8 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 );
             }
 
-            let (input, film_grain_params_present) = take_bool_bit(input)?;
+            let (input, film_grain_params_present) =
+                trace_bool(input, ctx, "film_grain_params_present")?;
 
             Ok((
                 input,
@@ -418,12 +458,24 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
 /// RATIONALE: frame-header parsing only needs `equal_picture_interval` to know
 /// whether `temporal_point_info` is present; other timing fields are consumed
 /// only to keep bit parsing aligned.
-fn timing_info(input: BitInput) -> IResult<BitInput, TimingInfo, Error<BitInput>> {
-    let (input, _num_units_in_display_tick): (_, u32) = bit_parsers::take(32usize)(input)?;
-    let (input, _time_scale): (_, u32) = bit_parsers::take(32usize)(input)?;
-    let (input, equal_picture_interval) = take_bool_bit(input)?;
+fn timing_info<'a>(
+    input: BitInput<'a>,
+    ctx: TraceCtx,
+) -> IResult<BitInput<'a>, TimingInfo, Error<BitInput<'a>>> {
+    let (input, _num_units_in_display_tick) =
+        trace_take_u32(input, ctx, 32, "num_units_in_display_tick")?;
+    let (input, _time_scale) = trace_take_u32(input, ctx, 32, "time_scale")?;
+    let (input, equal_picture_interval) = trace_bool(input, ctx, "equal_picture_interval")?;
     let input = if equal_picture_interval {
-        let (input, _num_ticks_per_picture_minus_1) = uvlc(input)?;
+        let pos = ctx.pos(input);
+        let (input, value) = uvlc(input)?;
+        let bits_consumed = ctx.pos(input) - pos;
+        trace_field(
+            pos,
+            "num_ticks_per_picture_minus_1",
+            bits_consumed,
+            u64::from(value),
+        );
         input
     } else {
         input
@@ -440,11 +492,18 @@ fn timing_info(input: BitInput) -> IResult<BitInput, TimingInfo, Error<BitInput>
 ///
 /// The returned lengths are reused when parsing per-operating-point and
 /// per-frame timing fields.
-fn decoder_model_info(input: BitInput) -> IResult<BitInput, DecoderModelInfo, Error<BitInput>> {
-    let (input, buffer_delay_length_minus_1) = bit_parsers::take(5usize)(input)?;
-    let (input, _num_units_in_decoding_tick): (_, u32) = bit_parsers::take(32usize)(input)?;
-    let (input, buffer_removal_time_length_minus_1) = bit_parsers::take(5usize)(input)?;
-    let (input, frame_presentation_time_length_minus_1) = bit_parsers::take(5usize)(input)?;
+fn decoder_model_info<'a>(
+    input: BitInput<'a>,
+    ctx: TraceCtx,
+) -> IResult<BitInput<'a>, DecoderModelInfo, Error<BitInput<'a>>> {
+    let (input, buffer_delay_length_minus_1) =
+        trace_take_u8(input, ctx, 5, "buffer_delay_length_minus_1")?;
+    let (input, _num_units_in_decoding_tick) =
+        trace_take_u32(input, ctx, 32, "num_units_in_decoding_tick")?;
+    let (input, buffer_removal_time_length_minus_1) =
+        trace_take_u8(input, ctx, 5, "buffer_removal_time_length_minus_1")?;
+    let (input, frame_presentation_time_length_minus_1) =
+        trace_take_u8(input, ctx, 5, "frame_presentation_time_length_minus_1")?;
     Ok((
         input,
         DecoderModelInfo {
@@ -459,13 +518,16 @@ fn decoder_model_info(input: BitInput) -> IResult<BitInput, DecoderModelInfo, Er
 ///
 /// CONTRACT: this helper only advances the bitstream; the parsed values are
 /// sequence-level timing side data that are not required by grain workflows.
-fn operating_parameters_info(
-    input: BitInput,
+fn operating_parameters_info<'a>(
+    input: BitInput<'a>,
+    ctx: TraceCtx,
     buffer_delay_length: usize,
-) -> IResult<BitInput, (), Error<BitInput>> {
-    let (input, _decoder_buffer_delay): (_, u64) = bit_parsers::take(buffer_delay_length)(input)?;
-    let (input, _encoder_buffer_delay): (_, u64) = bit_parsers::take(buffer_delay_length)(input)?;
-    let (input, _low_delay_mode_flag) = take_bool_bit(input)?;
+) -> IResult<BitInput<'a>, (), Error<BitInput<'a>>> {
+    let (input, _decoder_buffer_delay) =
+        trace_take_u64(input, ctx, buffer_delay_length, "decoder_buffer_delay")?;
+    let (input, _encoder_buffer_delay) =
+        trace_take_u64(input, ctx, buffer_delay_length, "encoder_buffer_delay")?;
+    let (input, _low_delay_mode_flag) = trace_bool(input, ctx, "low_delay_mode_flag")?;
     Ok((input, ()))
 }
 
@@ -475,14 +537,15 @@ fn operating_parameters_info(
 /// ASSUMPTION: enum-coded color fields are spec-valid; invalid values currently
 /// cause a panic via `unwrap()` because this parser treats malformed bitstreams
 /// as unrecoverable.
-fn color_config(
-    input: BitInput,
+fn color_config<'a>(
+    input: BitInput<'a>,
+    ctx: TraceCtx,
     seq_profile: u8,
-) -> IResult<BitInput, ColorConfig, Error<BitInput>> {
+) -> IResult<BitInput<'a>, ColorConfig, Error<BitInput<'a>>> {
     let bit_depth: u8;
-    let (input, high_bitdepth) = take_bool_bit(input)?;
+    let (input, high_bitdepth) = trace_bool(input, ctx, "high_bitdepth")?;
     let input = if seq_profile == 2 && high_bitdepth {
-        let (input, twelve_bit) = take_bool_bit(input)?;
+        let (input, twelve_bit) = trace_bool(input, ctx, "twelve_bit")?;
         bit_depth = if twelve_bit { 12 } else { 10 };
         input
     } else {
@@ -492,15 +555,17 @@ fn color_config(
     let (input, monochrome) = if seq_profile == 1 {
         (input, false)
     } else {
-        take_bool_bit(input)?
+        trace_bool(input, ctx, "mono_chrome")?
     };
     let num_planes = if monochrome { 1 } else { 3 };
-    let (input, color_description_present_flag) = take_bool_bit(input)?;
+    let (input, color_description_present_flag) =
+        trace_bool(input, ctx, "color_description_present_flag")?;
     let (input, (color_primaries, transfer_characteristics, matrix_coefficients)) =
         if color_description_present_flag {
-            let (input, color_primaries): (_, u8) = bit_parsers::take(8usize)(input)?;
-            let (input, transfer_characteristics): (_, u8) = bit_parsers::take(8usize)(input)?;
-            let (input, matrix_coefficients): (_, u8) = bit_parsers::take(8usize)(input)?;
+            let (input, color_primaries) = trace_take_u8(input, ctx, 8, "color_primaries")?;
+            let (input, transfer_characteristics) =
+                trace_take_u8(input, ctx, 8, "transfer_characteristics")?;
+            let (input, matrix_coefficients) = trace_take_u8(input, ctx, 8, "matrix_coefficients")?;
             (
                 input,
                 (
@@ -520,7 +585,7 @@ fn color_config(
             )
         };
     let (input, color_range, subsampling) = if monochrome {
-        let (input, color_range): (_, u8) = bit_parsers::take(1usize)(input)?;
+        let (input, color_range) = trace_take_u8(input, ctx, 1, "color_range")?;
         return Ok((
             input,
             ColorConfig {
@@ -539,15 +604,15 @@ fn color_config(
     {
         (input, ColorRange::Full, (0, 0))
     } else {
-        let (input, color_range): (_, u8) = bit_parsers::take(1usize)(input)?;
+        let (input, color_range) = trace_take_u8(input, ctx, 1, "color_range")?;
         let (input, ss_x, ss_y) = if seq_profile == 0 {
             (input, 1, 1)
         } else if seq_profile == 1 {
             (input, 0, 0)
         } else if bit_depth == 12 {
-            let (input, ss_x): (_, u8) = bit_parsers::take(1usize)(input)?;
+            let (input, ss_x) = trace_take_u8(input, ctx, 1, "subsampling_x")?;
             let (input, ss_y): (_, u8) = if ss_x > 0 {
-                bit_parsers::take(1usize)(input)?
+                trace_take_u8(input, ctx, 1, "subsampling_y")?
             } else {
                 (input, 0)
             };
@@ -556,7 +621,8 @@ fn color_config(
             (input, 1, 0)
         };
         let input = if ss_x > 0 && ss_y > 0 {
-            let (input, _chroma_sample_position): (_, u8) = bit_parsers::take(2usize)(input)?;
+            let (input, _chroma_sample_position) =
+                trace_take_u8(input, ctx, 2, "chroma_sample_position")?;
             input
         } else {
             input
@@ -567,7 +633,7 @@ fn color_config(
             (ss_x, ss_y),
         )
     };
-    let (input, separate_uv_delta_q) = take_bool_bit(input)?;
+    let (input, separate_uv_delta_q) = trace_bool(input, ctx, "separate_uv_delta_q")?;
     Ok((
         input,
         ColorConfig {
@@ -594,11 +660,17 @@ const fn choose_operating_point() -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        BitstreamParser, ColorPrimaries, ColorRange, MatrixCoefficients, SELECT_INTEGER_MV,
-        SELECT_SCREEN_CONTENT_TOOLS, TransferCharacteristics, color_config, decoder_model_info,
-        operating_parameters_info, timing_info,
+        super::trace::TraceCtx, super::util::BitInput, BitstreamParser, ColorPrimaries, ColorRange,
+        MatrixCoefficients, SELECT_INTEGER_MV, SELECT_SCREEN_CONTENT_TOOLS,
+        TransferCharacteristics, color_config, decoder_model_info, operating_parameters_info,
+        timing_info,
     };
     use crate::GrainTableSegment;
+
+    /// Creates a dummy `TraceCtx` for testing sub-functions in isolation.
+    fn test_ctx(input: BitInput) -> TraceCtx {
+        TraceCtx::new(input, 0)
+    }
 
     #[derive(Default)]
     struct BitBuilder {
@@ -650,8 +722,9 @@ mod tests {
         bits.push_bool(false);
 
         let (data, consumed_bits) = with_trailer(bits);
+        let input: BitInput = (&data, 0);
         let (remaining, parsed) =
-            timing_info((&data, 0)).expect("expected timing_info without uvlc payload");
+            timing_info(input, test_ctx(input)).expect("expected timing_info without uvlc payload");
 
         assert!(!parsed.equal_picture_interval);
         assert_remaining_position(remaining, &data, consumed_bits);
@@ -667,8 +740,9 @@ mod tests {
         bits.push_bits(0b000_1101, 7);
 
         let (data, consumed_bits) = with_trailer(bits);
+        let input: BitInput = (&data, 0);
         let (remaining, parsed) =
-            timing_info((&data, 0)).expect("expected timing_info with uvlc payload");
+            timing_info(input, test_ctx(input)).expect("expected timing_info with uvlc payload");
 
         assert!(parsed.equal_picture_interval);
         assert_remaining_position(remaining, &data, consumed_bits);
@@ -686,7 +760,8 @@ mod tests {
         bits.push_bits(0b0001, 4);
 
         let data = bits.into_bytes();
-        assert!(timing_info((&data, 3)).is_err());
+        let input: BitInput = (&data, 3);
+        assert!(timing_info(input, test_ctx(input)).is_err());
     }
 
     #[test]
@@ -698,8 +773,9 @@ mod tests {
         bits.push_bits(31, 5);
 
         let (data, consumed_bits) = with_trailer(bits);
-        let (remaining, parsed) =
-            decoder_model_info((&data, 0)).expect("expected decoder_model_info to parse");
+        let input: BitInput = (&data, 0);
+        let (remaining, parsed) = decoder_model_info(input, test_ctx(input))
+            .expect("expected decoder_model_info to parse");
 
         assert_eq!(parsed.buffer_delay_length_minus_1, 17);
         assert_eq!(parsed.buffer_removal_time_length_minus_1, 7);
@@ -710,7 +786,8 @@ mod tests {
     #[test]
     fn decoder_model_info_returns_error_when_input_is_too_short() {
         let data = [0u8; 5];
-        assert!(decoder_model_info((&data, 0)).is_err());
+        let input: BitInput = (&data, 0);
+        assert!(decoder_model_info(input, test_ctx(input)).is_err());
     }
 
     #[test]
@@ -721,7 +798,8 @@ mod tests {
         bits.push_bool(true);
 
         let (data, consumed_bits) = with_trailer(bits);
-        let (remaining, ()) = operating_parameters_info((&data, 0), 5)
+        let input: BitInput = (&data, 0);
+        let (remaining, ()) = operating_parameters_info(input, test_ctx(input), 5)
             .expect("expected operating_parameters_info to parse");
 
         assert_remaining_position(remaining, &data, consumed_bits);
@@ -733,7 +811,8 @@ mod tests {
         bits.push_bool(false);
 
         let (data, consumed_bits) = with_trailer(bits);
-        let (remaining, ()) = operating_parameters_info((&data, 0), 0)
+        let input: BitInput = (&data, 0);
+        let (remaining, ()) = operating_parameters_info(input, test_ctx(input), 0)
             .expect("expected operating_parameters_info to parse with zero-width delays");
 
         assert_remaining_position(remaining, &data, consumed_bits);
@@ -742,7 +821,8 @@ mod tests {
     #[test]
     fn operating_parameters_info_returns_error_when_low_delay_flag_is_missing() {
         let data = [0u8; 1];
-        assert!(operating_parameters_info((&data, 2), 3).is_err());
+        let input: BitInput = (&data, 2);
+        assert!(operating_parameters_info(input, test_ctx(input), 3).is_err());
     }
 
     #[test]
@@ -755,8 +835,9 @@ mod tests {
         bits.push_bool(false); // color_range
 
         let (data, consumed_bits) = with_trailer(bits);
+        let input: BitInput = (&data, 0);
         let (remaining, parsed) =
-            color_config((&data, 0), 2).expect("expected monochrome color_config");
+            color_config(input, test_ctx(input), 2).expect("expected monochrome color_config");
 
         assert_eq!(parsed.color_primaries, ColorPrimaries::Unspecified);
         assert_eq!(
@@ -784,8 +865,9 @@ mod tests {
         bits.push_bool(true); // separate_uv_delta_q
 
         let (data, consumed_bits) = with_trailer(bits);
+        let input: BitInput = (&data, 0);
         let (remaining, parsed) =
-            color_config((&data, 0), 2).expect("expected srgb identity color_config");
+            color_config(input, test_ctx(input), 2).expect("expected srgb identity color_config");
 
         assert_eq!(parsed.color_primaries, ColorPrimaries::Bt709);
         assert_eq!(
@@ -811,8 +893,9 @@ mod tests {
         bits.push_bool(false); // separate_uv_delta_q
 
         let (data, consumed_bits) = with_trailer(bits);
+        let input: BitInput = (&data, 0);
         let (remaining, parsed) =
-            color_config((&data, 0), 0).expect("expected profile 0 color_config");
+            color_config(input, test_ctx(input), 0).expect("expected profile 0 color_config");
 
         assert_eq!(parsed.color_primaries, ColorPrimaries::Unspecified);
         assert_eq!(
@@ -836,8 +919,9 @@ mod tests {
         bits.push_bool(false); // separate_uv_delta_q
 
         let (data, consumed_bits) = with_trailer(bits);
+        let input: BitInput = (&data, 0);
         let (remaining, parsed) =
-            color_config((&data, 0), 1).expect("expected profile 1 color_config");
+            color_config(input, test_ctx(input), 1).expect("expected profile 1 color_config");
 
         assert_eq!(parsed.color_range, ColorRange::Full);
         assert_eq!(parsed.num_planes, 3);
@@ -858,8 +942,9 @@ mod tests {
         bits.push_bool(true); // separate_uv_delta_q
 
         let (data, consumed_bits) = with_trailer(bits);
-        let (remaining, parsed) =
-            color_config((&data, 0), 2).expect("expected profile 2 12-bit ss_x=0 color_config");
+        let input: BitInput = (&data, 0);
+        let (remaining, parsed) = color_config(input, test_ctx(input), 2)
+            .expect("expected profile 2 12-bit ss_x=0 color_config");
 
         assert_eq!(parsed.color_range, ColorRange::Limited);
         assert_eq!(parsed.subsampling, (0, 0));
@@ -881,7 +966,8 @@ mod tests {
         bits.push_bool(false); // separate_uv_delta_q
 
         let (data, consumed_bits) = with_trailer(bits);
-        let (remaining, parsed) = color_config((&data, 0), 2)
+        let input: BitInput = (&data, 0);
+        let (remaining, parsed) = color_config(input, test_ctx(input), 2)
             .expect("expected profile 2 12-bit ss_x=1/ss_y=1 color_config");
 
         assert_eq!(parsed.color_range, ColorRange::Full);
@@ -901,8 +987,9 @@ mod tests {
         bits.push_bool(true); // separate_uv_delta_q
 
         let (data, consumed_bits) = with_trailer(bits);
-        let (remaining, parsed) =
-            color_config((&data, 0), 2).expect("expected profile 2 10-bit color_config");
+        let input: BitInput = (&data, 0);
+        let (remaining, parsed) = color_config(input, test_ctx(input), 2)
+            .expect("expected profile 2 10-bit color_config");
 
         assert_eq!(parsed.color_range, ColorRange::Limited);
         assert_eq!(parsed.subsampling, (1, 0));
@@ -919,7 +1006,8 @@ mod tests {
         bits.push_bits(1, 8); // partial triplet: only color_primaries
 
         let data = bits.into_bytes();
-        assert!(color_config((&data, 0), 0).is_err());
+        let input: BitInput = (&data, 0);
+        assert!(color_config(input, test_ctx(input), 0).is_err());
     }
 
     #[test]
@@ -934,7 +1022,8 @@ mod tests {
         bits.push_bits(1, 8); // matrix_coefficients
 
         let data = bits.into_bytes();
-        _ = color_config((&data, 0), 0);
+        let input: BitInput = (&data, 0);
+        _ = color_config(input, test_ctx(input), 0);
     }
 
     // --- parse_sequence_header helpers ---
@@ -1026,7 +1115,7 @@ mod tests {
         let data = bits.into_bytes();
         let mut parser = make_parser::<false>(0, None);
         let (_, seq) = parser
-            .parse_sequence_header(&data)
+            .parse_sequence_header(&data, 0)
             .expect("reduced still picture header should parse");
 
         assert!(seq.reduced_still_picture_header);
@@ -1074,7 +1163,7 @@ mod tests {
         let data = bits.into_bytes();
         let mut parser = make_parser::<false>(0, None);
         let (_, seq) = parser
-            .parse_sequence_header(&data)
+            .parse_sequence_header(&data, 0)
             .expect("non-reduced single op should parse");
 
         assert!(!seq.reduced_still_picture_header);
@@ -1121,7 +1210,7 @@ mod tests {
         let data = bits.into_bytes();
         let mut parser = make_parser::<false>(0, None);
         let (_, seq) = parser
-            .parse_sequence_header(&data)
+            .parse_sequence_header(&data, 0)
             .expect("timing info without decoder model should parse");
 
         let ti = seq.timing_info.expect("timing_info should be Some");
@@ -1175,7 +1264,7 @@ mod tests {
         let data = bits.into_bytes();
         let mut parser = make_parser::<false>(0, None);
         let (_, seq) = parser
-            .parse_sequence_header(&data)
+            .parse_sequence_header(&data, 0)
             .expect("decoder model with multi-op should parse");
 
         let ti = seq.timing_info.expect("timing_info should be Some");
@@ -1214,7 +1303,7 @@ mod tests {
         let data = bits.into_bytes();
         let mut parser = make_parser::<false>(0, None);
         let (_, seq) = parser
-            .parse_sequence_header(&data)
+            .parse_sequence_header(&data, 0)
             .expect("frame id numbers present should parse");
 
         assert!(seq.frame_id_numbers_present);
@@ -1260,7 +1349,7 @@ mod tests {
         let data = bits.into_bytes();
         let mut parser = make_parser::<false>(0, None);
         let (_, seq) = parser
-            .parse_sequence_header(&data)
+            .parse_sequence_header(&data, 0)
             .expect("order hint with ref_frame_mvs should parse");
 
         assert!(seq.enable_order_hint());
@@ -1308,7 +1397,7 @@ mod tests {
         let data = bits.into_bytes();
         let mut parser = make_parser::<false>(0, None);
         let (_, seq) = parser
-            .parse_sequence_header(&data)
+            .parse_sequence_header(&data, 0)
             .expect("explicit screen content tools and integer mv should parse");
 
         assert_eq!(seq.force_screen_content_tools, 1);
@@ -1351,7 +1440,7 @@ mod tests {
         let data = bits.into_bytes();
         let mut parser = make_parser::<false>(0, None);
         let (_, seq) = parser
-            .parse_sequence_header(&data)
+            .parse_sequence_header(&data, 0)
             .expect("zero screen content tools should force select integer mv");
 
         assert_eq!(seq.force_screen_content_tools, 0);
@@ -1379,7 +1468,7 @@ mod tests {
         let data = bits.into_bytes();
         let mut parser = make_parser::<false>(0, None);
         let (_, seq) = parser
-            .parse_sequence_header(&data)
+            .parse_sequence_header(&data, 0)
             .expect("film grain present should parse");
 
         assert!(seq.film_grain_params_present);
@@ -1416,7 +1505,7 @@ mod tests {
         let (data, size) = build_write_test_bitstream(false);
         let mut parser = make_parser::<true>(size, Some(Vec::new()));
         let (_, seq) = parser
-            .parse_sequence_header(&data)
+            .parse_sequence_header(&data, 0)
             .expect("write mode with grain present should parse");
 
         assert!(!seq.film_grain_params_present);
@@ -1431,7 +1520,7 @@ mod tests {
         let (data, size) = build_write_test_bitstream(true);
         let mut parser = make_parser::<true>(size, None);
         let (_, seq) = parser
-            .parse_sequence_header(&data)
+            .parse_sequence_header(&data, 0)
             .expect("write mode without grain should parse");
 
         assert!(seq.film_grain_params_present);

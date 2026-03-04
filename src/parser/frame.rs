@@ -17,6 +17,10 @@ use super::{
     grain::{FilmGrainHeader, film_grain_params},
     obu::ObuHeader,
     sequence::{SELECT_INTEGER_MV, SELECT_SCREEN_CONTENT_TOOLS},
+    trace::{
+        TraceCtx, trace_bool, trace_field, trace_field_signed, trace_su, trace_take_u8,
+        trace_take_u32, trace_take_u64, trace_take_usize,
+    },
     util::{BitInput, ns, su, take_bool_bit},
 };
 use crate::GrainTableSegment;
@@ -78,10 +82,11 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         obu_header: ObuHeader,
         // Once again, this is in 10,000,000ths of a second
         packet_ts: u64,
+        obu_bit_offset: usize,
     ) -> IResult<&'a [u8], Option<FrameHeader>, Error<&'a [u8]>> {
         let input_len = input.len();
         let (input, frame_header) = context("Failed parsing frame header", |input| {
-            self.parse_frame_header(input, obu_header, packet_ts)
+            self.parse_frame_header(input, obu_header, packet_ts, obu_bit_offset)
         })
         .parse(input)?;
         let ref_frame_header = frame_header
@@ -91,7 +96,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         // A reminder that obu size is in bytes
         let tile_group_obu_size = self.size - (input_len - input.len());
         let (input, _) = context("Failed parsing tile group obu", |input| {
-            self.parse_tile_group_obu(input, tile_group_obu_size, ref_frame_header.tile_info)
+            self.parse_tile_group_obu(input, tile_group_obu_size, ref_frame_header.tile_info, 0)
         })
         .parse(input)?;
         Ok((input, frame_header))
@@ -111,6 +116,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         obu_header: ObuHeader,
         // Once again, this is in 10,000,000ths of a second
         packet_ts: u64,
+        obu_bit_offset: usize,
     ) -> IResult<&'a [u8], Option<FrameHeader>, Error<&'a [u8]>> {
         if self.seen_frame_header {
             debug!("Seen frame header, exiting frame header parsing");
@@ -120,7 +126,8 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         self.seen_frame_header = true;
 
         let pre_len = input.len();
-        let (input, header) = self.uncompressed_header(input, obu_header, packet_ts)?;
+        let (input, header) =
+            self.uncompressed_header(input, obu_header, packet_ts, obu_bit_offset)?;
         debug!(
             "Consumed {} bytes in uncompressed header",
             pre_len - input.len()
@@ -152,10 +159,12 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         obu_headers: ObuHeader,
         // Once again, this is in 10,000,000ths of a second
         packet_ts: u64,
+        obu_bit_offset: usize,
     ) -> IResult<&'a [u8], FrameHeader, Error<&'a [u8]>> {
         let orig_input = input;
 
         bits(|input| {
+            let ctx = TraceCtx::new(input, obu_bit_offset);
             let sequence_header = self.sequence_header.as_ref().unwrap();
             let id_len = sequence_header.frame_id_numbers_present.then(|| {
                 sequence_header.additional_frame_id_len_minus_1
@@ -173,13 +182,13 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             ) = if sequence_header.reduced_still_picture_header {
                 (input, FrameType::Key, true, true, false, false)
             } else {
-                let (input, show_existing_frame) = take_bool_bit(input)?;
+                let (input, show_existing_frame) = trace_bool(input, ctx, "show_existing_frame")?;
                 if show_existing_frame {
-                    let (input, _frame_to_show_map_idx): (_, u8) =
-                        bit_parsers::take(3usize)(input)?;
+                    let (input, _frame_to_show_map_idx) =
+                        trace_take_u8(input, ctx, 3, "frame_to_show_map_idx")?;
                     let input = if let Some(id_len) = id_len {
-                        let (input, _display_frame_id): (_, u64) =
-                            bit_parsers::take(id_len)(input)?;
+                        let (input, _display_frame_id) =
+                            trace_take_u64(input, ctx, id_len, "display_frame_id")?;
                         input
                     } else {
                         input
@@ -199,9 +208,9 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                         },
                     ));
                 }
-                let (input, frame_type): (_, u8) = bit_parsers::take(2usize)(input)?;
+                let (input, frame_type) = trace_take_u8(input, ctx, 2, "frame_type")?;
                 let frame_type = FrameType::try_from(frame_type).unwrap();
-                let (input, show_frame) = take_bool_bit(input)?;
+                let (input, show_frame) = trace_bool(input, ctx, "show_frame")?;
                 let input = if show_frame
                     && let Some(decoder_model_info) = sequence_header.decoder_model_info
                     && !sequence_header
@@ -210,6 +219,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 {
                     temporal_point_info(
                         input,
+                        ctx,
                         decoder_model_info.frame_presentation_time_length_minus_1 as usize + 1,
                     )?
                     .0
@@ -219,14 +229,14 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 let (input, showable_frame) = if show_frame {
                     (input, frame_type != FrameType::Key)
                 } else {
-                    take_bool_bit(input)?
+                    trace_bool(input, ctx, "showable_frame")?
                 };
                 let (input, error_resilient_mode) = if frame_type == FrameType::Switch
                     || (frame_type == FrameType::Key && show_frame)
                 {
                     (input, true)
                 } else {
-                    take_bool_bit(input)?
+                    trace_bool(input, ctx, "error_resilient_mode")?
                 };
                 (
                     input,
@@ -248,23 +258,23 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 }
             }
 
-            let (input, disable_cdf_update) = take_bool_bit(input)?;
+            let (input, disable_cdf_update) = trace_bool(input, ctx, "disable_cdf_update")?;
             let (input, allow_screen_content_tools) =
                 if sequence_header.force_screen_content_tools == SELECT_SCREEN_CONTENT_TOOLS {
-                    take_bool_bit(input)?
+                    trace_bool(input, ctx, "allow_screen_content_tools")?
                 } else {
                     (input, sequence_header.force_screen_content_tools == 1)
                 };
             let input = if allow_screen_content_tools
                 && sequence_header.force_integer_mv == SELECT_INTEGER_MV
             {
-                take_bool_bit(input)?.0
+                trace_bool(input, ctx, "force_integer_mv")?.0
             } else {
                 input
             };
             let input = if sequence_header.frame_id_numbers_present {
-                let (input, _current_frame_id): (_, usize) =
-                    bit_parsers::take(id_len.unwrap())(input)?;
+                let (input, _current_frame_id) =
+                    trace_take_usize(input, ctx, id_len.unwrap(), "current_frame_id")?;
                 input
             } else {
                 input
@@ -274,19 +284,20 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             } else if sequence_header.reduced_still_picture_header {
                 (input, false)
             } else {
-                take_bool_bit(input)?
+                trace_bool(input, ctx, "frame_size_override_flag")?
             };
-            let (input, order_hint): (_, u64) =
-                bit_parsers::take(sequence_header.order_hint_bits)(input)?;
+            let (input, order_hint) =
+                trace_take_u64(input, ctx, sequence_header.order_hint_bits, "order_hint")?;
             let (input, primary_ref_frame) = if frame_type.is_intra() || error_resilient_mode {
                 (input, PRIMARY_REF_NONE)
             } else {
-                bit_parsers::take(3usize)(input)?
+                trace_take_u8(input, ctx, 3, "primary_ref_frame")?
             };
 
             let mut input = input;
             if let Some(decoder_model_info) = sequence_header.decoder_model_info {
-                let (inner_input, buffer_removal_time_present_flag) = take_bool_bit(input)?;
+                let (inner_input, buffer_removal_time_present_flag) =
+                    trace_bool(input, ctx, "buffer_removal_time_present_flag")?;
                 if buffer_removal_time_present_flag {
                     for op_num in 0..=sequence_header.operating_points_cnt_minus_1 {
                         if sequence_header.decoder_model_present_for_op[op_num] {
@@ -298,8 +309,12 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                             let in_spatial_layer = (op_pt_idc >> (spatial_id + 8)) & 1 > 0;
                             if op_pt_idc == 0 || (in_temporal_layer && in_spatial_layer) {
                                 let n = decoder_model_info.buffer_removal_time_length_minus_1 + 1;
-                                let (inner_input, _buffer_removal_time): (_, u64) =
-                                    bit_parsers::take(n)(inner_input)?;
+                                let (inner_input, _buffer_removal_time) = trace_take_u64(
+                                    inner_input,
+                                    ctx,
+                                    usize::from(n),
+                                    &format!("buffer_removal_time[{op_num}]"),
+                                )?;
                                 input = inner_input;
                             }
                         }
@@ -308,12 +323,12 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             }
 
             let mut allow_intrabc = false;
-            let (input, refresh_frame_flags): (_, u8) = if frame_type == FrameType::Switch
+            let (input, refresh_frame_flags) = if frame_type == FrameType::Switch
                 || (frame_type == FrameType::Key && show_frame)
             {
                 (input, REFRESH_ALL_FRAMES)
             } else {
-                bit_parsers::take(8usize)(input)?
+                trace_take_u8(input, ctx, 8, "refresh_frame_flags")?
             };
 
             let mut input = input;
@@ -322,8 +337,12 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 && sequence_header.enable_order_hint()
             {
                 for i in 0..NUM_REF_FRAMES {
-                    let (inner_input, cur_ref_order_hint): (_, u64) =
-                        bit_parsers::take(sequence_header.order_hint_bits)(input)?;
+                    let (inner_input, cur_ref_order_hint) = trace_take_u64(
+                        input,
+                        ctx,
+                        sequence_header.order_hint_bits,
+                        &format!("ref_order_hint[{i}]"),
+                    )?;
                     self.big_ref_order_hint[i] = self.ref_order_hint[i];
                     self.ref_order_hint[i] = cur_ref_order_hint;
                     if self.ref_order_hint[i] != self.big_ref_order_hint[i] {
@@ -343,6 +362,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             let (input, use_ref_frame_mvs, frame_size, upscaled_size) = if frame_type.is_intra() {
                 let (input, frame_size) = frame_size(
                     input,
+                    ctx,
                     frame_size_override_flag,
                     sequence_header.enable_superres,
                     sequence_header.frame_width_bits_minus_1 + 1,
@@ -350,10 +370,10 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     max_frame_size,
                 )?;
                 let upscaled_size = frame_size;
-                let (input, _render_size) = render_size(input, frame_size, upscaled_size)?;
+                let (input, _render_size) = render_size(input, ctx, frame_size, upscaled_size)?;
                 (
                     if allow_screen_content_tools && upscaled_size.width == frame_size.width {
-                        let (input, allow_intrabc_inner) = take_bool_bit(input)?;
+                        let (input, allow_intrabc_inner) = trace_bool(input, ctx, "allow_intrabc")?;
                         allow_intrabc = allow_intrabc_inner;
                         input
                     } else {
@@ -366,10 +386,13 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             } else {
                 let (mut input, frame_refs_short_signaling) = if sequence_header.enable_order_hint()
                 {
-                    let (input, frame_refs_short_signaling) = take_bool_bit(input)?;
+                    let (input, frame_refs_short_signaling) =
+                        trace_bool(input, ctx, "frame_refs_short_signaling")?;
                     if frame_refs_short_signaling {
-                        let (input, _last_frame_idx): (_, u8) = bit_parsers::take(3usize)(input)?;
-                        let (input, _gold_frame_idx): (_, u8) = bit_parsers::take(3usize)(input)?;
+                        let (input, _last_frame_idx) =
+                            trace_take_u8(input, ctx, 3, "last_frame_idx")?;
+                        let (input, _gold_frame_idx) =
+                            trace_take_u8(input, ctx, 3, "gold_frame_idx")?;
                         let (input, _) = set_frame_refs(input)?;
                         (input, frame_refs_short_signaling)
                     } else {
@@ -379,70 +402,78 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     (input, false)
                 };
 
-                for ref_frame_idx in &mut self.ref_frame_idx {
+                for (i, ref_frame_idx) in self.ref_frame_idx.iter_mut().enumerate() {
                     if frame_refs_short_signaling {
                         *ref_frame_idx = 0;
                     } else {
-                        let (inner_input, this_ref_frame_idx) = bit_parsers::take(3usize)(input)?;
+                        let (inner_input, this_ref_frame_idx) =
+                            trace_take_usize(input, ctx, 3, &format!("ref_frame_idx[{i}]"))?;
                         input = inner_input;
                         *ref_frame_idx = this_ref_frame_idx;
                         if sequence_header.frame_id_numbers_present {
                             let n = sequence_header.delta_frame_id_len_minus_2 + 2;
-                            let (inner_input, _delta_frame_id_minus_1): (_, u64) =
-                                bit_parsers::take(n)(input)?;
+                            let (inner_input, _delta_frame_id_minus_1) = trace_take_u64(
+                                input,
+                                ctx,
+                                n,
+                                &format!("delta_frame_id_minus_1[{i}]"),
+                            )?;
                             input = inner_input;
                         }
                     }
                 }
-                let (input, frame_size, upscaled_size) =
-                    if frame_size_override_flag && !error_resilient_mode {
-                        let mut frame_size = max_frame_size;
-                        let mut upscaled_size = frame_size;
-                        let (input, frame_size) = frame_size_with_refs(
-                            input,
-                            sequence_header.enable_superres,
-                            frame_size_override_flag,
-                            sequence_header.frame_width_bits_minus_1 + 1,
-                            sequence_header.frame_height_bits_minus_1 + 1,
-                            max_frame_size,
-                            &mut frame_size,
-                            &mut upscaled_size,
-                        )?;
-                        (input, frame_size, upscaled_size)
-                    } else {
-                        let (input, frame_size) = frame_size(
-                            input,
-                            frame_size_override_flag,
-                            sequence_header.enable_superres,
-                            sequence_header.frame_width_bits_minus_1 + 1,
-                            sequence_header.frame_height_bits_minus_1 + 1,
-                            max_frame_size,
-                        )?;
-                        let upscaled_size = frame_size;
-                        let (input, _render_size) = render_size(input, frame_size, upscaled_size)?;
-                        (input, frame_size, upscaled_size)
-                    };
+                let (input, frame_size, upscaled_size) = if frame_size_override_flag
+                    && !error_resilient_mode
+                {
+                    let mut frame_size = max_frame_size;
+                    let mut upscaled_size = frame_size;
+                    let (input, frame_size) = frame_size_with_refs(
+                        input,
+                        ctx,
+                        sequence_header.enable_superres,
+                        frame_size_override_flag,
+                        sequence_header.frame_width_bits_minus_1 + 1,
+                        sequence_header.frame_height_bits_minus_1 + 1,
+                        max_frame_size,
+                        &mut frame_size,
+                        &mut upscaled_size,
+                    )?;
+                    (input, frame_size, upscaled_size)
+                } else {
+                    let (input, frame_size) = frame_size(
+                        input,
+                        ctx,
+                        frame_size_override_flag,
+                        sequence_header.enable_superres,
+                        sequence_header.frame_width_bits_minus_1 + 1,
+                        sequence_header.frame_height_bits_minus_1 + 1,
+                        max_frame_size,
+                    )?;
+                    let upscaled_size = frame_size;
+                    let (input, _render_size) = render_size(input, ctx, frame_size, upscaled_size)?;
+                    (input, frame_size, upscaled_size)
+                };
                 let (input, allow_high_precision_mv_new) = if sequence_header.force_integer_mv == 1
                 {
                     (input, false)
                 } else {
-                    take_bool_bit(input)?
+                    trace_bool(input, ctx, "allow_high_precision_mv")?
                 };
                 allow_high_precision_mv = allow_high_precision_mv_new;
 
-                let (input, _) = read_interpolation_filter(input)?;
-                let (input, _is_motion_mode_switchable) = take_bool_bit(input)?;
+                let (input, _) = read_interpolation_filter(input, ctx)?;
+                let (input, _is_motion_mode_switchable) =
+                    trace_bool(input, ctx, "is_motion_mode_switchable")?;
                 let (input, use_ref_frame_mvs) =
                     if error_resilient_mode || !sequence_header.enable_ref_frame_mvs {
                         (input, false)
                     } else {
-                        take_bool_bit(input)?
+                        trace_bool(input, ctx, "use_ref_frame_mvs")?
                     };
                 for i in 0..REFS_PER_FRAME {
                     let ref_frame = RefType::Last as usize + i;
                     let hint = self.big_ref_order_hint[self.ref_frame_idx[i]];
                     self.big_order_hints[ref_frame] = hint;
-                    // don't think we care about ref frame sign bias
                 }
                 (input, use_ref_frame_mvs, frame_size, upscaled_size)
             };
@@ -452,7 +483,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 if sequence_header.reduced_still_picture_header || disable_cdf_update {
                     (input, true)
                 } else {
-                    take_bool_bit(input)?
+                    trace_bool(input, ctx, "disable_frame_end_update_cdf")?
                 };
             let input = if primary_ref_frame == PRIMARY_REF_NONE {
                 let (input, _) = init_non_coeff_cdfs(input)?;
@@ -470,18 +501,20 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             };
             let (input, tile_info) = tile_info(
                 input,
+                ctx,
                 sequence_header.use_128x128_superblock,
                 mi_cols,
                 mi_rows,
             )?;
             let (input, q_params) = quantization_params(
                 input,
+                ctx,
                 sequence_header.color_config.num_planes,
                 sequence_header.color_config.separate_uv_delta_q,
             )?;
-            let (input, segmentation_data) = segmentation_params(input, primary_ref_frame)?;
-            let (input, delta_q_present) = delta_q_params(input, q_params.base_q_idx)?;
-            let (input, _) = delta_lf_params(input, delta_q_present, allow_intrabc)?;
+            let (input, segmentation_data) = segmentation_params(input, ctx, primary_ref_frame)?;
+            let (input, delta_q_present) = delta_q_params(input, ctx, q_params.base_q_idx)?;
+            let (input, _) = delta_lf_params(input, ctx, delta_q_present, allow_intrabc)?;
             let input = if primary_ref_frame == PRIMARY_REF_NONE {
                 init_coeff_cdfs(input)?.0
             } else {
@@ -511,12 +544,14 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             let all_losslesss = coded_lossless && frame_size.width == upscaled_size.width;
             let (input, _) = loop_filter_params(
                 input,
+                ctx,
                 coded_lossless,
                 allow_intrabc,
                 sequence_header.color_config.num_planes,
             )?;
             let (input, _) = cdef_params(
                 input,
+                ctx,
                 coded_lossless,
                 allow_intrabc,
                 sequence_header.enable_cdef,
@@ -524,6 +559,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             )?;
             let (input, _) = lr_params(
                 input,
+                ctx,
                 all_losslesss,
                 allow_intrabc,
                 sequence_header.enable_restoration,
@@ -531,10 +567,12 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 sequence_header.color_config.num_planes,
                 sequence_header.color_config.subsampling,
             )?;
-            let (input, _) = read_tx_mode(input, coded_lossless)?;
-            let (input, reference_select) = frame_reference_mode(input, frame_type.is_intra())?;
+            let (input, _) = read_tx_mode(input, ctx, coded_lossless)?;
+            let (input, reference_select) =
+                frame_reference_mode(input, ctx, frame_type.is_intra())?;
             let (input, _) = skip_mode_params(
                 input,
+                ctx,
                 frame_type.is_intra(),
                 reference_select,
                 sequence_header.order_hint_bits,
@@ -548,11 +586,11 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             {
                 (input, false)
             } else {
-                take_bool_bit(input)?
+                trace_bool(input, ctx, "allow_warped_motion")?
             };
-            let (input, _reduced_tx_set) = take_bool_bit(input)?;
+            let (input, _reduced_tx_set) = trace_bool(input, ctx, "reduced_tx_set")?;
             let (input, _) =
-                global_motion_params(input, frame_type.is_intra(), allow_high_precision_mv)?;
+                global_motion_params(input, ctx, frame_type.is_intra(), allow_high_precision_mv)?;
 
             let film_grain_allowed = show_frame || showable_frame;
             let written_film_grain_params = if WRITE {
@@ -610,6 +648,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             let sequence_header = self.sequence_header.as_ref().unwrap();
             let (input, parsed_film_grain_params) = film_grain_params(
                 input,
+                ctx,
                 sequence_header.film_grain_params_present && film_grain_allowed,
                 frame_type,
                 sequence_header.color_config.num_planes == 1,
@@ -799,12 +838,17 @@ const fn decode_frame_wrapup(input: &[u8]) -> IResult<&[u8], (), Error<&[u8]>> {
 }
 
 /// Reads and discards temporal-point timing metadata when present.
-fn temporal_point_info(
-    input: BitInput,
+fn temporal_point_info<'a>(
+    input: BitInput<'a>,
+    ctx: TraceCtx<'a>,
     frame_presentation_time_length: usize,
-) -> IResult<BitInput, (), Error<BitInput>> {
-    let (input, _frame_presentation_time): (_, u64) =
-        bit_parsers::take(frame_presentation_time_length)(input)?;
+) -> IResult<BitInput<'a>, (), Error<BitInput<'a>>> {
+    let (input, _frame_presentation_time) = trace_take_u64(
+        input,
+        ctx,
+        frame_presentation_time_length,
+        "frame_presentation_time",
+    )?;
     Ok((input, ()))
 }
 
@@ -815,37 +859,49 @@ pub struct Dimensions {
 }
 
 /// Parses coded frame dimensions and applies super-resolution scaling.
-fn frame_size(
-    input: BitInput,
+fn frame_size<'a>(
+    input: BitInput<'a>,
+    ctx: TraceCtx<'a>,
     frame_size_override: bool,
     enable_superres: bool,
     frame_width_bits: usize,
     frame_height_bits: usize,
     max_frame_size: Dimensions,
-) -> IResult<BitInput, Dimensions, Error<BitInput>> {
+) -> IResult<BitInput<'a>, Dimensions, Error<BitInput<'a>>> {
     let (input, width, height) = if frame_size_override {
-        let (input, width_minus_1): (_, u32) = bit_parsers::take(frame_width_bits)(input)?;
-        let (input, height_minus_1): (_, u32) = bit_parsers::take(frame_height_bits)(input)?;
+        let (input, width_minus_1) =
+            trace_take_u32(input, ctx, frame_width_bits, "frame_width_minus_1")?;
+        let (input, height_minus_1) =
+            trace_take_u32(input, ctx, frame_height_bits, "frame_height_minus_1")?;
         (input, width_minus_1 + 1, height_minus_1 + 1)
     } else {
         (input, max_frame_size.width, max_frame_size.height)
     };
     let mut frame_size = Dimensions { width, height };
     let mut upscaled_size = frame_size;
-    let (input, _) = superres_params(input, enable_superres, &mut frame_size, &mut upscaled_size)?;
+    let (input, _) = superres_params(
+        input,
+        ctx,
+        enable_superres,
+        &mut frame_size,
+        &mut upscaled_size,
+    )?;
     Ok((input, frame_size))
 }
 
 /// Parses optional render dimensions for display sizing.
-fn render_size(
-    input: BitInput,
+fn render_size<'a>(
+    input: BitInput<'a>,
+    ctx: TraceCtx<'a>,
     frame_size: Dimensions,
     upscaled_size: Dimensions,
-) -> IResult<BitInput, Dimensions, Error<BitInput>> {
-    let (input, render_and_frame_size_different) = take_bool_bit(input)?;
+) -> IResult<BitInput<'a>, Dimensions, Error<BitInput<'a>>> {
+    let (input, render_and_frame_size_different) =
+        trace_bool(input, ctx, "render_and_frame_size_different")?;
     let (input, width, height) = if render_and_frame_size_different {
-        let (input, render_width_minus_1): (_, u32) = bit_parsers::take(16usize)(input)?;
-        let (input, render_height_minus_1): (_, u32) = bit_parsers::take(16usize)(input)?;
+        let (input, render_width_minus_1) = trace_take_u32(input, ctx, 16, "render_width_minus_1")?;
+        let (input, render_height_minus_1) =
+            trace_take_u32(input, ctx, 16, "render_height_minus_1")?;
         (input, render_width_minus_1 + 1, render_height_minus_1 + 1)
     } else {
         (input, upscaled_size.width, frame_size.height)
@@ -868,6 +924,7 @@ const fn set_frame_refs(input: BitInput) -> IResult<BitInput, (), Error<BitInput
 #[allow(clippy::too_many_arguments)]
 fn frame_size_with_refs<'a, 'b>(
     input: BitInput<'a>,
+    ctx: TraceCtx<'a>,
     enable_superres: bool,
     frame_size_override: bool,
     frame_width_bits: usize,
@@ -878,30 +935,34 @@ fn frame_size_with_refs<'a, 'b>(
 ) -> IResult<BitInput<'a>, Dimensions, Error<BitInput<'a>>> {
     let mut found_ref = false;
     let mut input = input;
-    for _ in 0..REFS_PER_FRAME {
-        let (inner_input, found_this_ref) = take_bool_bit(input)?;
+    for i in 0..REFS_PER_FRAME {
+        let (inner_input, found_this_ref) = trace_bool(input, ctx, &format!("found_ref[{i}]"))?;
         input = inner_input;
         if found_this_ref {
             found_ref = true;
-            // We don't actually care about the changes to frame size. But if we did, we'd
-            // have to do things here.
             break;
         }
     }
     let (input, frame_size) = if found_ref {
-        let (input, _) =
-            superres_params(input, enable_superres, ref_frame_size, ref_upscaled_size)?;
+        let (input, _) = superres_params(
+            input,
+            ctx,
+            enable_superres,
+            ref_frame_size,
+            ref_upscaled_size,
+        )?;
         (input, *ref_frame_size)
     } else {
         let (input, frame_size) = frame_size(
             input,
+            ctx,
             frame_size_override,
             enable_superres,
             frame_width_bits,
             frame_height_bits,
             max_frame_size,
         )?;
-        let (input, _) = render_size(input, frame_size, *ref_upscaled_size)?;
+        let (input, _) = render_size(input, ctx, frame_size, *ref_upscaled_size)?;
         (input, frame_size)
     };
     Ok((input, frame_size))
@@ -910,17 +971,18 @@ fn frame_size_with_refs<'a, 'b>(
 /// Parses super-resolution parameters and updates frame/upscaled dimensions.
 fn superres_params<'a, 'b>(
     input: BitInput<'a>,
+    ctx: TraceCtx<'a>,
     enable_superres: bool,
     frame_size: &'b mut Dimensions,
     upscaled_size: &'b mut Dimensions,
 ) -> IResult<BitInput<'a>, (), Error<BitInput<'a>>> {
     let (input, use_superres) = if enable_superres {
-        take_bool_bit(input)?
+        trace_bool(input, ctx, "use_superres")?
     } else {
         (input, false)
     };
     let (input, superres_denom) = if use_superres {
-        let (input, coded_denom): (_, u32) = bit_parsers::take(SUPERRES_DENOM_BITS)(input)?;
+        let (input, coded_denom) = trace_take_u32(input, ctx, SUPERRES_DENOM_BITS, "coded_denom")?;
         (input, coded_denom + SUPERRES_DENOM_MIN)
     } else {
         (input, SUPERRES_NUM)
@@ -939,12 +1001,15 @@ const fn compute_image_size(frame_size: Dimensions) -> (u32, u32) {
 }
 
 /// Parses interpolation-filter selection syntax.
-fn read_interpolation_filter(input: BitInput) -> IResult<BitInput, (), Error<BitInput>> {
-    let (input, is_filter_switchable) = take_bool_bit(input)?;
+fn read_interpolation_filter<'a>(
+    input: BitInput<'a>,
+    ctx: TraceCtx<'a>,
+) -> IResult<BitInput<'a>, (), Error<BitInput<'a>>> {
+    let (input, is_filter_switchable) = trace_bool(input, ctx, "is_filter_switchable")?;
     let (input, _interpolation_filter) = if is_filter_switchable {
         (input, INTERP_FILTER_SWITCHABLE)
     } else {
-        bit_parsers::take(2usize)(input)?
+        trace_take_u8(input, ctx, 2, "interpolation_filter")?
     };
     Ok((input, ()))
 }
@@ -984,12 +1049,13 @@ const fn motion_field_estimation(input: BitInput) -> IResult<BitInput, (), Error
 ///
 /// The returned [`TileInfo`] is reused by tile-group parsing to determine how
 /// many tile units are expected in this frame.
-fn tile_info(
-    input: BitInput,
+fn tile_info<'a>(
+    input: BitInput<'a>,
+    ctx: TraceCtx<'a>,
     use_128x128_superblock: bool,
     mi_cols: u32,
     mi_rows: u32,
-) -> IResult<BitInput, TileInfo, Error<BitInput>> {
+) -> IResult<BitInput<'a>, TileInfo, Error<BitInput<'a>>> {
     let sb_cols = if use_128x128_superblock {
         (mi_cols + 31) >> 5u8
     } else {
@@ -1014,11 +1080,13 @@ fn tile_info(
     let tile_rows;
     let tile_cols;
 
-    let (mut input, uniform_tile_spacing_flag) = take_bool_bit(input)?;
+    let (mut input, uniform_tile_spacing_flag) =
+        trace_bool(input, ctx, "uniform_tile_spacing_flag")?;
     let (tile_cols_log2, tile_rows_log2) = if uniform_tile_spacing_flag {
         let mut tile_cols_log2 = min_log2_tile_cols;
         while tile_cols_log2 < max_log2_tile_cols {
-            let (inner_input, increment_tile_cols_log2) = take_bool_bit(input)?;
+            let (inner_input, increment_tile_cols_log2) =
+                trace_bool(input, ctx, "increment_tile_cols_log2")?;
             input = inner_input;
             if increment_tile_cols_log2 {
                 tile_cols_log2 += 1;
@@ -1032,7 +1100,8 @@ fn tile_info(
         let min_log2_tile_rows = max(min_log2_tiles as i32 - tile_cols_log2 as i32, 0i32) as u32;
         let mut tile_rows_log2 = min_log2_tile_rows;
         while tile_rows_log2 < max_log2_tile_rows {
-            let (inner_input, increment_tile_rows_log2) = take_bool_bit(input)?;
+            let (inner_input, increment_tile_rows_log2) =
+                trace_bool(input, ctx, "increment_tile_rows_log2")?;
             input = inner_input;
             if increment_tile_rows_log2 {
                 tile_rows_log2 += 1;
@@ -1050,7 +1119,15 @@ fn tile_info(
         let mut i = 0;
         while start_sb < sb_cols {
             let max_width = min(sb_cols - start_sb, max_tile_width_sb);
+            let pos = ctx.pos(input);
             let (inner_input, width_in_sbs_minus_1) = ns(input, max_width as usize)?;
+            let bits_consumed = ctx.pos(inner_input) - pos;
+            trace_field(
+                pos,
+                &format!("width_in_sbs_minus_1[{i}]"),
+                bits_consumed,
+                width_in_sbs_minus_1,
+            );
             input = inner_input;
             let size_sb = width_in_sbs_minus_1 + 1;
             widest_tile_sb = max(size_sb as u32, widest_tile_sb);
@@ -1064,7 +1141,15 @@ fn tile_info(
         let max_tile_height_sb = max(max_tile_area_sb / widest_tile_sb, 1);
         while start_sb < sb_rows {
             let max_height = min(sb_rows - start_sb, max_tile_height_sb);
+            let pos = ctx.pos(input);
             let (inner_input, height_in_sbs_minus_1) = ns(input, max_height as usize)?;
+            let bits_consumed = ctx.pos(inner_input) - pos;
+            trace_field(
+                pos,
+                &format!("height_in_sbs_minus_1[{i}]"),
+                bits_consumed,
+                height_in_sbs_minus_1,
+            );
             input = inner_input;
             let size_sb = height_in_sbs_minus_1 + 1;
             start_sb += size_sb as u32;
@@ -1081,9 +1166,14 @@ fn tile_info(
     assert!(tile_rows > 0);
 
     let input = if tile_cols_log2 > 0 || tile_rows_log2 > 0 {
-        let (input, _context_update_tile_id): (_, u64) =
-            bit_parsers::take(tile_rows_log2 + tile_cols_log2)(input)?;
-        let (input, _tile_size_bytes_minus_1): (_, u8) = bit_parsers::take(2usize)(input)?;
+        let (input, _context_update_tile_id) = trace_take_u64(
+            input,
+            ctx,
+            (tile_rows_log2 + tile_cols_log2) as usize,
+            "context_update_tile_id",
+        )?;
+        let (input, _tile_size_bytes_minus_1) =
+            trace_take_u8(input, ctx, 2, "tile_size_bytes_minus_1")?;
         input
     } else {
         input
@@ -1122,24 +1212,25 @@ fn tile_log2<T: PrimInt>(blk_size: T, target: T) -> T {
 }
 
 /// Parses frame-level quantization parameters.
-fn quantization_params(
-    input: BitInput,
+fn quantization_params<'a>(
+    input: BitInput<'a>,
+    ctx: TraceCtx<'a>,
     num_planes: u8,
     separate_uv_delta_q: bool,
-) -> IResult<BitInput, QuantizationParams, Error<BitInput>> {
-    let (input, base_q_idx) = bit_parsers::take(8usize)(input)?;
-    let (input, deltaq_y_dc) = read_delta_q(input)?;
+) -> IResult<BitInput<'a>, QuantizationParams, Error<BitInput<'a>>> {
+    let (input, base_q_idx) = trace_take_u8(input, ctx, 8, "base_q_idx")?;
+    let (input, deltaq_y_dc) = read_delta_q(input, ctx, "delta_q_y_dc")?;
     let (input, deltaq_u_dc, deltaq_u_ac, deltaq_v_dc, deltaq_v_ac) = if num_planes > 1 {
         let (input, diff_uv_delta) = if separate_uv_delta_q {
-            take_bool_bit(input)?
+            trace_bool(input, ctx, "diff_uv_delta")?
         } else {
             (input, false)
         };
-        let (input, deltaq_u_dc) = read_delta_q(input)?;
-        let (input, deltaq_u_ac) = read_delta_q(input)?;
+        let (input, deltaq_u_dc) = read_delta_q(input, ctx, "delta_q_u_dc")?;
+        let (input, deltaq_u_ac) = read_delta_q(input, ctx, "delta_q_u_ac")?;
         let (input, deltaq_v_dc, deltaq_v_ac) = if diff_uv_delta {
-            let (input, deltaq_v_dc) = read_delta_q(input)?;
-            let (input, deltaq_v_ac) = read_delta_q(input)?;
+            let (input, deltaq_v_dc) = read_delta_q(input, ctx, "delta_q_v_dc")?;
+            let (input, deltaq_v_ac) = read_delta_q(input, ctx, "delta_q_v_ac")?;
             (input, deltaq_v_dc, deltaq_v_ac)
         } else {
             (input, deltaq_u_dc, deltaq_u_ac)
@@ -1148,12 +1239,12 @@ fn quantization_params(
     } else {
         (input, 0, 0, 0, 0)
     };
-    let (input, using_qmatrix) = take_bool_bit(input)?;
+    let (input, using_qmatrix) = trace_bool(input, ctx, "using_qmatrix")?;
     let input = if using_qmatrix {
-        let (input, _qm_y): (_, u8) = bit_parsers::take(4usize)(input)?;
-        let (input, qm_u): (_, u8) = bit_parsers::take(4usize)(input)?;
-        let (input, _qm_v): (_, u8) = if separate_uv_delta_q {
-            bit_parsers::take(4usize)(input)?
+        let (input, _qm_y) = trace_take_u8(input, ctx, 4, "qm_y")?;
+        let (input, qm_u) = trace_take_u8(input, ctx, 4, "qm_u")?;
+        let (input, _qm_v) = if separate_uv_delta_q {
+            trace_take_u8(input, ctx, 4, "qm_v")?
         } else {
             (input, qm_u)
         };
@@ -1177,11 +1268,21 @@ fn quantization_params(
 }
 
 /// Parses an optionally coded signed quantizer delta.
-fn read_delta_q(input: BitInput) -> IResult<BitInput, i64, Error<BitInput>> {
+fn read_delta_q<'a>(
+    input: BitInput<'a>,
+    ctx: TraceCtx,
+    name: &str,
+) -> IResult<BitInput<'a>, i64, Error<BitInput<'a>>> {
+    let pos = ctx.pos(input);
     let (input, delta_coded) = take_bool_bit(input)?;
     if delta_coded {
-        su(input, 1 + 6)
+        let (input, value) = su(input, 1 + 6)?;
+        let bits_consumed = ctx.pos(input) - pos;
+        let raw = (value as u64) & ((1u64 << bits_consumed) - 1);
+        trace_field_signed(pos, name, bits_consumed, raw, value);
+        Ok((input, value))
     } else {
+        trace_field(pos, name, 1, 0);
         Ok((input, 0))
     }
 }
@@ -1199,39 +1300,54 @@ pub struct QuantizationParams {
 /// Parses segmentation flags and per-segment feature payloads.
 ///
 /// Returns `None` when segmentation is disabled for the frame.
-fn segmentation_params(
-    input: BitInput,
+fn segmentation_params<'a>(
+    input: BitInput<'a>,
+    ctx: TraceCtx<'a>,
     primary_ref_frame: u8,
-) -> IResult<BitInput, Option<SegmentationData>, Error<BitInput>> {
+) -> IResult<BitInput<'a>, Option<SegmentationData>, Error<BitInput<'a>>> {
     let mut segmentation_data: SegmentationData = Default::default();
-    let (input, segmentation_enabled) = take_bool_bit(input)?;
+    let (input, segmentation_enabled) = trace_bool(input, ctx, "segmentation_enabled")?;
     let input = if segmentation_enabled {
         let (input, segmentation_update_data) = if primary_ref_frame == PRIMARY_REF_NONE {
             (input, true)
         } else {
-            let (input, segmentation_update_map) = take_bool_bit(input)?;
+            let (input, segmentation_update_map) =
+                trace_bool(input, ctx, "segmentation_update_map")?;
             let input = if segmentation_update_map {
-                let (input, _segmentation_temporal_update) = take_bool_bit(input)?;
+                let (input, _segmentation_temporal_update) =
+                    trace_bool(input, ctx, "segmentation_temporal_update")?;
                 input
             } else {
                 input
             };
-            take_bool_bit(input)?
+            trace_bool(input, ctx, "segmentation_update_data")?
         };
         if segmentation_update_data {
             let mut input = input;
             #[allow(clippy::needless_range_loop)]
             for i in 0..MAX_SEGMENTS {
                 for j in 0..SEG_LVL_MAX {
-                    let (inner_input, feature_enabled) = take_bool_bit(input)?;
+                    let (inner_input, feature_enabled) =
+                        trace_bool(input, ctx, &format!("feature_enabled[{i}][{j}]"))?;
                     input = if feature_enabled {
                         let bits_to_read = SEGMENTATION_FEATURE_BITS[j] as usize;
                         let limit = i16::from(SEGMENTATION_FEATURE_MAX[j]);
                         let (inner_input, feature_value) = if SEGMENTATION_FEATURE_SIGNED[j] {
-                            let (input, value) = su(inner_input, 1 + bits_to_read)?;
+                            let (input, value) = trace_su(
+                                inner_input,
+                                ctx,
+                                1 + bits_to_read,
+                                &format!("feature_value[{i}][{j}]"),
+                            )?;
                             (input, clamp(value as i16, -limit, limit))
                         } else {
-                            let (input, value) = bit_parsers::take(bits_to_read)(inner_input)?;
+                            let (input, value): (_, i16) = trace_take_u32(
+                                inner_input,
+                                ctx,
+                                bits_to_read,
+                                &format!("feature_value[{i}][{j}]"),
+                            )
+                            .map(|(i, v)| (i, v as i16))?;
                             (input, clamp(value, 0, limit))
                         };
                         segmentation_data[i][j] = Some(feature_value);
@@ -1256,14 +1372,18 @@ fn segmentation_params(
 /// Parses delta-quantization enablement and resolution.
 ///
 /// Returns whether `delta_q` is present for subsequent syntax sections.
-fn delta_q_params(input: BitInput, base_q_idx: u8) -> IResult<BitInput, bool, Error<BitInput>> {
+fn delta_q_params<'a>(
+    input: BitInput<'a>,
+    ctx: TraceCtx<'a>,
+    base_q_idx: u8,
+) -> IResult<BitInput<'a>, bool, Error<BitInput<'a>>> {
     let (input, delta_q_present) = if base_q_idx > 0 {
-        take_bool_bit(input)?
+        trace_bool(input, ctx, "delta_q_present")?
     } else {
         (input, false)
     };
-    let (input, _delta_q_res): (_, u8) = if delta_q_present {
-        bit_parsers::take(2usize)(input)?
+    let (input, _delta_q_res) = if delta_q_present {
+        trace_take_u8(input, ctx, 2, "delta_q_res")?
     } else {
         (input, 0)
     };
@@ -1271,20 +1391,21 @@ fn delta_q_params(input: BitInput, base_q_idx: u8) -> IResult<BitInput, bool, Er
 }
 
 /// Parses delta loop-filter parameters when enabled.
-fn delta_lf_params(
-    input: BitInput,
+fn delta_lf_params<'a>(
+    input: BitInput<'a>,
+    ctx: TraceCtx<'a>,
     delta_q_present: bool,
     allow_intrabc: bool,
-) -> IResult<BitInput, (), Error<BitInput>> {
+) -> IResult<BitInput<'a>, (), Error<BitInput<'a>>> {
     let input = if delta_q_present {
         let (input, delta_lf_present) = if allow_intrabc {
             (input, false)
         } else {
-            take_bool_bit(input)?
+            trace_bool(input, ctx, "delta_lf_present")?
         };
         if delta_lf_present {
-            let (input, _delta_lf_res): (_, u8) = bit_parsers::take(2usize)(input)?;
-            let (input, _delta_lf_multi) = take_bool_bit(input)?;
+            let (input, _delta_lf_res) = trace_take_u8(input, ctx, 2, "delta_lf_res")?;
+            let (input, _delta_lf_multi) = trace_bool(input, ctx, "delta_lf_multi")?;
             input
         } else {
             input
@@ -1308,44 +1429,59 @@ const fn load_previous_segment_ids(input: BitInput) -> IResult<BitInput, (), Err
 }
 
 /// Parses loop-filter syntax for non-lossless inter/intra frames.
-fn loop_filter_params(
-    input: BitInput,
+fn loop_filter_params<'a>(
+    input: BitInput<'a>,
+    ctx: TraceCtx<'a>,
     coded_lossless: bool,
     allow_intrabc: bool,
     num_planes: u8,
-) -> IResult<BitInput, (), Error<BitInput>> {
+) -> IResult<BitInput<'a>, (), Error<BitInput<'a>>> {
     if coded_lossless || allow_intrabc {
         return Ok((input, ()));
     }
 
-    let (input, loop_filter_l0): (_, u8) = bit_parsers::take(6usize)(input)?;
-    let (input, loop_filter_l1): (_, u8) = bit_parsers::take(6usize)(input)?;
+    let (input, loop_filter_l0) = trace_take_u8(input, ctx, 6, "loop_filter_level[0]")?;
+    let (input, loop_filter_l1) = trace_take_u8(input, ctx, 6, "loop_filter_level[1]")?;
     let input = if num_planes > 1 && (loop_filter_l0 > 0 || loop_filter_l1 > 0) {
-        let (input, _loop_filter_l2): (_, u8) = bit_parsers::take(6usize)(input)?;
-        let (input, _loop_filter_l3): (_, u8) = bit_parsers::take(6usize)(input)?;
+        let (input, _loop_filter_l2) = trace_take_u8(input, ctx, 6, "loop_filter_level[2]")?;
+        let (input, _loop_filter_l3) = trace_take_u8(input, ctx, 6, "loop_filter_level[3]")?;
         input
     } else {
         input
     };
-    let (input, _loop_filter_sharpness): (_, u8) = bit_parsers::take(3usize)(input)?;
-    let (mut input, loop_filter_delta_enabled) = take_bool_bit(input)?;
+    let (input, _loop_filter_sharpness) = trace_take_u8(input, ctx, 3, "loop_filter_sharpness")?;
+    let (mut input, loop_filter_delta_enabled) =
+        trace_bool(input, ctx, "loop_filter_delta_enabled")?;
     if loop_filter_delta_enabled {
-        let (inner_input, loop_filter_delta_update) = take_bool_bit(input)?;
+        let (inner_input, loop_filter_delta_update) =
+            trace_bool(input, ctx, "loop_filter_delta_update")?;
         input = inner_input;
         if loop_filter_delta_update {
-            for _ in 0..TOTAL_REFS_PER_FRAME {
-                let (inner_input, update_ref_delta) = take_bool_bit(input)?;
+            for i in 0..TOTAL_REFS_PER_FRAME {
+                let (inner_input, update_ref_delta) =
+                    trace_bool(input, ctx, &format!("update_ref_delta[{i}]"))?;
                 input = if update_ref_delta {
-                    let (inner_input, _loop_filter_ref_delta) = su(inner_input, 1 + 6)?;
+                    let (inner_input, _loop_filter_ref_delta) = trace_su(
+                        inner_input,
+                        ctx,
+                        1 + 6,
+                        &format!("loop_filter_ref_deltas[{i}]"),
+                    )?;
                     inner_input
                 } else {
                     inner_input
                 };
             }
-            for _ in 0..2u8 {
-                let (inner_input, update_mode_delta) = take_bool_bit(input)?;
+            for i in 0..2u8 {
+                let (inner_input, update_mode_delta) =
+                    trace_bool(input, ctx, &format!("update_mode_delta[{i}]"))?;
                 input = if update_mode_delta {
-                    let (inner_input, _loop_filter_mode_delta) = su(inner_input, 1 + 6)?;
+                    let (inner_input, _loop_filter_mode_delta) = trace_su(
+                        inner_input,
+                        ctx,
+                        1 + 6,
+                        &format!("loop_filter_mode_deltas[{i}]"),
+                    )?;
                     inner_input
                 } else {
                     inner_input
@@ -1358,25 +1494,30 @@ fn loop_filter_params(
 }
 
 /// Parses CDEF (constrained directional enhancement filter) parameters.
-fn cdef_params(
-    input: BitInput,
+fn cdef_params<'a>(
+    input: BitInput<'a>,
+    ctx: TraceCtx<'a>,
     coded_lossless: bool,
     allow_intrabc: bool,
     enable_cdef: bool,
     num_planes: u8,
-) -> IResult<BitInput, (), Error<BitInput>> {
+) -> IResult<BitInput<'a>, (), Error<BitInput<'a>>> {
     if coded_lossless || allow_intrabc || !enable_cdef {
         return Ok((input, ()));
     }
 
-    let (input, _cdef_damping_minus_3): (_, u8) = bit_parsers::take(2usize)(input)?;
-    let (mut input, cdef_bits): (_, u8) = bit_parsers::take(2usize)(input)?;
-    for _ in 0..(1usize << cdef_bits) {
-        let (inner_input, _cdef_y_pri_str): (_, u8) = bit_parsers::take(4usize)(input)?;
-        let (inner_input, _cdef_y_sec_str): (_, u8) = bit_parsers::take(2usize)(inner_input)?;
+    let (input, _cdef_damping_minus_3) = trace_take_u8(input, ctx, 2, "cdef_damping_minus_3")?;
+    let (mut input, cdef_bits) = trace_take_u8(input, ctx, 2, "cdef_bits")?;
+    for i in 0..(1usize << cdef_bits) {
+        let (inner_input, _cdef_y_pri_str) =
+            trace_take_u8(input, ctx, 4, &format!("cdef_y_pri_strength[{i}]"))?;
+        let (inner_input, _cdef_y_sec_str) =
+            trace_take_u8(inner_input, ctx, 2, &format!("cdef_y_sec_strength[{i}]"))?;
         input = if num_planes > 1 {
-            let (inner_input, _cdef_uv_pri_str): (_, u8) = bit_parsers::take(4usize)(inner_input)?;
-            let (inner_input, _cdef_uv_sec_str): (_, u8) = bit_parsers::take(2usize)(inner_input)?;
+            let (inner_input, _cdef_uv_pri_str) =
+                trace_take_u8(inner_input, ctx, 4, &format!("cdef_uv_pri_strength[{i}]"))?;
+            let (inner_input, _cdef_uv_sec_str) =
+                trace_take_u8(inner_input, ctx, 2, &format!("cdef_uv_sec_strength[{i}]"))?;
             inner_input
         } else {
             inner_input
@@ -1387,15 +1528,17 @@ fn cdef_params(
 }
 
 /// Parses loop-restoration parameters for all active planes.
-fn lr_params(
-    input: BitInput,
+#[allow(clippy::too_many_arguments)]
+fn lr_params<'a>(
+    input: BitInput<'a>,
+    ctx: TraceCtx<'a>,
     all_lossless: bool,
     allow_intrabc: bool,
     enable_restoration: bool,
     use_128x128_superblock: bool,
     num_planes: u8,
     subsampling: (u8, u8),
-) -> IResult<BitInput, (), Error<BitInput>> {
+) -> IResult<BitInput<'a>, (), Error<BitInput<'a>>> {
     if all_lossless || allow_intrabc || !enable_restoration {
         return Ok((input, ()));
     }
@@ -1404,7 +1547,7 @@ fn lr_params(
     let mut uses_lr = false;
     let mut uses_chroma_lr = false;
     for i in 0..num_planes {
-        let (inner_input, lr_type): (_, u8) = bit_parsers::take(2usize)(input)?;
+        let (inner_input, lr_type) = trace_take_u8(input, ctx, 2, &format!("lr_type[{i}]"))?;
         if lr_type != RESTORE_NONE {
             uses_lr = true;
             if i > 0 {
@@ -1416,19 +1559,19 @@ fn lr_params(
 
     let input = if uses_lr {
         let input = if use_128x128_superblock {
-            let (input, _lr_unit_shift) = take_bool_bit(input)?;
+            let (input, _lr_unit_shift) = trace_bool(input, ctx, "lr_unit_shift")?;
             input
         } else {
-            let (input, lr_unit_shift) = take_bool_bit(input)?;
+            let (input, lr_unit_shift) = trace_bool(input, ctx, "lr_unit_shift")?;
             if lr_unit_shift {
-                let (input, _lr_unit_extra_shift) = take_bool_bit(input)?;
+                let (input, _lr_unit_extra_shift) = trace_bool(input, ctx, "lr_unit_extra_shift")?;
                 input
             } else {
                 input
             }
         };
         if subsampling.0 > 0 && subsampling.1 > 0 && uses_chroma_lr {
-            let (input, _lr_uv_shift) = take_bool_bit(input)?;
+            let (input, _lr_uv_shift) = trace_bool(input, ctx, "lr_uv_shift")?;
             input
         } else {
             input
@@ -1441,11 +1584,15 @@ fn lr_params(
 }
 
 /// Parses transform-mode signaling.
-fn read_tx_mode(input: BitInput, coded_lossless: bool) -> IResult<BitInput, (), Error<BitInput>> {
+fn read_tx_mode<'a>(
+    input: BitInput<'a>,
+    ctx: TraceCtx<'a>,
+    coded_lossless: bool,
+) -> IResult<BitInput<'a>, (), Error<BitInput<'a>>> {
     let input = if coded_lossless {
         input
     } else {
-        let (input, _tx_mode_select) = take_bool_bit(input)?;
+        let (input, _tx_mode_select) = trace_bool(input, ctx, "tx_mode_select")?;
         input
     };
     Ok((input, ()))
@@ -1454,20 +1601,23 @@ fn read_tx_mode(input: BitInput, coded_lossless: bool) -> IResult<BitInput, (), 
 /// Parses reference-mode signaling.
 ///
 /// Intra frames always return `false` because reference selection is inapplicable.
-fn frame_reference_mode(
-    input: BitInput,
+fn frame_reference_mode<'a>(
+    input: BitInput<'a>,
+    ctx: TraceCtx<'a>,
     frame_is_intra: bool,
-) -> IResult<BitInput, bool, Error<BitInput>> {
+) -> IResult<BitInput<'a>, bool, Error<BitInput<'a>>> {
     Ok(if frame_is_intra {
         (input, false)
     } else {
-        take_bool_bit(input)?
+        trace_bool(input, ctx, "reference_select")?
     })
 }
 
 /// Parses skip-mode signaling after evaluating spec eligibility conditions.
+#[allow(clippy::too_many_arguments)]
 fn skip_mode_params<'a, 'b>(
     input: BitInput<'a>,
+    ctx: TraceCtx<'a>,
     frame_is_intra: bool,
     reference_select: bool,
     order_hint_bits: usize,
@@ -1525,7 +1675,7 @@ fn skip_mode_params<'a, 'b>(
     }
 
     let (input, _skip_mode_present) = if skip_mode_allowed {
-        take_bool_bit(input)?
+        trace_bool(input, ctx, "skip_mode_present")?
     } else {
         (input, false)
     };
@@ -1694,11 +1844,12 @@ const fn inverse_recenter(r: i32, v: i32) -> i32 {
 }
 
 /// Parses global-motion model syntax for each inter reference frame.
-fn global_motion_params(
-    input: BitInput,
+fn global_motion_params<'a>(
+    input: BitInput<'a>,
+    ctx: TraceCtx<'a>,
     frame_is_intra: bool,
     allow_high_precision_mv: bool,
-) -> IResult<BitInput, (), Error<BitInput>> {
+) -> IResult<BitInput<'a>, (), Error<BitInput<'a>>> {
     if frame_is_intra {
         return Ok((input, ()));
     }
@@ -1708,15 +1859,17 @@ fn global_motion_params(
     for ref_ in (RefType::Last as u8)..=(RefType::Altref as u8) {
         let mut type_ = IDENTITY;
 
-        let (inner_input, is_global) = take_bool_bit(input)?;
+        let (inner_input, is_global) = trace_bool(input, ctx, &format!("is_global[{ref_}]"))?;
         input = inner_input;
         if is_global {
-            let (inner_input, is_rot_zoom) = take_bool_bit(input)?;
+            let (inner_input, is_rot_zoom) =
+                trace_bool(input, ctx, &format!("is_rot_zoom[{ref_}]"))?;
             input = inner_input;
             if is_rot_zoom {
                 type_ = ROTZOOM;
             } else {
-                let (inner_input, is_translation) = take_bool_bit(input)?;
+                let (inner_input, is_translation) =
+                    trace_bool(input, ctx, &format!("is_translation[{ref_}]"))?;
                 input = inner_input;
                 if is_translation {
                     type_ = TRANSLATION;
@@ -1815,7 +1968,10 @@ const fn seg_feature_active_idx(
 
 #[cfg(test)]
 mod tests {
-    use super::super::util::{BitInput, ns, su};
+    use super::super::{
+        trace::TraceCtx,
+        util::{BitInput, ns, su},
+    };
     use super::{
         Dimensions, FrameType, REFS_PER_FRAME, WARPEDMODEL_PREC_BITS, cdef_params,
         compute_image_size, decode_signed_subexp_with_ref, decode_subexp,
@@ -1826,6 +1982,10 @@ mod tests {
         seg_feature_active_idx, segmentation_params, skip_mode_params, superres_params,
         temporal_point_info, tile_info, tile_log2,
     };
+
+    fn test_ctx(input: BitInput) -> TraceCtx {
+        TraceCtx::new(input, 0)
+    }
 
     // -----------------------------------------------------------------------
     // Test infrastructure
@@ -1965,7 +2125,8 @@ mod tests {
         let mut bits = BitBuilder::default();
         bits.push_bits(0xABCD, 16);
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = temporal_point_info((&data, 0), 16).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = temporal_point_info(input, test_ctx(input), 16).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -1974,7 +2135,8 @@ mod tests {
         let mut bits = BitBuilder::default();
         bits.push_bool(true);
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = temporal_point_info((&data, 0), 1).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = temporal_point_info(input, test_ctx(input), 1).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -1982,7 +2144,8 @@ mod tests {
     fn temporal_point_info_consumes_zero_bits() {
         let bits = BitBuilder::default();
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = temporal_point_info((&data, 0), 0).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = temporal_point_info(input, test_ctx(input), 0).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -1999,7 +2162,8 @@ mod tests {
             height: 1080,
         };
         let mut us = fs;
-        let (rem, _) = superres_params((&data, 0), false, &mut fs, &mut us).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = superres_params(input, test_ctx(input), false, &mut fs, &mut us).unwrap();
         assert_eq!(fs.width, 1920);
         assert_eq!(us.width, 1920);
         assert_remaining_position(rem, &data, consumed);
@@ -2015,7 +2179,8 @@ mod tests {
             height: 1080,
         };
         let mut us = fs;
-        let (rem, _) = superres_params((&data, 0), true, &mut fs, &mut us).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = superres_params(input, test_ctx(input), true, &mut fs, &mut us).unwrap();
         // denom=8, width unchanged: (1920*8+4)/8 = 1920
         assert_eq!(fs.width, 1920);
         assert_eq!(us.width, 1920);
@@ -2033,7 +2198,8 @@ mod tests {
             height: 1080,
         };
         let mut us = fs;
-        let (rem, _) = superres_params((&data, 0), true, &mut fs, &mut us).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = superres_params(input, test_ctx(input), true, &mut fs, &mut us).unwrap();
         // width = (1920*8 + 4) / 9 = 15364 / 9 = 1707
         assert_eq!(fs.width, (1920 * 8 + 4) / 9);
         assert_eq!(us.width, 1920);
@@ -2051,7 +2217,8 @@ mod tests {
             height: 1080,
         };
         let mut us = fs;
-        let (rem, _) = superres_params((&data, 0), true, &mut fs, &mut us).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = superres_params(input, test_ctx(input), true, &mut fs, &mut us).unwrap();
         // width = (1920*8 + 8) / 16 = 15368 / 16 = 960
         assert_eq!(fs.width, (1920 * 8 + 8) / 16);
         assert_eq!(us.width, 1920);
@@ -2070,7 +2237,8 @@ mod tests {
             width: 1920,
             height: 1080,
         };
-        let (rem, fs) = frame_size((&data, 0), false, false, 11, 11, max).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, fs) = frame_size(input, test_ctx(input), false, false, 11, 11, max).unwrap();
         assert_eq!(fs.width, 1920);
         assert_eq!(fs.height, 1080);
         assert_remaining_position(rem, &data, consumed);
@@ -2086,7 +2254,8 @@ mod tests {
             width: 1920,
             height: 1080,
         };
-        let (rem, fs) = frame_size((&data, 0), true, false, 11, 11, max).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, fs) = frame_size(input, test_ctx(input), true, false, 11, 11, max).unwrap();
         assert_eq!(fs.width, 960);
         assert_eq!(fs.height, 540);
         assert_remaining_position(rem, &data, consumed);
@@ -2104,7 +2273,8 @@ mod tests {
             width: 1920,
             height: 1080,
         };
-        let (rem, fs) = frame_size((&data, 0), true, true, 11, 11, max).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, fs) = frame_size(input, test_ctx(input), true, true, 11, 11, max).unwrap();
         assert_eq!(fs.width, (1920 * 8 + 4) / 9);
         assert_eq!(fs.height, 1080);
         assert_remaining_position(rem, &data, consumed);
@@ -2127,7 +2297,8 @@ mod tests {
             width: 1920,
             height: 1080,
         };
-        let (rem, rs) = render_size((&data, 0), fs, us).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, rs) = render_size(input, test_ctx(input), fs, us).unwrap();
         assert_eq!(rs.width, 1920);
         assert_eq!(rs.height, 1080);
         assert_remaining_position(rem, &data, consumed);
@@ -2148,7 +2319,8 @@ mod tests {
             width: 1920,
             height: 1080,
         };
-        let (rem, rs) = render_size((&data, 0), fs, us).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, rs) = render_size(input, test_ctx(input), fs, us).unwrap();
         assert_eq!(rs.width, 1280);
         assert_eq!(rs.height, 720);
         assert_remaining_position(rem, &data, consumed);
@@ -2173,8 +2345,10 @@ mod tests {
             height: 720,
         };
         let mut ref_us = ref_fs;
+        let input: BitInput = (&data, 0);
         let (rem, fs) = frame_size_with_refs(
-            (&data, 0),
+            input,
+            test_ctx(input),
             false,
             true,
             11,
@@ -2205,8 +2379,10 @@ mod tests {
             height: 480,
         };
         let mut ref_us = ref_fs;
+        let input: BitInput = (&data, 0);
         let (rem, fs) = frame_size_with_refs(
-            (&data, 0),
+            input,
+            test_ctx(input),
             false,
             true,
             11,
@@ -2243,8 +2419,10 @@ mod tests {
             height: 1080,
         };
         let mut ref_us = ref_fs;
+        let input: BitInput = (&data, 0);
         let (rem, fs) = frame_size_with_refs(
-            (&data, 0),
+            input,
+            test_ctx(input),
             false,
             true,
             11,
@@ -2312,7 +2490,8 @@ mod tests {
         let mut bits = BitBuilder::default();
         bits.push_bool(true); // is_filter_switchable
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = read_interpolation_filter((&data, 0)).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = read_interpolation_filter(input, test_ctx(input)).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -2322,7 +2501,8 @@ mod tests {
         bits.push_bool(false); // not switchable
         bits.push_bits(2, 2); // explicit filter index
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = read_interpolation_filter((&data, 0)).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = read_interpolation_filter(input, test_ctx(input)).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -2372,7 +2552,8 @@ mod tests {
         // So no increment bits for rows.
         // tile_cols_log2=0, tile_rows_log2=0 → no context_update/size_bytes
         let (data, consumed) = with_trailer(bits);
-        let (rem, ti) = tile_info((&data, 0), false, 8, 8).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, ti) = tile_info(input, test_ctx(input), false, 8, 8).unwrap();
         assert_eq!(ti.tile_cols, 1);
         assert_eq!(ti.tile_rows, 1);
         assert_eq!(ti.tile_cols_log2, 0);
@@ -2407,7 +2588,8 @@ mod tests {
         bits.push_bits(0, 1); // context_update_tile_id (1 bit = tile_cols_log2 + tile_rows_log2)
         bits.push_bits(0, 2); // tile_size_bytes_minus_1
         let (data, consumed) = with_trailer(bits);
-        let (rem, ti) = tile_info((&data, 0), false, 1024, 544).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, ti) = tile_info(input, test_ctx(input), false, 1024, 544).unwrap();
         assert_eq!(ti.tile_cols, 2);
         assert_eq!(ti.tile_rows, 1);
         assert_eq!(ti.tile_cols_log2, 1);
@@ -2432,7 +2614,8 @@ mod tests {
         // tile_rows=1
         // tile_cols_log2=0, tile_rows_log2=0 → no context/size bits
         let (data, consumed) = with_trailer(bits);
-        let (rem, ti) = tile_info((&data, 0), false, 8, 8).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, ti) = tile_info(input, test_ctx(input), false, 8, 8).unwrap();
         assert_eq!(ti.tile_cols, 1);
         assert_eq!(ti.tile_rows, 1);
         assert_eq!(ti.tile_cols_log2, 0);
@@ -2460,7 +2643,8 @@ mod tests {
         bits.push_bool(false); // don't increment rows → tile_rows_log2=0
         // tile_cols_log2=0 + tile_rows_log2=0 = 0 → no context/size bits
         let (data, consumed) = with_trailer(bits);
-        let (rem, ti) = tile_info((&data, 0), true, 480, 272).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, ti) = tile_info(input, test_ctx(input), true, 480, 272).unwrap();
         assert_eq!(ti.tile_cols, 1);
         assert_eq!(ti.tile_rows, 1);
         assert_eq!(ti.tile_cols_log2, 0);
@@ -2480,7 +2664,8 @@ mod tests {
         // num_planes=1 → skip U/V deltas
         bits.push_bool(false); // using_qmatrix = false
         let (data, consumed) = with_trailer(bits);
-        let (rem, qp) = quantization_params((&data, 0), 1, false).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, qp) = quantization_params(input, test_ctx(input), 1, false).unwrap();
         assert_eq!(qp.base_q_idx, 128);
         assert_eq!(qp.deltaq_y_dc, 0);
         assert_eq!(qp.deltaq_u_dc, 0);
@@ -2501,7 +2686,8 @@ mod tests {
         // V copies U (diff_uv_delta=false)
         bits.push_bool(false); // using_qmatrix = false
         let (data, consumed) = with_trailer(bits);
-        let (rem, qp) = quantization_params((&data, 0), 3, false).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, qp) = quantization_params(input, test_ctx(input), 3, false).unwrap();
         assert_eq!(qp.base_q_idx, 100);
         assert_eq!(qp.deltaq_v_dc, qp.deltaq_u_dc);
         assert_eq!(qp.deltaq_v_ac, qp.deltaq_u_ac);
@@ -2524,7 +2710,8 @@ mod tests {
         bits.push_bool(false); // deltaq_v_ac not coded
         bits.push_bool(false); // using_qmatrix = false
         let (data, consumed) = with_trailer(bits);
-        let (rem, qp) = quantization_params((&data, 0), 3, true).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, qp) = quantization_params(input, test_ctx(input), 3, true).unwrap();
         assert_eq!(qp.deltaq_u_dc, 10);
         assert_eq!(qp.deltaq_v_dc, -5);
         assert_eq!(qp.deltaq_u_ac, 0);
@@ -2544,7 +2731,8 @@ mod tests {
         // diff_uv_delta=false → V = U
         bits.push_bool(false); // using_qmatrix
         let (data, consumed) = with_trailer(bits);
-        let (rem, qp) = quantization_params((&data, 0), 3, true).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, qp) = quantization_params(input, test_ctx(input), 3, true).unwrap();
         assert_eq!(qp.deltaq_u_dc, 7);
         assert_eq!(qp.deltaq_v_dc, 7);
         assert_remaining_position(rem, &data, consumed);
@@ -2563,7 +2751,8 @@ mod tests {
         bits.push_bits(3, 4); // qm_u
         bits.push_bits(7, 4); // qm_v (separate_uv=true → reads independently)
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = quantization_params((&data, 0), 3, true).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = quantization_params(input, test_ctx(input), 3, true).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -2579,7 +2768,8 @@ mod tests {
         bits.push_bits(5, 4); // qm_y
         bits.push_bits(3, 4); // qm_u; qm_v = qm_u (no extra read)
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = quantization_params((&data, 0), 3, false).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = quantization_params(input, test_ctx(input), 3, false).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -2592,7 +2782,8 @@ mod tests {
         let mut bits = BitBuilder::default();
         bits.push_bool(false); // delta_coded = false
         let (data, consumed) = with_trailer(bits);
-        let (rem, val) = read_delta_q((&data, 0)).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, val) = read_delta_q(input, test_ctx(input), "test").unwrap();
         assert_eq!(val, 0);
         assert_remaining_position(rem, &data, consumed);
     }
@@ -2603,7 +2794,8 @@ mod tests {
         bits.push_bool(true); // delta_coded = true
         bits.push_su(42, 7); // su(7) = 42
         let (data, consumed) = with_trailer(bits);
-        let (rem, val) = read_delta_q((&data, 0)).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, val) = read_delta_q(input, test_ctx(input), "test").unwrap();
         assert_eq!(val, 42);
         assert_remaining_position(rem, &data, consumed);
     }
@@ -2614,7 +2806,8 @@ mod tests {
         bits.push_bool(true);
         bits.push_su(-10, 7);
         let (data, consumed) = with_trailer(bits);
-        let (rem, val) = read_delta_q((&data, 0)).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, val) = read_delta_q(input, test_ctx(input), "test").unwrap();
         assert_eq!(val, -10);
         assert_remaining_position(rem, &data, consumed);
     }
@@ -2625,7 +2818,8 @@ mod tests {
         bits.push_bool(true);
         bits.push_su(0, 7);
         let (data, consumed) = with_trailer(bits);
-        let (rem, val) = read_delta_q((&data, 0)).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, val) = read_delta_q(input, test_ctx(input), "test").unwrap();
         assert_eq!(val, 0);
         assert_remaining_position(rem, &data, consumed);
     }
@@ -2639,7 +2833,8 @@ mod tests {
         let mut bits = BitBuilder::default();
         bits.push_bool(false); // segmentation_enabled = false
         let (data, consumed) = with_trailer(bits);
-        let (rem, result) = segmentation_params((&data, 0), 7).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, result) = segmentation_params(input, test_ctx(input), 7).unwrap();
         assert!(result.is_none());
         assert_remaining_position(rem, &data, consumed);
     }
@@ -2654,7 +2849,8 @@ mod tests {
             bits.push_bool(false);
         }
         let (data, consumed) = with_trailer(bits);
-        let (rem, result) = segmentation_params((&data, 0), 7).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, result) = segmentation_params(input, test_ctx(input), 7).unwrap();
         let seg_data = result.unwrap();
         for seg in &seg_data {
             for feat in seg {
@@ -2681,7 +2877,8 @@ mod tests {
             bits.push_bool(false);
         }
         let (data, consumed) = with_trailer(bits);
-        let (rem, result) = segmentation_params((&data, 0), 7).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, result) = segmentation_params(input, test_ctx(input), 7).unwrap();
         let seg_data = result.unwrap();
         assert_eq!(seg_data[0][5], Some(5));
         assert!(seg_data[0][0].is_none());
@@ -2704,7 +2901,8 @@ mod tests {
             bits.push_bool(false);
         }
         let (data, consumed) = with_trailer(bits);
-        let (rem, result) = segmentation_params((&data, 0), 7).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, result) = segmentation_params(input, test_ctx(input), 7).unwrap();
         let seg_data = result.unwrap();
         assert_eq!(seg_data[0][0], Some(-50));
         assert_remaining_position(rem, &data, consumed);
@@ -2723,7 +2921,8 @@ mod tests {
             bits.push_bool(false);
         }
         let (data, consumed) = with_trailer(bits);
-        let (rem, result) = segmentation_params((&data, 0), 0).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, result) = segmentation_params(input, test_ctx(input), 0).unwrap();
         assert!(result.is_some());
         assert_remaining_position(rem, &data, consumed);
     }
@@ -2735,7 +2934,8 @@ mod tests {
         bits.push_bool(false); // segmentation_update_map = false
         bits.push_bool(false); // segmentation_update_data = false
         let (data, consumed) = with_trailer(bits);
-        let (rem, result) = segmentation_params((&data, 0), 0).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, result) = segmentation_params(input, test_ctx(input), 0).unwrap();
         assert!(result.is_some());
         assert_remaining_position(rem, &data, consumed);
     }
@@ -2751,7 +2951,8 @@ mod tests {
             bits.push_bool(false);
         }
         let (data, consumed) = with_trailer(bits);
-        let (rem, result) = segmentation_params((&data, 0), 0).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, result) = segmentation_params(input, test_ctx(input), 0).unwrap();
         assert!(result.is_some());
         assert_remaining_position(rem, &data, consumed);
     }
@@ -2764,7 +2965,8 @@ mod tests {
     fn delta_q_params_base_zero_returns_false() {
         let bits = BitBuilder::default();
         let (data, consumed) = with_trailer(bits);
-        let (rem, present) = delta_q_params((&data, 0), 0).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, present) = delta_q_params(input, test_ctx(input), 0).unwrap();
         assert!(!present);
         assert_remaining_position(rem, &data, consumed);
     }
@@ -2775,7 +2977,8 @@ mod tests {
         bits.push_bool(true); // delta_q_present = true
         bits.push_bits(2, 2); // delta_q_res = 2
         let (data, consumed) = with_trailer(bits);
-        let (rem, present) = delta_q_params((&data, 0), 100).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, present) = delta_q_params(input, test_ctx(input), 100).unwrap();
         assert!(present);
         assert_remaining_position(rem, &data, consumed);
     }
@@ -2785,7 +2988,8 @@ mod tests {
         let mut bits = BitBuilder::default();
         bits.push_bool(false); // delta_q_present = false
         let (data, consumed) = with_trailer(bits);
-        let (rem, present) = delta_q_params((&data, 0), 100).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, present) = delta_q_params(input, test_ctx(input), 100).unwrap();
         assert!(!present);
         assert_remaining_position(rem, &data, consumed);
     }
@@ -2798,7 +3002,8 @@ mod tests {
     fn delta_lf_params_delta_q_not_present() {
         let bits = BitBuilder::default();
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = delta_lf_params((&data, 0), false, false).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = delta_lf_params(input, test_ctx(input), false, false).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -2806,7 +3011,8 @@ mod tests {
     fn delta_lf_params_intrabc_forces_false() {
         let bits = BitBuilder::default();
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = delta_lf_params((&data, 0), true, true).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = delta_lf_params(input, test_ctx(input), true, true).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -2817,7 +3023,8 @@ mod tests {
         bits.push_bits(1, 2); // delta_lf_res
         bits.push_bool(false); // delta_lf_multi
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = delta_lf_params((&data, 0), true, false).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = delta_lf_params(input, test_ctx(input), true, false).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -2826,7 +3033,8 @@ mod tests {
         let mut bits = BitBuilder::default();
         bits.push_bool(false); // delta_lf_present = false
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = delta_lf_params((&data, 0), true, false).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = delta_lf_params(input, test_ctx(input), true, false).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -2838,7 +3046,8 @@ mod tests {
     fn loop_filter_params_coded_lossless_early_return() {
         let bits = BitBuilder::default();
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = loop_filter_params((&data, 0), true, false, 3).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = loop_filter_params(input, test_ctx(input), true, false, 3).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -2846,7 +3055,8 @@ mod tests {
     fn loop_filter_params_intrabc_early_return() {
         let bits = BitBuilder::default();
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = loop_filter_params((&data, 0), false, true, 3).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = loop_filter_params(input, test_ctx(input), false, true, 3).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -2859,7 +3069,8 @@ mod tests {
         bits.push_bits(2, 3); // sharpness
         bits.push_bool(false); // delta_enabled = false
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = loop_filter_params((&data, 0), false, false, 1).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = loop_filter_params(input, test_ctx(input), false, false, 1).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -2874,7 +3085,8 @@ mod tests {
         bits.push_bits(4, 3); // sharpness
         bits.push_bool(false); // delta_enabled = false
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = loop_filter_params((&data, 0), false, false, 3).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = loop_filter_params(input, test_ctx(input), false, false, 3).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -2888,7 +3100,8 @@ mod tests {
         bits.push_bits(0, 3); // sharpness
         bits.push_bool(false); // delta_enabled
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = loop_filter_params((&data, 0), false, false, 3).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = loop_filter_params(input, test_ctx(input), false, false, 3).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -2913,7 +3126,8 @@ mod tests {
         bits.push_bool(false);
         bits.push_bool(false);
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = loop_filter_params((&data, 0), false, false, 1).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = loop_filter_params(input, test_ctx(input), false, false, 1).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -2926,7 +3140,8 @@ mod tests {
         bits.push_bool(true); // delta_enabled
         bits.push_bool(false); // delta_update = false
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = loop_filter_params((&data, 0), false, false, 1).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = loop_filter_params(input, test_ctx(input), false, false, 1).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -2938,7 +3153,8 @@ mod tests {
     fn cdef_params_lossless_early_return() {
         let bits = BitBuilder::default();
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = cdef_params((&data, 0), true, false, true, 3).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = cdef_params(input, test_ctx(input), true, false, true, 3).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -2946,7 +3162,8 @@ mod tests {
     fn cdef_params_intrabc_early_return() {
         let bits = BitBuilder::default();
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = cdef_params((&data, 0), false, true, true, 3).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = cdef_params(input, test_ctx(input), false, true, true, 3).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -2954,7 +3171,8 @@ mod tests {
     fn cdef_params_disabled_early_return() {
         let bits = BitBuilder::default();
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = cdef_params((&data, 0), false, false, false, 3).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = cdef_params(input, test_ctx(input), false, false, false, 3).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -2967,7 +3185,8 @@ mod tests {
         bits.push_bits(5, 4); // cdef_y_pri_str
         bits.push_bits(1, 2); // cdef_y_sec_str
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = cdef_params((&data, 0), false, false, true, 1).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = cdef_params(input, test_ctx(input), false, false, true, 1).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -2983,7 +3202,8 @@ mod tests {
             bits.push_bits(0, 2); // uv_sec
         }
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = cdef_params((&data, 0), false, false, true, 3).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = cdef_params(input, test_ctx(input), false, false, true, 3).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -2999,7 +3219,8 @@ mod tests {
             bits.push_bits(0, 2); // uv_sec
         }
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = cdef_params((&data, 0), false, false, true, 3).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = cdef_params(input, test_ctx(input), false, false, true, 3).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -3011,7 +3232,9 @@ mod tests {
     fn lr_params_lossless_early_return() {
         let bits = BitBuilder::default();
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = lr_params((&data, 0), true, false, true, false, 3, (1, 1)).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) =
+            lr_params(input, test_ctx(input), true, false, true, false, 3, (1, 1)).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -3019,7 +3242,9 @@ mod tests {
     fn lr_params_intrabc_early_return() {
         let bits = BitBuilder::default();
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = lr_params((&data, 0), false, true, true, false, 3, (1, 1)).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) =
+            lr_params(input, test_ctx(input), false, true, true, false, 3, (1, 1)).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -3027,7 +3252,18 @@ mod tests {
     fn lr_params_disabled_early_return() {
         let bits = BitBuilder::default();
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = lr_params((&data, 0), false, false, false, false, 3, (1, 1)).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = lr_params(
+            input,
+            test_ctx(input),
+            false,
+            false,
+            false,
+            false,
+            3,
+            (1, 1),
+        )
+        .unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -3040,7 +3276,9 @@ mod tests {
         bits.push_bits(0, 2);
         // uses_lr=false → no shift bits
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = lr_params((&data, 0), false, false, true, false, 3, (1, 1)).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) =
+            lr_params(input, test_ctx(input), false, false, true, false, 3, (1, 1)).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -3056,7 +3294,9 @@ mod tests {
         bits.push_bool(false); // lr_unit_extra_shift
         // subsampling=(1,1) but uses_chroma_lr=false → no lr_uv_shift
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = lr_params((&data, 0), false, false, true, false, 3, (1, 1)).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) =
+            lr_params(input, test_ctx(input), false, false, true, false, 3, (1, 1)).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -3072,7 +3312,9 @@ mod tests {
         // subsampling=(1,1) && uses_chroma_lr=true → reads lr_uv_shift
         bits.push_bool(true); // lr_uv_shift
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = lr_params((&data, 0), false, false, true, true, 3, (1, 1)).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) =
+            lr_params(input, test_ctx(input), false, false, true, true, 3, (1, 1)).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -3086,7 +3328,9 @@ mod tests {
         bits.push_bool(true); // lr_unit_shift
         // subsampling=(0,0) → no lr_uv_shift even though uses_chroma_lr=true
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = lr_params((&data, 0), false, false, true, true, 3, (0, 0)).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) =
+            lr_params(input, test_ctx(input), false, false, true, true, 3, (0, 0)).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -3098,7 +3342,8 @@ mod tests {
     fn read_tx_mode_lossless_reads_nothing() {
         let bits = BitBuilder::default();
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = read_tx_mode((&data, 0), true).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = read_tx_mode(input, test_ctx(input), true).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -3107,7 +3352,8 @@ mod tests {
         let mut bits = BitBuilder::default();
         bits.push_bool(true); // tx_mode_select
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = read_tx_mode((&data, 0), false).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = read_tx_mode(input, test_ctx(input), false).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -3119,7 +3365,8 @@ mod tests {
     fn frame_reference_mode_intra_returns_false() {
         let bits = BitBuilder::default();
         let (data, consumed) = with_trailer(bits);
-        let (rem, val) = frame_reference_mode((&data, 0), true).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, val) = frame_reference_mode(input, test_ctx(input), true).unwrap();
         assert!(!val);
         assert_remaining_position(rem, &data, consumed);
     }
@@ -3129,7 +3376,8 @@ mod tests {
         let mut bits = BitBuilder::default();
         bits.push_bool(true);
         let (data, consumed) = with_trailer(bits);
-        let (rem, val) = frame_reference_mode((&data, 0), false).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, val) = frame_reference_mode(input, test_ctx(input), false).unwrap();
         assert!(val);
         assert_remaining_position(rem, &data, consumed);
     }
@@ -3139,7 +3387,8 @@ mod tests {
         let mut bits = BitBuilder::default();
         bits.push_bool(false);
         let (data, consumed) = with_trailer(bits);
-        let (rem, val) = frame_reference_mode((&data, 0), false).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, val) = frame_reference_mode(input, test_ctx(input), false).unwrap();
         assert!(!val);
         assert_remaining_position(rem, &data, consumed);
     }
@@ -3154,8 +3403,18 @@ mod tests {
         let (data, consumed) = with_trailer(bits);
         let ref_order = [0u64; 8];
         let ref_idx = [0usize; 7];
-        let (rem, _) =
-            skip_mode_params((&data, 0), true, true, 4, 10, &ref_order, &ref_idx).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = skip_mode_params(
+            input,
+            test_ctx(input),
+            true,
+            true,
+            4,
+            10,
+            &ref_order,
+            &ref_idx,
+        )
+        .unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -3165,8 +3424,18 @@ mod tests {
         let (data, consumed) = with_trailer(bits);
         let ref_order = [0u64; 8];
         let ref_idx = [0usize; 7];
-        let (rem, _) =
-            skip_mode_params((&data, 0), false, false, 4, 10, &ref_order, &ref_idx).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = skip_mode_params(
+            input,
+            test_ctx(input),
+            false,
+            false,
+            4,
+            10,
+            &ref_order,
+            &ref_idx,
+        )
+        .unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -3176,8 +3445,18 @@ mod tests {
         let (data, consumed) = with_trailer(bits);
         let ref_order = [0u64; 8];
         let ref_idx = [0usize; 7];
-        let (rem, _) =
-            skip_mode_params((&data, 0), false, true, 0, 10, &ref_order, &ref_idx).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = skip_mode_params(
+            input,
+            test_ctx(input),
+            false,
+            true,
+            0,
+            10,
+            &ref_order,
+            &ref_idx,
+        )
+        .unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -3191,8 +3470,18 @@ mod tests {
         ref_order[0] = 5; // forward (dist < 0)
         ref_order[1] = 12; // backward (dist > 0)
         let ref_idx = [0, 1, 0, 0, 0, 0, 0];
-        let (rem, _) =
-            skip_mode_params((&data, 0), false, true, 4, 10, &ref_order, &ref_idx).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = skip_mode_params(
+            input,
+            test_ctx(input),
+            false,
+            true,
+            4,
+            10,
+            &ref_order,
+            &ref_idx,
+        )
+        .unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -3206,8 +3495,18 @@ mod tests {
         ref_order[0] = 5;
         ref_order[1] = 3;
         let ref_idx = [0, 1, 0, 0, 0, 0, 0];
-        let (rem, _) =
-            skip_mode_params((&data, 0), false, true, 4, 10, &ref_order, &ref_idx).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = skip_mode_params(
+            input,
+            test_ctx(input),
+            false,
+            true,
+            4,
+            10,
+            &ref_order,
+            &ref_idx,
+        )
+        .unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -3221,8 +3520,18 @@ mod tests {
         ref_order[0] = 5;
         // All ref_idx point to slot 0
         let ref_idx = [0, 0, 0, 0, 0, 0, 0];
-        let (rem, _) =
-            skip_mode_params((&data, 0), false, true, 4, 10, &ref_order, &ref_idx).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = skip_mode_params(
+            input,
+            test_ctx(input),
+            false,
+            true,
+            4,
+            10,
+            &ref_order,
+            &ref_idx,
+        )
+        .unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -3429,7 +3738,8 @@ mod tests {
     fn global_motion_params_intra_early_return() {
         let bits = BitBuilder::default();
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = global_motion_params((&data, 0), true, true).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = global_motion_params(input, test_ctx(input), true, true).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -3441,7 +3751,8 @@ mod tests {
             bits.push_bool(false);
         }
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = global_motion_params((&data, 0), false, true).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = global_motion_params(input, test_ctx(input), false, true).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -3466,7 +3777,8 @@ mod tests {
             bits.push_bool(false);
         }
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = global_motion_params((&data, 0), false, true).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = global_motion_params(input, test_ctx(input), false, true).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -3489,7 +3801,8 @@ mod tests {
             bits.push_bool(false);
         }
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = global_motion_params((&data, 0), false, true).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = global_motion_params(input, test_ctx(input), false, true).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -3511,7 +3824,8 @@ mod tests {
             bits.push_bool(false);
         }
         let (data, consumed) = with_trailer(bits);
-        let (rem, _) = global_motion_params((&data, 0), false, true).unwrap();
+        let input: BitInput = (&data, 0);
+        let (rem, _) = global_motion_params(input, test_ctx(input), false, true).unwrap();
         assert_remaining_position(rem, &data, consumed);
     }
 
@@ -3608,6 +3922,10 @@ mod tests {
     use crate::GrainTableSegment;
     use arrayvec::ArrayVec;
     use av1_grain::DEFAULT_GRAIN_SEED;
+
+    fn grain_test_ctx(input: BitInput) -> TraceCtx {
+        TraceCtx::new(input, 0)
+    }
 
     fn make_parser<const WRITE: bool>() -> BitstreamParser<WRITE> {
         BitstreamParser {
@@ -3820,8 +4138,16 @@ mod tests {
 
         // Parse the written output as grain params
         let data = &parser.packet_out;
-        let (_, parsed) =
-            film_grain_params((data.as_slice(), 0), true, FrameType::Key, true, (0, 0)).unwrap();
+        let grain_input: BitInput = (data.as_slice(), 0);
+        let (_, parsed) = film_grain_params(
+            grain_input,
+            grain_test_ctx(grain_input),
+            true,
+            FrameType::Key,
+            true,
+            (0, 0),
+        )
+        .unwrap();
         if let FilmGrainHeader::UpdateGrain(parsed_params) = parsed {
             assert_eq!(parsed_params, params);
         } else {
@@ -3844,8 +4170,16 @@ mod tests {
         assert!(matches!(result, FilmGrainHeader::UpdateGrain(_)));
 
         let data = &parser.packet_out;
-        let (_, parsed) =
-            film_grain_params((data.as_slice(), 0), true, FrameType::Inter, true, (0, 0)).unwrap();
+        let grain_input: BitInput = (data.as_slice(), 0);
+        let (_, parsed) = film_grain_params(
+            grain_input,
+            grain_test_ctx(grain_input),
+            true,
+            FrameType::Inter,
+            true,
+            (0, 0),
+        )
+        .unwrap();
         if let FilmGrainHeader::UpdateGrain(parsed_params) = parsed {
             assert_eq!(parsed_params, params);
         } else {
@@ -3870,8 +4204,16 @@ mod tests {
         assert!(matches!(result, FilmGrainHeader::UpdateGrain(_)));
 
         let data = &parser.packet_out;
-        let (_, parsed) =
-            film_grain_params((data.as_slice(), 0), true, FrameType::Key, true, (0, 0)).unwrap();
+        let grain_input: BitInput = (data.as_slice(), 0);
+        let (_, parsed) = film_grain_params(
+            grain_input,
+            grain_test_ctx(grain_input),
+            true,
+            FrameType::Key,
+            true,
+            (0, 0),
+        )
+        .unwrap();
         if let FilmGrainHeader::UpdateGrain(parsed_params) = parsed {
             assert_eq!(parsed_params.scaling_points_y.len(), 2);
             assert_eq!(parsed_params.scaling_points_y[0], [10, 20]);
@@ -3909,8 +4251,16 @@ mod tests {
         assert!(matches!(result, FilmGrainHeader::UpdateGrain(_)));
 
         let data = &parser.packet_out;
-        let (_, parsed) =
-            film_grain_params((data.as_slice(), 0), true, FrameType::Key, false, (0, 0)).unwrap();
+        let grain_input: BitInput = (data.as_slice(), 0);
+        let (_, parsed) = film_grain_params(
+            grain_input,
+            grain_test_ctx(grain_input),
+            true,
+            FrameType::Key,
+            false,
+            (0, 0),
+        )
+        .unwrap();
         if let FilmGrainHeader::UpdateGrain(parsed_params) = parsed {
             assert_eq!(parsed_params.scaling_points_cb[0], [70, 80]);
             assert_eq!(parsed_params.scaling_points_cr[0], [90, 100]);
@@ -3955,8 +4305,16 @@ mod tests {
         assert!(matches!(result, FilmGrainHeader::UpdateGrain(_)));
 
         let data = &parser.packet_out;
-        let (_, parsed) =
-            film_grain_params((data.as_slice(), 0), true, FrameType::Key, false, (0, 0)).unwrap();
+        let grain_input: BitInput = (data.as_slice(), 0);
+        let (_, parsed) = film_grain_params(
+            grain_input,
+            grain_test_ctx(grain_input),
+            true,
+            FrameType::Key,
+            false,
+            (0, 0),
+        )
+        .unwrap();
         if let FilmGrainHeader::UpdateGrain(parsed_params) = parsed {
             assert!(parsed_params.chroma_scaling_from_luma);
             assert!(parsed_params.scaling_points_cb.is_empty());
@@ -3997,7 +4355,7 @@ mod tests {
         parser.seen_frame_header = true;
         let input: &[u8] = &[0xAB, 0xCD];
         let (remaining, result) = parser
-            .parse_frame_header(input, simple_obu_header(), 0)
+            .parse_frame_header(input, simple_obu_header(), 0, 0)
             .unwrap();
         assert!(result.is_none());
         assert_eq!(
@@ -4028,7 +4386,7 @@ mod tests {
         bits.push_bits(0, 3); // frame_to_show_map_idx
         let (data, _) = with_trailer(bits);
         let (_, result) = parser
-            .parse_frame_header(&data, simple_obu_header(), 0)
+            .parse_frame_header(&data, simple_obu_header(), 0, 0)
             .unwrap();
         let header = result.expect("shown existing frame should return Some");
         assert!(header.show_existing_frame);
@@ -4044,7 +4402,7 @@ mod tests {
         let bits = build_minimal_key_frame_bits(true);
         let (data, _) = with_trailer(bits);
         let (_, result) = parser
-            .parse_frame_header(&data, simple_obu_header(), 0)
+            .parse_frame_header(&data, simple_obu_header(), 0, 0)
             .unwrap();
         let header = result.expect("shown Key frame should return Some");
         assert!(header.show_frame);
@@ -4059,7 +4417,7 @@ mod tests {
         let bits = build_minimal_key_frame_bits(false);
         let (data, _) = with_trailer(bits);
         let (_, result) = parser
-            .parse_frame_header(&data, simple_obu_header(), 0)
+            .parse_frame_header(&data, simple_obu_header(), 0, 0)
             .unwrap();
         assert!(result.is_none(), "hidden frame should return None");
         assert!(parser.seen_frame_header);
@@ -4086,7 +4444,7 @@ mod tests {
         bits.push_bits(0, 3); // frame_to_show_map_idx
         let (data, _) = with_trailer(bits);
         let (_, result) = parser
-            .parse_frame_header(&data, simple_obu_header(), 0)
+            .parse_frame_header(&data, simple_obu_header(), 0, 0)
             .unwrap();
         let header = result.unwrap();
         assert_eq!(header.tile_info.tile_cols, expected_tile_info.tile_cols);
@@ -4109,7 +4467,7 @@ mod tests {
         let bits = build_minimal_key_frame_bits(true);
         let (data, _) = with_trailer(bits);
         let _ = parser
-            .parse_frame_header(&data, simple_obu_header(), 0)
+            .parse_frame_header(&data, simple_obu_header(), 0, 0)
             .unwrap();
         // Key+show clears refs first, then refreshes all (order_hint=0, valid=true)
         for i in 0..NUM_REF_FRAMES {
@@ -4136,7 +4494,7 @@ mod tests {
         let bits = build_minimal_key_frame_bits(false);
         let (data, _) = with_trailer(bits);
         let _ = parser
-            .parse_frame_header(&data, simple_obu_header(), 0)
+            .parse_frame_header(&data, simple_obu_header(), 0, 0)
             .unwrap();
         // Hidden Key frame: no clear step (Key+show_frame required), but
         // refresh_frame_flags=0xFF refreshes all → valid=true, order_hint=0
@@ -4156,7 +4514,7 @@ mod tests {
         let bits = build_minimal_key_frame_bits(true);
         let (data, consumed) = with_trailer(bits);
         let _ = parser
-            .parse_frame_header(&data, simple_obu_header(), 0)
+            .parse_frame_header(&data, simple_obu_header(), 0, 0)
             .unwrap();
         // WRITE mode should copy the header bytes to packet_out.
         // film_grain_params_present=false and new_film_grain_state=false,
@@ -4189,7 +4547,7 @@ mod tests {
         bits.push_bits(0, 3); // frame_to_show_map_idx
         let (data, _) = with_trailer(bits);
         let _ = parser
-            .parse_frame_header(&data, simple_obu_header(), 0)
+            .parse_frame_header(&data, simple_obu_header(), 0, 0)
             .unwrap();
         // 4 bits → 1 byte written to packet_out
         assert_eq!(parser.packet_out.len(), 1);
@@ -4214,7 +4572,7 @@ mod tests {
         bits.push_bool(false); // apply_grain = false in original stream
         let (data, _) = with_trailer(bits);
         let (_, result) = parser
-            .parse_frame_header(&data, simple_obu_header(), 500)
+            .parse_frame_header(&data, simple_obu_header(), 500, 0)
             .unwrap();
         let header = result.unwrap();
         match &header.film_grain_params {
@@ -4248,7 +4606,7 @@ mod tests {
         bits.push_bool(false); // apply_grain = false
         let (data, _) = with_trailer(bits);
         let (_, result) = parser
-            .parse_frame_header(&data, simple_obu_header(), 5000)
+            .parse_frame_header(&data, simple_obu_header(), 5000, 0)
             .unwrap();
         let header = result.unwrap();
         assert_eq!(header.film_grain_params, FilmGrainHeader::Disable);
@@ -4266,7 +4624,7 @@ mod tests {
         bits.push_bool(false); // apply_grain = false
         let (data, _) = with_trailer(bits);
         let (_, result) = parser
-            .parse_frame_header(&data, simple_obu_header(), 0)
+            .parse_frame_header(&data, simple_obu_header(), 0, 0)
             .unwrap();
         let header = result.unwrap();
         assert_eq!(header.film_grain_params, FilmGrainHeader::Disable);
@@ -4285,7 +4643,7 @@ mod tests {
         data.extend_from_slice(&[0xAA, 0xBB]); // tile payload
         parser.size = data.len();
         let (remaining, result) = parser
-            .parse_frame_obu(&data, simple_obu_header(), 0)
+            .parse_frame_obu(&data, simple_obu_header(), 0, 0)
             .unwrap();
         let header = result.expect("shown Key frame should return Some");
         assert!(header.show_frame);
@@ -4311,7 +4669,7 @@ mod tests {
         let data = vec![0xAA, 0xBB]; // just tile payload
         parser.size = data.len();
         let (remaining, result) = parser
-            .parse_frame_obu(&data, simple_obu_header(), 0)
+            .parse_frame_obu(&data, simple_obu_header(), 0, 0)
             .unwrap();
         assert!(
             result.is_none(),
@@ -4335,7 +4693,7 @@ mod tests {
         parser.size = header_len + tile_payload_len;
         // Should not panic: tile_group receives exactly tile_payload_len bytes
         let (remaining, _) = parser
-            .parse_frame_obu(&data, simple_obu_header(), 0)
+            .parse_frame_obu(&data, simple_obu_header(), 0, 0)
             .unwrap();
         assert!(remaining.is_empty());
     }
@@ -4350,7 +4708,7 @@ mod tests {
         data.extend_from_slice(&tile_payload);
         parser.size = data.len();
         let _ = parser
-            .parse_frame_obu(&data, simple_obu_header(), 0)
+            .parse_frame_obu(&data, simple_obu_header(), 0, 0)
             .unwrap();
         // packet_out should contain header + tile group bytes
         assert!(parser.packet_out.len() > tile_payload.len());
