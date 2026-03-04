@@ -117,16 +117,14 @@ dependencies = [
 
 [[package]]
 name = "bindgen"
-version = "0.69.5"
+version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "271383c67ccabffb7381723dea0672a673f292304fcb45c01cc648c7a8d58088"
+checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
 dependencies = [
  "bitflags",
  "cexpr",
  "clang-sys",
  "itertools",
- "lazy_static",
- "lazycell",
  "proc-macro2",
  "quote",
  "regex",
@@ -438,9 +436,9 @@ checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
 name = "ffmpeg-sys-the-third"
-version = "4.0.0+ffmpeg-8.0"
+version = "4.1.0+ffmpeg-8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7fc211d0448e9ba775923b7cac39c19d350b47b4994b658f096cd0232d09ef97"
+checksum = "e0c1bf5e362dfb2fbdf9b3e634f3d7f7f0f057103689f518ba4fd96813faf1ef"
 dependencies = [
  "bindgen",
  "cc",
@@ -452,9 +450,9 @@ dependencies = [
 
 [[package]]
 name = "ffmpeg-the-third"
-version = "4.0.1+ffmpeg-8.0"
+version = "4.1.0+ffmpeg-8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9a3b90ff7c38b228afb4d1abaf9fce9336acb7c0674f7c99fdb4aee157820bb"
+checksum = "71a274244c87178cd01144536061d63114cecea74cb1037a3614c81cc7ca01e0"
 dependencies = [
  "bitflags",
  "ffmpeg-sys-the-third",
@@ -622,9 +620,9 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "itertools"
-version = "0.12.1"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba291022dbbd398a455acf126c1e341954079855bc60dfdda641363bd6922569"
+checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
 dependencies = [
  "either",
 ]
@@ -644,18 +642,6 @@ dependencies = [
  "once_cell",
  "wasm-bindgen",
 ]
-
-[[package]]
-name = "lazy_static"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
-
-[[package]]
-name = "lazycell"
-version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 
 [[package]]
 name = "leb128fmt"
@@ -994,9 +980,9 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "rustc-hash"
-version = "1.1.0"
+version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
+checksum = "357703d41365b4b27c590e3ed91eabb1b663f07c4c084095e60cbed4362dff0d"
 
 [[package]]
 name = "rustc_version"
