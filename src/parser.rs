@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use anyhow::{Result, anyhow};
 use ffmpeg::{Packet, Rational, Stream, codec, encoder, format::context::Output, media};
-use log::{debug, warn};
+use log::{debug, log_enabled, warn};
 use nom::Finish;
 
 use self::{
@@ -207,7 +207,13 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         for (stream, mut packet) in ictx.packets().filter_map(Result::ok) {
             if let Some(mut input) = packet.data() {
                 if stream.index() != stream_idx {
-                    self.write_packet(packet, &stream, &stream_mapping, &ist_time_bases)?;
+                    self.write_packet(
+                        packet,
+                        &stream,
+                        &stream_mapping,
+                        &ist_time_bases,
+                        stream_idx,
+                    )?;
                     continue;
                 }
 
@@ -269,7 +275,13 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     }
                 }
                 packet.data_mut().unwrap().copy_from_slice(&self.packet_out);
-                self.write_packet(packet, &stream, &stream_mapping, &ist_time_bases)?;
+                self.write_packet(
+                    packet,
+                    &stream,
+                    &stream_mapping,
+                    &ist_time_bases,
+                    stream_idx,
+                )?;
                 self.packet_out.clear();
             } else {
                 break;
@@ -288,12 +300,60 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         stream: &Stream,
         stream_mapping: &[isize],
         ist_time_bases: &[Rational],
+        video_stream_idx: usize,
     ) -> Result<()> {
         let ist_index = stream.index();
         let ost_index = stream_mapping[ist_index];
         if ost_index < 0 {
             return Ok(());
         }
+
+        if log_enabled!(target: "trace_headers", log::Level::Debug)
+            && ist_index == video_stream_idx
+            && let Some(data) = packet.data()
+        {
+            debug!(
+                target: "trace_headers",
+                "=== Re-parsing modified packet: {} bytes, pts {}, dts {} ===",
+                data.len(),
+                packet.pts().unwrap_or_default(),
+                packet.dts().unwrap_or_default(),
+            );
+            let packet_ts = packet.pts().unwrap_or_default() as u64 * FF_TO_AV1_TS_SHIFT;
+            let mut read_parser = BitstreamParser::<false> {
+                reader: None,
+                writer: None,
+                packet_out: Vec::new(),
+                incoming_grain_header: None,
+                parsed: false,
+                size: self.size,
+                seen_frame_header: self.seen_frame_header,
+                sequence_header: self.sequence_header.clone(),
+                previous_frame_header: self.previous_frame_header.clone(),
+                ref_frame_idx: self.ref_frame_idx,
+                ref_order_hint: self.ref_order_hint,
+                big_ref_order_hint: self.big_ref_order_hint,
+                big_ref_valid: self.big_ref_valid,
+                big_order_hints: self.big_order_hints,
+                grain_headers: Vec::new(),
+            };
+            let mut input = data;
+            loop {
+                match read_parser.parse_obu(input, packet_ts).finish() {
+                    Ok((remaining, _)) => {
+                        input = remaining;
+                        if input.is_empty() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Debug re-parse of modified packet failed: {e:?}");
+                        break;
+                    }
+                }
+            }
+        }
+
         let ost = self
             .writer
             .as_mut()
