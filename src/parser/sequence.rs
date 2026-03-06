@@ -399,6 +399,8 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             let (input, enable_cdef) = trace_bool(input, ctx, "enable_cdef")?;
             let (input, enable_restoration) = trace_bool(input, ctx, "enable_restoration")?;
             let (input, color_config) = color_config(input, ctx, seq_profile)?;
+            let (input, film_grain_params_present) =
+                trace_bool(input, ctx, "film_grain_params_present")?;
 
             if WRITE {
                 // Toggle the film grain params present flag
@@ -417,9 +419,6 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 );
                 trace!("Packet contents: {}", to_binary_string(&obu_out));
             }
-
-            let (input, film_grain_params_present) =
-                trace_bool(input, ctx, "film_grain_params_present")?;
 
             Ok((
                 input,
@@ -1514,8 +1513,9 @@ mod tests {
         assert!(!seq.film_grain_params_present);
         assert!(seq.new_film_grain_state);
         assert_eq!(parser.packet_out.len(), size);
-        // Film grain bit is at bit 60 → byte 7, bit 3 (0=LSB).
-        assert_ne!(parser.packet_out[7] & (1 << 3), 0);
+        // After reading film_grain_params_present, input.1 = 5,
+        // so the WRITE block sets bit (7 - 5) = 2 (0=LSB) in byte 7.
+        assert_ne!(parser.packet_out[7] & (1 << 2), 0);
     }
 
     #[test]
@@ -1529,7 +1529,8 @@ mod tests {
         assert!(seq.film_grain_params_present);
         assert!(!seq.new_film_grain_state);
         assert_eq!(parser.packet_out.len(), size);
-        // Film grain bit at byte 7, bit 3 should be cleared.
-        assert_eq!(parser.packet_out[7] & (1 << 3), 0);
+        // After reading film_grain_params_present, input.1 = 5,
+        // so the WRITE block clears bit (7 - 5) = 2 (0=LSB) in byte 7.
+        assert_eq!(parser.packet_out[7] & (1 << 2), 0);
     }
 }
