@@ -3,7 +3,7 @@ use std::cmp::{max, min};
 use av1_grain::DEFAULT_GRAIN_SEED;
 use bit::BitIndex;
 use bitvec::{order::Msb0, view::BitView};
-use log::debug;
+use log::{debug, trace};
 use nom::{
     IResult, Parser,
     bits::{bits, complete as bit_parsers},
@@ -23,7 +23,7 @@ use super::{
     },
     util::{BitInput, ns, su, take_bool_bit},
 };
-use crate::GrainTableSegment;
+use crate::{GrainTableSegment, misc::to_binary_string};
 
 pub const REFS_PER_FRAME: usize = 7;
 const TOTAL_REFS_PER_FRAME: usize = 8;
@@ -204,6 +204,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     if WRITE {
                         let len = orig_input.len() - input.0.len() + usize::from(input.1 > 0);
                         self.packet_out.extend_from_slice(&orig_input[..len]);
+                        debug!("Uncompressed header extended by {} bytes", len);
                     }
                     let input = if verify_byte_alignment {
                         trace_byte_alignment(input, ctx)?.0
@@ -608,6 +609,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             let written_film_grain_params = if WRITE {
                 let len = orig_input.len() - input.0.len();
                 self.packet_out.extend_from_slice(&orig_input[..len]);
+                debug!("Pre-film-grain header extended by {} bytes", len);
                 if sequence_header.new_film_grain_state && film_grain_allowed {
                     // There will always be at least 1 bit left that we can read
                     let extra_byte = orig_input[len];
@@ -811,6 +813,10 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         data.push(params.clip_to_restricted_range);
 
         self.packet_out.extend_from_slice(data.as_raw_slice());
+        trace!(
+            "Film grain packet contents: {}",
+            to_binary_string(data.as_raw_slice())
+        );
 
         FilmGrainHeader::UpdateGrain(params.clone())
     }

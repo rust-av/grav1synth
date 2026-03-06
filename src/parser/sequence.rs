@@ -1,8 +1,10 @@
 use arrayvec::ArrayVec;
 use bit::BitIndex;
-use log::debug;
+use log::{debug, trace};
 use nom::{IResult, bits::bits, error::Error};
 use num_enum::TryFromPrimitive;
+
+use crate::misc::to_binary_string;
 
 use super::{
     BitstreamParser,
@@ -413,6 +415,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     obu_out.len(),
                     self.packet_out.len()
                 );
+                trace!("Packet contents: {}", to_binary_string(&obu_out));
             }
 
             let (input, film_grain_params_present) =

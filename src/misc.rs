@@ -22,3 +22,12 @@ pub fn get_frame_count(video: &Path) -> Result<usize> {
     let stdout = String::from_utf8_lossy(&result.stdout);
     Ok(stdout.trim().parse()?)
 }
+
+/// Convert a byte slice to a binary string, primarily for debugging
+pub fn to_binary_string(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{b:08b}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}

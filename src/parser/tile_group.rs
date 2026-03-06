@@ -1,3 +1,4 @@
+use log::debug;
 use nom::{IResult, bits::bits, error::Error};
 
 use super::{
@@ -62,6 +63,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
 
         if WRITE {
             self.packet_out.extend_from_slice(&input[..size]);
+            debug!("Copying tile group obu of size {}", size);
         }
         Ok((&input[size..], ()))
     }

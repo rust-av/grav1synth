@@ -1,10 +1,12 @@
-use log::debug;
+use log::{debug, trace};
 use nom::{
     IResult, Parser,
     bits::{bits, complete as bit_parsers},
     error::{Error, context},
 };
 use num_enum::TryFromPrimitive;
+
+use crate::misc::to_binary_string;
 
 use super::{
     BitstreamParser,
@@ -78,6 +80,10 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 "Writing header of size {} to packet_out, total packet size at {}",
                 total_header_size,
                 self.packet_out.len()
+            );
+            trace!(
+                "Packet contents: {}",
+                to_binary_string(&pre_input[..total_header_size])
             );
         }
 
@@ -201,6 +207,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     let adjustment = obu_size - (pre_len - input.len());
                     if WRITE {
                         self.packet_out.extend(input.iter().take(adjustment));
+                        debug!("Writing adjustment of size {}", adjustment);
                     }
                     input = &input[adjustment..];
                 }
@@ -250,6 +257,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
     /// shifting logic.
     fn adjust_obu_size(&mut self, pos: usize, leb_size: usize, new_obu_size: usize) {
         let encoded_size = leb128_write(new_obu_size as u32);
+        trace!("Encoded leb128 packet: {}", to_binary_string(&encoded_size));
         // Add a little padding just in case the leb grew
         let mut new_obu = Vec::with_capacity(self.packet_out.len() + 8);
         new_obu.extend_from_slice(&self.packet_out[..pos]);
