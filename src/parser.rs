@@ -201,7 +201,8 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         self.writer
             .as_mut()
             .unwrap()
-            .set_metadata(ictx.metadata().to_owned());
+            .metadata_mut()
+            .replace_with(ictx.metadata().to_owned());
         self.writer.as_mut().unwrap().write_header()?;
 
         for (stream, mut packet) in ictx.packets().filter_map(Result::ok) {

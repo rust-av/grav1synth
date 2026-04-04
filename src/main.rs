@@ -292,14 +292,13 @@ pub fn main() -> Result<()> {
                     iso_setting: iso,
                     width,
                     height,
-                    transfer_function: if trc == AVColorTransferCharacteristic::AVCOL_TRC_SMPTE2084
-                    {
+                    transfer_function: if trc == AVColorTransferCharacteristic::SMPTE2084 {
                         TransferFunction::SMPTE2084
                     } else {
                         TransferFunction::BT1886
                     },
                     chroma_grain: chroma,
-                    full_range: range == AVColorRange::AVCOL_RANGE_JPEG,
+                    full_range: range == AVColorRange::JPEG,
                     random_seed: None,
                 },
             );

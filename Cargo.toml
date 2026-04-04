@@ -12,14 +12,14 @@ exclude = ["/dav1d-test-data", "/tests"]
 [dependencies]
 anyhow = "1.0.55"
 arrayvec = "0.7.2"
-av-decoders = { version = "0.9.1", features = ["ffmpeg"] }
+av-decoders = { version = "0.10.0", features = ["ffmpeg"] }
 av1-grain = "0.4.0"
 bit = "0.1.1"
 bitvec = "1.0.1"
 clap = { version = "4.0.2", features = ["derive"] }
 crossterm = "0.29.0"
 dialoguer = "0.12.0"
-ffmpeg = { version = "4.0.0", default-features = false, features = [
+ffmpeg = { version = "5.0.0", default-features = false, features = [
     "format",
 ], package = "ffmpeg-the-third" }
 indicatif = "0.18"
