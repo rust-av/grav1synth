@@ -89,23 +89,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
-name = "av-decoders"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a31ed07c3a0db5375deded31ba4db91bdf43660781680eae78392d3dafd77d9d"
-dependencies = [
- "ffmpeg-the-third",
- "num-rational",
- "thiserror",
- "v_frame",
- "y4m",
-]
-
-[[package]]
 name = "av1-grain"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c799433bc1f0ed14d949885186738de9976cfcaefef0e3ab7103fe5c630cb2b"
 dependencies = [
  "anyhow",
  "arrayvec",
@@ -502,7 +487,6 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "arrayvec",
- "av-decoders",
  "av1-grain",
  "bit",
  "bitvec",
@@ -1538,12 +1522,6 @@ checksum = "05f360fc0b24296329c78fda852a1e9ae82de9cf7b27dae4b7f62f118f77b9ed"
 dependencies = [
  "tap",
 ]
-
-[[package]]
-name = "y4m"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a5a4b21e1a62b67a2970e6831bc091d7b87e119e7f9791aef9702e3bef04448"
 
 [[package]]
 name = "zeroize"

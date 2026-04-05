@@ -13,7 +13,7 @@ use std::{
 };
 
 use anyhow::{Result, anyhow, bail};
-use av_decoders::Rational32;
+use num_rational::Rational32;
 #[cfg(feature = "unstable")]
 use av1_grain::estimate_plane_noise;
 use av1_grain::{
@@ -270,7 +270,7 @@ pub fn main() -> Result<()> {
                 return Ok(());
             }
 
-            let mut reader = BitstreamReader::open(&input)?;
+            let reader = BitstreamReader::open(&input)?;
             let writer = format::output(&output)?;
             // SAFETY: We extract the items we need from the struct within the unsafe block,
             // so there's no possibility of use-after-free later.
@@ -559,7 +559,7 @@ pub fn main() -> Result<()> {
                 return Ok(());
             }
 
-            let mut reader = Decoder::from_file(&source)?;
+            let mut reader = BitstreamReader::open(&source)?;
             let bit_depth = reader.get_video_details().bit_depth;
             let mut frame_estimates = Vec::new();
 
@@ -567,7 +567,7 @@ pub fn main() -> Result<()> {
                 match bit_depth {
                     8 => match reader.get_frame::<u8>()? {
                         Some(frame) => {
-                            frame_estimates.push(estimate_plane_noise(&frame.planes[0], bit_depth));
+                            frame_estimates.push(estimate_plane_noise(&frame.y_plane, bit_depth));
                         }
                         None => {
                             break;
@@ -575,7 +575,7 @@ pub fn main() -> Result<()> {
                     },
                     9..=16 => match reader.get_frame::<u16>()? {
                         Some(frame) => {
-                            frame_estimates.push(estimate_plane_noise(&frame.planes[0], bit_depth));
+                            frame_estimates.push(estimate_plane_noise(&frame.y_plane, bit_depth));
                         }
                         None => {
                             break;
