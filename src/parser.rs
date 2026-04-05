@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 
 use anyhow::{Result, anyhow};
-use ffmpeg::{Packet, Rational, Stream, codec, encoder, format::context::Output, media};
+use ffmpeg::{Dictionary, Packet, Rational, Stream, codec, encoder, format::context::Output, media};
 use log::{debug, log_enabled, warn};
 use nom::Finish;
 
@@ -171,6 +171,20 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         let mut stream_mapping = vec![0; ictx.nb_streams() as _];
         let mut ist_time_bases = vec![Rational(0, 1); ictx.nb_streams() as _];
         let mut ost_index = 0;
+
+        let input_chapters: Vec<(i64, Rational, i64, i64, Dictionary)> = ictx
+            .chapters()
+            .map(|ch| {
+                (
+                    ch.id(),
+                    ch.time_base(),
+                    ch.start(),
+                    ch.end(),
+                    ch.metadata().to_owned(),
+                )
+            })
+            .collect();
+
         for (ist_index, ist) in ictx.streams().enumerate() {
             let ist_medium = ist.parameters().medium();
             if ist_medium != media::Type::Audio
@@ -183,6 +197,10 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             stream_mapping[ist_index] = ost_index;
             ist_time_bases[ist_index] = ist.time_base();
             ost_index += 1isize;
+
+            let ist_metadata = ist.metadata().to_owned();
+            let ist_sar = ist.sample_aspect_ratio();
+
             let mut ost = self
                 .writer
                 .as_mut()
@@ -190,11 +208,13 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 .add_stream(encoder::find(codec::Id::None))
                 .unwrap();
             ost.set_parameters(ist.parameters());
-            // SAFETY: We need to set codec_tag to 0 lest we run into incompatible codec tag
-            // issues when muxing into a different container format. Unfortunately
-            // there's no high level API to do this (yet).
+            ost.metadata_mut().replace_with(ist_metadata);
+            ost.set_sample_aspect_ratio(ist_sar);
+            // SAFETY: We need to set codec_tag to 0 and copy disposition flags.
+            // There's no high level API for either (yet).
             unsafe {
                 (*ost.parameters_mut().as_mut_ptr()).codec_tag = 0;
+                (*ost.as_mut_ptr()).disposition = (*ist.as_ptr()).disposition;
             }
         }
 
@@ -203,6 +223,21 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             .unwrap()
             .metadata_mut()
             .replace_with(ictx.metadata().to_owned());
+
+        for (id, time_base, start, end, metadata) in input_chapters {
+            let title = metadata
+                .as_ref()
+                .get("title")
+                .unwrap_or("")
+                .to_owned();
+            let mut out_chapter = self
+                .writer
+                .as_mut()
+                .unwrap()
+                .add_chapter(id, time_base, start, end, &title)?;
+            out_chapter.metadata_mut().replace_with(metadata);
+        }
+
         self.writer.as_mut().unwrap().write_header()?;
 
         for (stream, mut packet) in ictx.packets().filter_map(Result::ok) {

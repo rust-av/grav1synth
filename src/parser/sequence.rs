@@ -399,17 +399,19 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             let (input, enable_cdef) = trace_bool(input, ctx, "enable_cdef")?;
             let (input, enable_restoration) = trace_bool(input, ctx, "enable_restoration")?;
             let (input, color_config) = color_config(input, ctx, seq_profile)?;
+            let fgp_bit_offset = input.1;
             let (input, film_grain_params_present) =
                 trace_bool(input, ctx, "film_grain_params_present")?;
 
             if WRITE {
                 // Toggle the film grain params present flag
                 // based on whether we are adding or removing film grain.
-                let bit_offset = input.1;
+                // We use the bit offset captured BEFORE parsing the flag so
+                // it points at the flag itself rather than one past it.
                 obu_out
                     .last_mut()
                     .unwrap()
-                    .set_bit(7 - bit_offset, self.incoming_grain_header.is_some());
+                    .set_bit(7 - fgp_bit_offset, self.incoming_grain_header.is_some());
                 self.packet_out.extend_from_slice(&obu_out);
                 debug!(
                     "Writing updated sequence header of size {} to packet_out, total packet size \
@@ -1513,9 +1515,8 @@ mod tests {
         assert!(!seq.film_grain_params_present);
         assert!(seq.new_film_grain_state);
         assert_eq!(parser.packet_out.len(), size);
-        // After reading film_grain_params_present, input.1 = 5,
-        // so the WRITE block sets bit (7 - 5) = 2 (0=LSB) in byte 7.
-        assert_ne!(parser.packet_out[7] & (1 << 2), 0);
+        // Film grain bit is at bit 60 → byte 7, bit 3 (0=LSB).
+        assert_ne!(parser.packet_out[7] & (1 << 3), 0);
     }
 
     #[test]
@@ -1529,8 +1530,7 @@ mod tests {
         assert!(seq.film_grain_params_present);
         assert!(!seq.new_film_grain_state);
         assert_eq!(parser.packet_out.len(), size);
-        // After reading film_grain_params_present, input.1 = 5,
-        // so the WRITE block clears bit (7 - 5) = 2 (0=LSB) in byte 7.
-        assert_eq!(parser.packet_out[7] & (1 << 2), 0);
+        // Film grain bit at byte 7, bit 3 should be cleared.
+        assert_eq!(parser.packet_out[7] & (1 << 3), 0);
     }
 }
