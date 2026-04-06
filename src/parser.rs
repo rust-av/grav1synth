@@ -1,7 +1,9 @@
 use std::cmp::Ordering;
 
 use anyhow::{Result, anyhow};
-use ffmpeg::{Dictionary, Packet, Rational, Stream, codec, encoder, format::context::Output, media};
+use ffmpeg::{
+    Dictionary, Packet, Rational, Stream, codec, encoder, format::context::Output, media,
+};
 use log::{debug, log_enabled, warn};
 use nom::Finish;
 
@@ -225,11 +227,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             .replace_with(ictx.metadata().to_owned());
 
         for (id, time_base, start, end, metadata) in input_chapters {
-            let title = metadata
-                .as_ref()
-                .get("title")
-                .unwrap_or("")
-                .to_owned();
+            let title = metadata.as_ref().get("title").unwrap_or("").to_owned();
             let mut out_chapter = self
                 .writer
                 .as_mut()

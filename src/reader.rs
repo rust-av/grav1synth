@@ -92,10 +92,7 @@ impl BitstreamReader {
                 height: decoder.height() as usize,
                 bit_depth,
                 chroma_sampling,
-                frame_rate: Rational32::new(
-                    frame_rate.numerator(),
-                    frame_rate.denominator(),
-                ),
+                frame_rate: Rational32::new(frame_rate.numerator(), frame_rate.denominator()),
             },
             input_ctx,
             decoder,
@@ -169,10 +166,7 @@ impl BitstreamReader {
     }
 }
 
-fn decode_frame<T: Pixel>(
-    details: &VideoDetails,
-    decoded: &frame::Video,
-) -> Result<Frame<T>> {
+fn decode_frame<T: Pixel>(details: &VideoDetails, decoded: &frame::Video) -> Result<Frame<T>> {
     let width = details.width;
     let height = details.height;
 
@@ -183,9 +177,10 @@ fn decode_frame<T: Pixel>(
     let nz_bd = std::num::NonZeroU8::new(details.bit_depth as u8)
         .ok_or_else(|| anyhow::anyhow!("zero bit-depth is not supported"))?;
 
-    let mut frame: Frame<T> = FrameBuilder::new(nz_width, nz_height, details.chroma_sampling, nz_bd)
-        .build()
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut frame: Frame<T> =
+        FrameBuilder::new(nz_width, nz_height, details.chroma_sampling, nz_bd)
+            .build()
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let y_stride = NonZeroUsize::new(decoded.stride(0))
         .ok_or_else(|| anyhow::anyhow!("luma stride is zero"))?;

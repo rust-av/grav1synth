@@ -13,7 +13,6 @@ use std::{
 };
 
 use anyhow::{Result, anyhow, bail};
-use num_rational::Rational32;
 #[cfg(feature = "unstable")]
 use av1_grain::estimate_plane_noise;
 use av1_grain::{
@@ -29,6 +28,7 @@ use ffmpeg::{
 };
 use indicatif::{HumanDuration, ProgressBar, ProgressDrawTarget, ProgressState, ProgressStyle};
 use log::{debug, error, info, warn};
+use num_rational::Rational32;
 use parser::grain::{FilmGrainHeader, FilmGrainParams};
 
 use crate::{
