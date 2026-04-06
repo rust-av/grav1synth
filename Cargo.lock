@@ -90,10 +90,13 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "av1-grain"
-version = "0.4.1"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "620afb8bfa7c1eaef9f5b6284ff7c1e239b85ac9c56b9f2df1f101ea9827d379"
 dependencies = [
  "anyhow",
  "arrayvec",
+ "cfg-if",
  "log",
  "nom 8.0.0",
  "num-rational",
