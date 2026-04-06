@@ -84,7 +84,10 @@ impl BitstreamReader {
             }
         };
 
-        let frame_rate = stream.avg_frame_rate();
+        let mut frame_rate = stream.avg_frame_rate();
+        if frame_rate.denominator() == 0 {
+            frame_rate = stream.rate();
+        }
 
         Ok(Self {
             video_details: VideoDetails {
