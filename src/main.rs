@@ -714,13 +714,14 @@ impl From<av1_grain::GrainTableSegment> for GrainTableSegment {
 
 // I don't know why this is the base unit for a timestamp but it is. 1/10000000
 // of a second.
-const TIMESTAMP_BASE_UNIT: f64 = 10000000f64;
+const TIMESTAMP_BASE_UNIT: f64 = 10_000_000f64;
 
 fn aggregate_grain_headers(
     grain_headers: &[FilmGrainHeader],
     frame_rate: Rational32,
 ) -> Vec<GrainTableSegment> {
-    let time_per_packet: f64 = *frame_rate.denom() as f64 / *frame_rate.numer() as f64 * TIMESTAMP_BASE_UNIT;
+    let time_per_packet: f64 =
+        *frame_rate.denom() as f64 / *frame_rate.numer() as f64 * TIMESTAMP_BASE_UNIT;
     let mut cur_packet_start: u64 = 0;
     let mut cur_packet_end_f: f64 = time_per_packet;
     let mut cur_packet_end: u64 = cur_packet_end_f.ceil() as u64;
