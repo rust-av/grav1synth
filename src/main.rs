@@ -201,53 +201,9 @@ pub fn main() -> Result<()> {
             output,
             overwrite,
             grain,
-        } => {
-            if input == output {
-                error!(
-                    "Input and output paths are the same. This is probably a typo, because this \
-                     would overwrite your input. Exiting."
-                );
-                return Ok(());
-            }
-
-            if output.exists()
-                && !overwrite
-                && !Confirm::new()
-                    .with_prompt(format!(
-                        "File {} exists. Overwrite?",
-                        output.to_string_lossy()
-                    ))
-                    .interact()?
-            {
-                warn!("Not overwriting existing file. Exiting.");
-                return Ok(());
-            }
-
-            let reader = BitstreamReader::open(&input)?;
-            let writer = format::output(&output)?;
-            let grain_data = read_to_string(grain)?;
-            let new_headers = parse_grain_table(&grain_data)?;
-            let mut parser: BitstreamParser<true> = BitstreamParser::with_writer(
-                reader,
-                writer,
-                Some(
-                    new_headers
-                        .into_iter()
-                        .map(|h| h.into())
-                        .collect::<Vec<_>>(),
-                ),
-            );
-
-            parser.modify_grain_headers()?;
-
-            info!("Done, wrote output file to {}", output.to_string_lossy());
-        }
-        Commands::Generate {
-            input,
-            output,
-            overwrite,
             iso,
             chroma,
+            replace,
         } => {
             if input == output {
                 error!(
@@ -270,40 +226,90 @@ pub fn main() -> Result<()> {
                 return Ok(());
             }
 
+            // Check whether the input already carries film grain headers.
+            // We only need to read the Sequence Header OBU (always in the first video packet)
+            // to check the film_grain_params_present flag, so this is effectively instant.
+            let check_reader = BitstreamReader::open(&input)?;
+            let mut check_parser: BitstreamParser<false> = BitstreamParser::new(check_reader);
+            let has_existing_grain = check_parser.film_grain_params_present()?;
+
+            if has_existing_grain && !replace {
+                info!(
+                    "Skipped: grain headers already exist in this file. Re-run with '--replace' \
+                     to replace the existing grain headers."
+                );
+                return Ok(());
+            }
+
+            // Build the grain segments from whichever source was provided.
             let reader = BitstreamReader::open(&input)?;
             let writer = format::output(&output)?;
-            // SAFETY: We extract the items we need from the struct within the unsafe block,
-            // so there's no possibility of use-after-free later.
-            let (width, height, trc, range) = unsafe {
-                let video_stream = reader.get_video_stream().unwrap();
-                let params = video_stream.parameters().as_ptr();
-                (
-                    (*params).width as u32,
-                    (*params).height as u32,
-                    (*params).color_trc,
-                    (*params).color_range,
-                )
+
+            let new_grain = match (grain, iso) {
+                (Some(grain_path), None) => {
+                    let grain_data = read_to_string(grain_path)?;
+                    let new_headers = parse_grain_table(&grain_data)?;
+                    Some(
+                        new_headers
+                            .into_iter()
+                            .map(|h| h.into())
+                            .collect::<Vec<_>>(),
+                    )
+                }
+                (None, Some(iso_value)) => {
+                    // SAFETY: We extract the items we need from the struct within the unsafe
+                    // block, so there's no possibility of use-after-free later.
+                    let (width, height, trc, range) = unsafe {
+                        let video_stream = reader.get_video_stream().unwrap();
+                        let params = video_stream.parameters().as_ptr();
+                        (
+                            (*params).width as u32,
+                            (*params).height as u32,
+                            (*params).color_trc,
+                            (*params).color_range,
+                        )
+                    };
+                    let grain_data = generate_photon_noise_params(
+                        0,
+                        u64::MAX,
+                        av1_grain::NoiseGenArgs {
+                            iso_setting: iso_value,
+                            width,
+                            height,
+                            transfer_function: if trc
+                                == AVColorTransferCharacteristic::SMPTE2084
+                            {
+                                TransferFunction::SMPTE2084
+                            } else {
+                                TransferFunction::BT1886
+                            },
+                            chroma_grain: chroma,
+                            full_range: range == AVColorRange::JPEG,
+                            random_seed: None,
+                        },
+                    );
+                    Some(vec![grain_data.into()])
+                }
+                (None, None) => {
+                    error!(
+                        "Must provide either --grain <FILE> or --iso <NUM> to specify the grain \
+                         source. Exiting."
+                    );
+                    return Ok(());
+                }
+                // clap's conflicts_with prevents both being set simultaneously, but handle it
+                // gracefully in case the logic is ever reached.
+                (Some(_), Some(_)) => {
+                    error!(
+                        "Cannot use --grain and --iso at the same time. Provide one or the \
+                         other. Exiting."
+                    );
+                    return Ok(());
+                }
             };
 
-            let grain_data = generate_photon_noise_params(
-                0,
-                u64::MAX,
-                av1_grain::NoiseGenArgs {
-                    iso_setting: iso,
-                    width,
-                    height,
-                    transfer_function: if trc == AVColorTransferCharacteristic::SMPTE2084 {
-                        TransferFunction::SMPTE2084
-                    } else {
-                        TransferFunction::BT1886
-                    },
-                    chroma_grain: chroma,
-                    full_range: range == AVColorRange::JPEG,
-                    random_seed: None,
-                },
-            );
             let mut parser: BitstreamParser<true> =
-                BitstreamParser::with_writer(reader, writer, Some(vec![grain_data.into()]));
+                BitstreamParser::with_writer(reader, writer, new_grain);
 
             parser.modify_grain_headers()?;
 
@@ -792,8 +798,11 @@ pub enum Commands {
         #[clap(long, short = 'y')]
         overwrite: bool,
     },
-    /// Applies film grain from a table file to a given AV1 video,
-    /// and outputs it at a given `output` path.
+    /// Applies film grain to a given AV1 video and outputs it at a given `output` path.
+    ///
+    /// Provide either `--grain` to use a grain table file, or `--iso` to generate
+    /// photon-noise-based grain. If the input already has film grain headers, processing
+    /// is skipped unless `--replace` is also provided.
     Apply {
         /// The AV1 file to apply grain to.
         #[clap(value_parser)]
@@ -804,28 +813,19 @@ pub enum Commands {
         /// Overwrite the output file without prompting.
         #[clap(long, short = 'y')]
         overwrite: bool,
-        /// The path to the input film grain table.
-        #[clap(long, short, value_parser)]
-        grain: PathBuf,
-    },
-    /// Generates photon-noise-based film grain based on a given ISO value,
-    /// adds it to a given AV1 video, and outputs it at a given `output` path.
-    Generate {
-        /// The AV1 file to apply grain to.
-        #[clap(value_parser)]
-        input: PathBuf,
-        /// The path to write the grain-synthed AV1 file to.
-        #[clap(long, short, value_parser)]
-        output: PathBuf,
-        /// Overwrite the output file without prompting.
-        #[clap(long, short = 'y')]
-        overwrite: bool,
-        /// ISO strength (1-4294967295) for the generated grain. Values between 100-6400 are recommended.
-        #[clap(long, value_parser = clap::value_parser!(u32).range(1..))]
-        iso: u32,
-        /// Whether to apply grain to the chroma planes as well.
-        #[clap(long)]
+        /// The path to a film grain table file to apply (mutually exclusive with --iso).
+        #[clap(long, short, value_parser, conflicts_with = "iso")]
+        grain: Option<PathBuf>,
+        /// ISO strength (1-4294967295) for photon-noise-based grain (mutually exclusive with --grain).
+        /// Values between 100-6400 are recommended.
+        #[clap(long, value_parser = clap::value_parser!(u32).range(1..), conflicts_with = "grain")]
+        iso: Option<u32>,
+        /// Whether to apply grain to the chroma planes as well (only valid with --iso).
+        #[clap(long, requires = "iso")]
         chroma: bool,
+        /// Replace any existing grain headers instead of skipping.
+        #[clap(long)]
+        replace: bool,
     },
     /// Removes all film grain from a given AV1 video,
     /// and outputs it at a given `output` path.
