@@ -23,8 +23,6 @@ pub mod tile_group;
 pub mod trace;
 pub mod util;
 
-const FF_TO_AV1_TS_SHIFT: u64 = 10_000_000 / 1_000;
-
 pub struct BitstreamParser<const WRITE: bool> {
     // Borrow checker REEEE
     reader: Option<BitstreamReader>,
@@ -102,13 +100,32 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         }
     }
 
+    fn ffmpeg_pts_to_av1_ts(pts: i64, time_base: Rational) -> u64 {
+        if pts < 0 {
+            return 0;
+        }
+
+        let pts = pts as u64;
+        let num = time_base.0 as u64;
+        let den = time_base.1 as u64;
+        if den == 0 {
+            return 0;
+        }
+
+        // Use ceiling so timestamps line up with the 100ns packet boundaries that
+        // are emitted by `aggregate_grain_headers` when generating the grain table.
+        (((pts * num * 10_000_000u64) + den - 1) / den) as u64
+    }
+
     pub fn get_grain_headers(&mut self) -> Result<&[FilmGrainHeader]> {
         if self.parsed {
             return Ok(&self.grain_headers);
         }
 
         let mut reader = self.reader.take().unwrap();
+        let stream = reader.get_video_stream()?;
         let stream_idx = reader.get_video_stream()?.index();
+        let stream_time_base = stream.time_base();
         for (stream, packet) in reader.input().packets().filter_map(Result::ok) {
             if let Some(mut input) = packet.data() {
                 if stream.index() != stream_idx {
@@ -123,9 +140,10 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     packet.dts().unwrap_or_default(),
                 );
 
-                // ffmpeg gives us the packet in milliseconds.
-                // we need it to be in 10,000,000ths of a second.
-                let packet_ts = packet.pts().unwrap_or_default() as u64 * FF_TO_AV1_TS_SHIFT;
+                let packet_ts = Self::ffmpeg_pts_to_av1_ts(
+                    packet.pts().unwrap_or_default(),
+                    stream_time_base,
+                );
                 loop {
                     let (inner_input, obu) = self
                         .parse_obu(input, packet_ts)
@@ -236,6 +254,8 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             out_chapter.metadata_mut().replace_with(metadata);
         }
 
+        let video_stream_time_base = ictx.stream(stream_idx as _).unwrap().time_base();
+
         self.writer.as_mut().unwrap().write_header()?;
 
         for (stream, mut packet) in ictx.packets().filter_map(Result::ok) {
@@ -259,9 +279,10 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     packet.dts().unwrap_or_default(),
                 );
 
-                // ffmpeg gives us the packet in milliseconds.
-                // we need it to be in 10,000,000ths of a second.
-                let packet_ts = packet.pts().unwrap_or_default() as u64 * FF_TO_AV1_TS_SHIFT;
+                let packet_ts = Self::ffmpeg_pts_to_av1_ts(
+                    packet.pts().unwrap_or_default(),
+                    video_stream_time_base,
+                );
 
                 loop {
                     let (inner_input, obu) = self
@@ -353,7 +374,10 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 packet.pts().unwrap_or_default(),
                 packet.dts().unwrap_or_default(),
             );
-            let packet_ts = packet.pts().unwrap_or_default() as u64 * FF_TO_AV1_TS_SHIFT;
+            let packet_ts = Self::ffmpeg_pts_to_av1_ts(
+                packet.pts().unwrap_or_default(),
+                stream.time_base(),
+            );
             let mut read_parser = BitstreamParser::<false> {
                 reader: None,
                 writer: None,
@@ -476,11 +500,6 @@ mod tests {
     }
 
     // ===== Part 1: Pure Unit Tests =====
-
-    #[test]
-    fn ff_to_av1_ts_shift_is_10000() {
-        assert_eq!(FF_TO_AV1_TS_SHIFT, 10_000);
-    }
 
     #[test]
     fn get_grain_headers_returns_cached_when_already_parsed() {
