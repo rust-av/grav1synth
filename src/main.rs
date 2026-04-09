@@ -19,7 +19,7 @@ use av1_grain::{
     DiffGenerator, TransferFunction, generate_photon_noise_params, parse_grain_table,
     v_frame::{frame::Frame, pixel::Pixel},
 };
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand};
 use crossterm::tty::IsTty;
 use dialoguer::Confirm;
 use ffmpeg::{
@@ -290,21 +290,10 @@ pub fn main() -> Result<()> {
                     );
                     Some(vec![grain_data.into()])
                 }
-                (None, None) => {
-                    error!(
-                        "Must provide either --grain <FILE> or --iso <NUM> to specify the grain \
-                         source. Exiting."
-                    );
-                    return Ok(());
-                }
-                // clap's conflicts_with prevents both being set simultaneously, but handle it
-                // gracefully in case the logic is ever reached.
-                (Some(_), Some(_)) => {
-                    error!(
-                        "Cannot use --grain and --iso at the same time. Provide one or the \
-                         other. Exiting."
-                    );
-                    return Ok(());
+                // The ArgGroup on the Apply variant guarantees exactly one of grain/iso is
+                // Some, so neither of these branches can be reached at runtime.
+                (None, None) | (Some(_), Some(_)) => {
+                    unreachable!("clap ArgGroup enforces exactly one of --grain or --iso")
                 }
             };
 
@@ -778,6 +767,11 @@ fn aggregate_grain_headers(
 }
 
 #[derive(Parser, Debug)]
+#[command(
+    about = "Grain synth analyzer and editor for AV1 files",
+    version,
+    flatten_help = true,
+)]
 pub struct Args {
     #[clap(subcommand)]
     command: Commands,
@@ -785,24 +779,33 @@ pub struct Args {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Outputs a film grain table corresponding to a given AV1 video,
-    /// or reports if there is no film grain information.
+    /// Read the film grain table from an AV1 video and write it to a file.
+    ///
+    /// Reports if the video has no film grain synthesis enabled.
     Inspect {
         /// The AV1 file to inspect.
         #[clap(value_parser)]
         input: PathBuf,
-        /// The path to the output film grain table.
+        /// The path to write the film grain table to.
         #[clap(long, short, value_parser)]
         output: PathBuf,
         /// Overwrite the output file without prompting.
         #[clap(long, short = 'y')]
         overwrite: bool,
     },
-    /// Applies film grain to a given AV1 video and outputs it at a given `output` path.
+    /// Applies film grain from a provided grain-table or generated photon-noise-based grain to a given AV1 video and outputs it at a given `output` path.
     ///
-    /// Provide either `--grain` to use a grain table file, or `--iso` to generate
-    /// photon-noise-based grain. If the input already has film grain headers, processing
-    /// is skipped unless `--replace` is also provided.
+    /// Exactly one grain source must be provided:
+    ///   --grain <FILE>   apply grain from a table file
+    ///   --iso <NUM>      generate photon-noise-based grain (luma only by default add --chroma to apply color grain)
+    ///
+    /// If the input already has film grain headers the command skips by default.
+    /// Pass --replace to overwrite existing grain instead.
+    #[command(group(
+        ArgGroup::new("grain_source")
+            .required(true)
+            .args(["grain", "iso"])
+    ))]
     Apply {
         /// The AV1 file to apply grain to.
         #[clap(value_parser)]
@@ -813,44 +816,46 @@ pub enum Commands {
         /// Overwrite the output file without prompting.
         #[clap(long, short = 'y')]
         overwrite: bool,
-        /// The path to a film grain table file to apply (mutually exclusive with --iso).
-        #[clap(long, short, value_parser, conflicts_with = "iso")]
+        /// Path to a film grain table file.
+        /// Cannot be used together with --iso.
+        #[clap(long, short, value_parser)]
         grain: Option<PathBuf>,
-        /// ISO strength (1-4294967295) for photon-noise-based grain (mutually exclusive with --grain).
-        /// Values between 100-6400 are recommended.
-        #[clap(long, value_parser = clap::value_parser!(u32).range(1..), conflicts_with = "grain")]
+        /// ISO strength for photon-noise-based grain (1–4294967295; 100–6400 recommended).
+        /// Cannot be used together with --grain.
+        #[clap(long, value_parser = clap::value_parser!(u32).range(1..))]
         iso: Option<u32>,
-        /// Whether to apply grain to the chroma planes as well (only valid with --iso).
+        /// Apply photon-noise grain to chroma planes as well as luma (only valid with --iso).
         #[clap(long, requires = "iso")]
         chroma: bool,
-        /// Replace any existing grain headers instead of skipping.
+        /// Overwrite any existing grain headers in the input.
+        /// Without this flag the command skips files that already have grain.
         #[clap(long)]
         replace: bool,
     },
-    /// Removes all film grain from a given AV1 video,
-    /// and outputs it at a given `output` path.
+    /// Strip all film grain synthesis from an AV1 video.
     Remove {
         /// The AV1 file to remove grain from.
         #[clap(value_parser)]
         input: PathBuf,
-        /// The path to write the non-grain-synthed AV1 file to.
+        /// The path to write the grain-free AV1 file to.
         #[clap(long, short, value_parser)]
         output: PathBuf,
         /// Overwrite the output file without prompting.
         #[clap(long, short = 'y')]
         overwrite: bool,
     },
-    /// Compares a source video and a denoised video and generates a film grain
-    /// table based on the difference between them. This will provide the most
-    /// accurate estimation of source film grain.
+    /// Generate a film grain table by diffing a source video against a denoised copy.
+    ///
+    /// This produces the most accurate grain table because it measures the actual
+    /// noise present in the source rather than estimating it.
     Diff {
-        /// The untouched source file to inspect.
+        /// The untouched source file.
         #[clap(value_parser)]
         source: PathBuf,
-        /// The denoised file to inspect.
+        /// The denoised version of the source file.
         #[clap(value_parser)]
         denoised: PathBuf,
-        /// The path to the output film grain table.
+        /// The path to write the output film grain table to.
         #[clap(long, short, value_parser)]
         output: PathBuf,
         /// Overwrite the output file without prompting.
