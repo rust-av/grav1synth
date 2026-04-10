@@ -114,7 +114,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
 
         // Use ceiling so timestamps line up with the 100ns packet boundaries that
         // are emitted by `aggregate_grain_headers` when generating the grain table.
-        (((pts * num * 10_000_000u64) + den - 1) / den) as u64
+        (pts * num * 10_000_000u64).div_ceil(den)
     }
 
     pub fn get_grain_headers(&mut self) -> Result<&[FilmGrainHeader]> {
@@ -140,10 +140,8 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     packet.dts().unwrap_or_default(),
                 );
 
-                let packet_ts = Self::ffmpeg_pts_to_av1_ts(
-                    packet.pts().unwrap_or_default(),
-                    stream_time_base,
-                );
+                let packet_ts =
+                    Self::ffmpeg_pts_to_av1_ts(packet.pts().unwrap_or_default(), stream_time_base);
                 loop {
                     let (inner_input, obu) = self
                         .parse_obu(input, packet_ts)
@@ -374,10 +372,8 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 packet.pts().unwrap_or_default(),
                 packet.dts().unwrap_or_default(),
             );
-            let packet_ts = Self::ffmpeg_pts_to_av1_ts(
-                packet.pts().unwrap_or_default(),
-                stream.time_base(),
-            );
+            let packet_ts =
+                Self::ffmpeg_pts_to_av1_ts(packet.pts().unwrap_or_default(), stream.time_base());
             let mut read_parser = BitstreamParser::<false> {
                 reader: None,
                 writer: None,
