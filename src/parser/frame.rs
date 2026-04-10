@@ -619,7 +619,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                         .as_mut()
                         .and_then(|segments| {
                             let mut segment = segments.iter_mut().find(|seg| {
-                                seg.start_time <= packet_ts && seg.end_time >= packet_ts
+                                seg.start_time <= packet_ts && packet_ts < seg.end_time
                             });
                             if let Some(segment) = segment.as_mut() {
                                 segment.grain_params.grain_seed = segment
