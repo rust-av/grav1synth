@@ -33,9 +33,6 @@ pub struct FilmGrainParams {
     /// of film grain.
     ///
     /// Accepts values between `8..=11`.
-    ///
-    /// Fun story: This actually does not seem to ever be used anywhere.
-    /// So we'll just set it to 8 I guess.
     pub scaling_shift: u8,
 
     /// A factor specifying how many AR coefficients are provided,
@@ -211,7 +208,7 @@ pub fn film_grain_params<'a>(
         (input, num_cb_points, num_cr_points)
     };
 
-    let (input, _grain_scaling_minus_8) = trace_take_u8(input, ctx, 2, "grain_scaling_minus_8")?;
+    let (input, grain_scaling_minus_8) = trace_take_u8(input, ctx, 2, "grain_scaling_minus_8")?;
     let (mut input, ar_coeff_lag) = trace_take_u8(input, ctx, 2, "ar_coeff_lag")?;
     let mut ar_coeffs_y = ArrayVec::new();
     let mut ar_coeffs_cb = ArrayVec::new();
@@ -277,7 +274,7 @@ pub fn film_grain_params<'a>(
             scaling_points_y,
             scaling_points_cb,
             scaling_points_cr,
-            scaling_shift: 8,
+            scaling_shift: grain_scaling_minus_8 + 8,
             ar_coeff_lag,
             ar_coeffs_y,
             ar_coeffs_cb,
