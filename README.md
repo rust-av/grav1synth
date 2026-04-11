@@ -23,11 +23,13 @@ Reads `my_encode.mkv` and outputs a film grain table file at `grain_file.txt`
 
 ### `grav1synth apply my_encode.mkv -o grainy_encode.mkv -g grain_file.txt`
 
-Reads `my_encode.mkv`, adds film grain to it based on `grain_file.txt`, and outputs the video to `grainy_encode.mkv`
+Reads `my_encode.mkv`, applies film grain from `grain_file.txt`, and outputs the video to `grainy_encode.mkv`.
 
-### `grav1synth generate my_encode.mkv -o grainy_encode.mkv --iso 400 --chroma`
+### `grav1synth apply my_encode.mkv -o grainy_encode.mkv --iso 400 --chroma`
 
-Reads `my_encode.mkv`, adds photon-noise-based film grain to it based on the strength provided by `--iso` (up to `4294967295`), and outputs the video to `grainy_encode.mkv`. By default applies grain to only the luma plane. `--chroma` enables grain on chroma planes as well.
+Reads `my_encode.mkv`, generates photon-noise-based film grain at the strength given by `--iso` (up to `4294967295`), and outputs the video to `grainy_encode.mkv`. By default grain is applied to the luma plane only; `--chroma` enables grain on chroma planes as well.
+
+In both forms, if the input already has film grain headers the command will print a notice and skip processing — add `--replace` to overwrite existing grain instead. This makes it safe to use in automated workflows where you want to protect videos that already have grain while still applying grain to those that do not.
 
 ### `grav1synth remove my_encode.mkv -o clean_encode.mkv`
 
