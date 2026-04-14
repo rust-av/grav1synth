@@ -117,6 +117,50 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         (pts * num * 10_000_000u64).div_ceil(den)
     }
 
+    /// Returns `true` if the `film_grain_params_present` flag is set in the stream's Sequence
+    /// Header, and `false` otherwise.
+    ///
+    /// This reads only as far as the first Sequence Header OBU — typically the very start of
+    /// the first video packet — so it is far faster than [`Self::get_grain_headers`] for a
+    /// simple presence check.
+    pub fn film_grain_params_present(&mut self) -> Result<bool> {
+        // Reuse an already-parsed sequence header if available.
+        if let Some(ref sh) = self.sequence_header {
+            return Ok(sh.film_grain_params_present);
+        }
+
+        let mut reader = self.reader.take().unwrap();
+        let stream_idx = reader.get_video_stream()?.index();
+
+        'packets: for (stream, packet) in reader.input().packets().filter_map(Result::ok) {
+            let Some(mut input) = packet.data() else {
+                break;
+            };
+            if stream.index() != stream_idx {
+                continue;
+            }
+            loop {
+                let (remaining, obu) = self
+                    .parse_obu(input, 0)
+                    .finish()
+                    .map_err(|e| anyhow!("{e:?}"))?;
+                input = remaining;
+                if let Some(Obu::SequenceHeader(sh)) = obu {
+                    self.sequence_header = Some(sh);
+                    break 'packets;
+                }
+                if input.is_empty() {
+                    break;
+                }
+            }
+        }
+
+        Ok(self
+            .sequence_header
+            .as_ref()
+            .map_or(false, |sh| sh.film_grain_params_present))
+    }
+
     pub fn get_grain_headers(&mut self) -> Result<&[FilmGrainHeader]> {
         if self.parsed {
             return Ok(&self.grain_headers);

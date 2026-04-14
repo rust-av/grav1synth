@@ -1,3 +1,11 @@
+## Unreleased
+
+- Merge `apply` and `generate` into a single `apply` command. `--grain <FILE>` applies
+  table-based grain; `--iso <NUM>` (with optional `--chroma`) applies photon-noise-based grain.
+- `apply` now checks for existing grain headers before writing. If grain is already present it
+  prints a notice and skips, unless `--replace` is also provided. This makes it safe to use in
+  automated workflows where existing grain should be preserved.
+
 ## Version 0.2.0
 
 - Upgrade all of the internals to the latest rust-av crates
