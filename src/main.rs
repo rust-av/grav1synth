@@ -1,6 +1,7 @@
 mod filters;
 mod misc;
 pub mod parser;
+pub mod presets;
 pub mod reader;
 
 use std::{
@@ -201,6 +202,7 @@ pub fn main() -> Result<()> {
             output,
             overwrite,
             grain,
+            preset,
             iso,
             chroma,
             replace,
@@ -245,8 +247,8 @@ pub fn main() -> Result<()> {
             let reader = BitstreamReader::open(&input)?;
             let writer = format::output(&output)?;
 
-            let new_grain = match (grain, iso) {
-                (Some(grain_path), None) => {
+            let new_grain = match (grain, preset, iso) {
+                (Some(grain_path), None, None) => {
                     let grain_data = read_to_string(grain_path)?;
                     let new_headers = parse_grain_table(&grain_data)?;
                     Some(
@@ -256,7 +258,34 @@ pub fn main() -> Result<()> {
                             .collect::<Vec<_>>(),
                     )
                 }
-                (None, Some(iso_value)) => {
+                (None, Some(preset_name), None) => {
+                    let grain_data = presets::get_preset(&preset_name).ok_or_else(|| {
+                        // Enumerate valid names: standalones + format bases + format+suffix combos.
+                        let mut known: Vec<String> = presets::STANDALONE_PRESETS
+                            .iter()
+                            .map(|p| p.name.to_string())
+                            .collect();
+                        for fp in presets::FORMAT_PRESETS {
+                            known.push(fp.name.to_string());
+                            for stock in &presets::FILM_STOCKS[1..] {
+                                known.push(format!("{}{}", fp.name, stock.suffix));
+                            }
+                        }
+                        anyhow!(
+                            "Unknown preset '{preset_name}'. Valid presets are:\n  {}\n\
+                             Run `grav1synth presets` for the full list.",
+                            known.join(", ")
+                        )
+                    })?;
+                    let new_headers = parse_grain_table(grain_data)?;
+                    Some(
+                        new_headers
+                            .into_iter()
+                            .map(|h| h.into())
+                            .collect::<Vec<_>>(),
+                    )
+                }
+                (None, None, Some(iso_value)) => {
                     // SAFETY: We extract the items we need from the struct within the unsafe
                     // block, so there's no possibility of use-after-free later.
                     let (width, height, trc, range) = unsafe {
@@ -290,11 +319,11 @@ pub fn main() -> Result<()> {
                     );
                     Some(vec![grain_data.into()])
                 }
-                // The ArgGroup on the Apply variant guarantees exactly one of grain/iso is
-                // Some, so neither of these branches can be reached at runtime.
-                (None, None) | (Some(_), Some(_)) => {
-                    unreachable!("clap ArgGroup enforces exactly one of --grain or --iso")
-                }
+                // The ArgGroup on the Apply variant guarantees exactly one of grain/preset/iso is
+                // Some, so none of the remaining branches can be reached at runtime.
+                _ => unreachable!(
+                    "clap ArgGroup enforces exactly one of --grain, --preset, or --iso"
+                ),
             };
 
             let mut parser: BitstreamParser<true> =
@@ -303,6 +332,40 @@ pub fn main() -> Result<()> {
             parser.modify_grain_headers()?;
 
             info!("Done, wrote output file to {}", output.to_string_lossy());
+        }
+        Commands::Presets => {
+            println!("Built-in film grain presets (use with `apply --preset <NAME>`):\n");
+
+            println!("Available Presets:\n");
+            for p in presets::STANDALONE_PRESETS {
+                println!("  {}  ({})", p.name, p.description);
+            }
+            for fp in presets::FORMAT_PRESETS {
+                println!("  {}  ({})", fp.name, fp.description);
+            }
+
+            println!();
+            println!("Example: grav1synth apply input.mkv -o output.mkv --preset 16mm");
+
+            println!();
+            println!();
+            // List the format preset names for the modifier section.
+            let format_names = presets::FORMAT_PRESETS
+                .iter()
+                .map(|fp| fp.name)
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("Available film stock modifiers (applies to {format_names}):\n");
+            for stock in presets::FILM_STOCKS {
+                if stock.suffix.is_empty() {
+                    println!("       {}  (default)", stock.description);
+                } else {
+                    println!("  {}  {}", stock.suffix, stock.description);
+                }
+            }
+
+            println!();
+            println!("Example: grav1synth apply input.mkv -o output.mkv --preset 16mm-3");
         }
         Commands::Remove {
             input,
@@ -793,18 +856,20 @@ pub enum Commands {
         #[clap(long, short = 'y')]
         overwrite: bool,
     },
-    /// Applies film grain from a provided grain-table or generated photon-noise-based grain to a given AV1 video and outputs it at a given `output` path.
+    /// Applies film grain from a provided grain-table, a built-in preset, or generated
+    /// photon-noise-based grain to a given AV1 video and outputs it at a given `output` path.
     ///
     /// Exactly one grain source must be provided:
-    ///   --grain <FILE>   apply grain from a table file
-    ///   --iso <NUM>      generate photon-noise-based grain (luma only by default add --chroma to apply color grain)
+    ///   --grain <FILE>     apply grain from a table file
+    ///   --preset <NAME>    apply a built-in film stock preset (see `grav1synth presets`)
+    ///   --iso <NUM>        generate photon-noise-based grain (luma only; add --chroma for colour)
     ///
     /// If the input already has film grain headers the command skips by default.
     /// Pass --replace to overwrite existing grain instead.
     #[command(group(
         ArgGroup::new("grain_source")
             .required(true)
-            .args(["grain", "iso"])
+            .args(["grain", "preset", "iso"])
     ))]
     Apply {
         /// The AV1 file to apply grain to.
@@ -817,11 +882,16 @@ pub enum Commands {
         #[clap(long, short = 'y')]
         overwrite: bool,
         /// Path to a film grain table file.
-        /// Cannot be used together with --iso.
+        /// Cannot be used together with --preset or --iso.
         #[clap(long, short, value_parser)]
         grain: Option<PathBuf>,
+        /// Name of a built-in film stock preset (case-insensitive).
+        /// Run `grav1synth presets` to see all available names.
+        /// Cannot be used together with --grain or --iso.
+        #[clap(long, short)]
+        preset: Option<String>,
         /// ISO strength for photon-noise-based grain (1–4294967295; 100–6400 recommended).
-        /// Cannot be used together with --grain.
+        /// Cannot be used together with --grain or --preset.
         #[clap(long, value_parser = clap::value_parser!(u32).range(1..))]
         iso: Option<u32>,
         /// Apply photon-noise grain to chroma planes as well as luma (only valid with --iso).
@@ -832,6 +902,8 @@ pub enum Commands {
         #[clap(long)]
         replace: bool,
     },
+    /// List all built-in film grain presets that can be used with `apply --preset`.
+    Presets,
     /// Strip all film grain synthesis from an AV1 video.
     Remove {
         /// The AV1 file to remove grain from.
