@@ -251,24 +251,7 @@ pub fn main() -> Result<()> {
             let new_grain = match (grain, preset, iso) {
                 (Some(grain_path), None, None) => {
                     let grain_data = read_to_string(grain_path)?;
-                    let mut new_headers = parse_grain_table(&grain_data)?;
-                    
-                    // Only override seeds if strict mode is enabled
-                    if strict {
-                        // Extract the actual seed values from the file to override av1_grain's values
-                        if let Ok(file_seeds) = extract_seeds_from_grain_table_text(&grain_data) {
-                            for (file_start, file_end, file_seed) in file_seeds {
-                                // Find matching segments and update their seeds
-                                for header in &mut new_headers {
-                                    if header.start_time == file_start && header.end_time == file_end {
-                                        header.random_seed = file_seed;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    
+                    let new_headers = parse_grain_table(&grain_data)?;
                     Some(
                         new_headers
                             .into_iter()
@@ -845,27 +828,6 @@ fn aggregate_grain_headers(
         cur_packet_end = cur_packet_end_f.ceil() as u64;
         acc
     })
-}
-
-/// Parses seed values from the grain table file format and returns them indexed by segment.
-/// The grain table file contains "E start_time end_time active seed flags" lines.
-fn extract_seeds_from_grain_table_text(data: &str) -> Result<Vec<(u64, u64, u16)>> {
-    let mut seeds = Vec::new();
-    for line in data.lines() {
-        let line = line.trim();
-        if !line.starts_with('E') {
-            continue;
-        }
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 5 {
-            continue;
-        }
-        let start_time: u64 = parts[1].parse()?;
-        let end_time: u64 = parts[2].parse()?;
-        let seed: u16 = parts[4].parse()?;
-        seeds.push((start_time, end_time, seed));
-    }
-    Ok(seeds)
 }
 
 #[derive(Parser, Debug)]
