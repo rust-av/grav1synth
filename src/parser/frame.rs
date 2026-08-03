@@ -621,11 +621,15 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                             let mut segment = segments.iter_mut().find(|seg| {
                                 seg.start_time <= packet_ts && packet_ts < seg.end_time
                             });
-                            if let Some(segment) = segment.as_mut() {
-                                segment.grain_params.grain_seed = segment
-                                    .grain_params
-                                    .grain_seed
-                                    .wrapping_add(DEFAULT_GRAIN_SEED);
+                            // When not in strict mode, add DEFAULT_GRAIN_SEED to the seed
+                            // for playback compatibility
+                            if !self.strict_mode {
+                                if let Some(segment) = segment.as_mut() {
+                                    segment.grain_params.grain_seed = segment
+                                        .grain_params
+                                        .grain_seed
+                                        .wrapping_add(DEFAULT_GRAIN_SEED);
+                                }
                             }
                             segment
                         })
@@ -3968,6 +3972,7 @@ mod tests {
             big_ref_valid: Default::default(),
             big_order_hints: Default::default(),
             grain_headers: Vec::new(),
+            strict_mode: false,
         }
     }
 
@@ -4604,7 +4609,42 @@ mod tests {
                 assert_eq!(
                     params.grain_seed,
                     100u16.wrapping_add(DEFAULT_GRAIN_SEED),
-                    "grain seed should be original + DEFAULT_GRAIN_SEED"
+                    "grain seed should be original + DEFAULT_GRAIN_SEED when not in strict mode"
+                );
+            }
+            other => panic!("expected UpdateGrain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn uncompressed_header_write_injects_grain_from_matching_segment_strict_mode() {
+        let mut parser = make_parser::<true>();
+        parser.strict_mode = true;
+        let mut seq = minimal_sequence_header();
+        seq.film_grain_params_present = true;
+        seq.new_film_grain_state = true;
+        parser.sequence_header = Some(seq);
+        let mut grain = minimal_grain_params();
+        grain.grain_seed = 100;
+        parser.incoming_grain_header = Some(vec![GrainTableSegment {
+            start_time: 0,
+            end_time: 1000,
+            grain_params: grain,
+        }]);
+        // Build key frame bits + 1 bit for apply_grain=false (original stream)
+        let mut bits = build_minimal_key_frame_bits(true);
+        bits.push_bool(false); // apply_grain = false in original stream
+        let (data, _) = with_trailer(bits);
+        let (_, result) = parser
+            .parse_frame_header(&data, simple_obu_header(), 500, 0, false)
+            .unwrap();
+        let header = result.unwrap();
+        match &header.film_grain_params {
+            FilmGrainHeader::UpdateGrain(params) => {
+                assert_eq!(
+                    params.grain_seed,
+                    100u16,
+                    "grain seed should remain unchanged in strict mode"
                 );
             }
             other => panic!("expected UpdateGrain, got {other:?}"),

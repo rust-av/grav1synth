@@ -40,6 +40,7 @@ pub struct BitstreamParser<const WRITE: bool> {
     big_ref_valid: [bool; NUM_REF_FRAMES],
     big_order_hints: [u64; RefType::Last as usize + REFS_PER_FRAME],
     grain_headers: Vec<FilmGrainHeader>,
+    strict_mode: bool,
 }
 
 impl<const WRITE: bool> BitstreamParser<WRITE> {
@@ -67,6 +68,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             big_order_hints: Default::default(),
             grain_headers: Default::default(),
             incoming_grain_header: None,
+            strict_mode: false,
         }
     }
 
@@ -75,6 +77,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         reader: BitstreamReader,
         writer: Output,
         incoming_frame_header: Option<Vec<GrainTableSegment>>,
+        strict_mode: bool,
     ) -> Self {
         assert!(
             WRITE,
@@ -97,6 +100,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             big_ref_valid: Default::default(),
             big_order_hints: Default::default(),
             grain_headers: Default::default(),
+            strict_mode,
         }
     }
 
@@ -441,6 +445,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                 big_ref_valid: self.big_ref_valid,
                 big_order_hints: self.big_order_hints,
                 grain_headers: Vec::new(),
+                strict_mode: false,
             };
             let mut input = data;
             loop {
@@ -496,6 +501,7 @@ mod tests {
             big_ref_valid: Default::default(),
             big_order_hints: Default::default(),
             grain_headers: Vec::new(),
+            strict_mode: false,
         }
     }
 
@@ -518,6 +524,7 @@ mod tests {
             big_ref_valid: Default::default(),
             big_order_hints: Default::default(),
             grain_headers: headers,
+            strict_mode: false,
         }
     }
 
