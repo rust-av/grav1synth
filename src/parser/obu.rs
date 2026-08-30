@@ -128,18 +128,11 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     pre_len - input.len()
                 );
                 if obu_header.has_size_field {
-                    if WRITE {
-                        let bytes_written = self.packet_out.len() - packet_start_len;
-                        let bytes_taken = pre_input.len() - input.len();
-                        let obu_size_change = bytes_written as isize - bytes_taken as isize;
-                        if obu_size_change != 0 {
-                            self.adjust_obu_size(
-                                obu_size_pos,
-                                leb_size,
-                                (obu_size as isize + obu_size_change) as usize,
-                            );
-                        }
-                    }
+                    // Sequence-header write mode only toggles one bit and is
+                    // length-preserving. The syntax parser may stop before
+                    // trailing/alignment bytes, so do not infer a new obu_size
+                    // from syntax bytes consumed.
+                    // Sequence-header rewriting is length-preserving.
                     let adjustment = obu_size - (pre_len - input.len());
                     input = &input[adjustment..];
                 }

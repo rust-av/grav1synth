@@ -399,18 +399,23 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             let (input, enable_cdef) = trace_bool(input, ctx, "enable_cdef")?;
             let (input, enable_restoration) = trace_bool(input, ctx, "enable_restoration")?;
             let (input, color_config) = color_config(input, ctx, seq_profile)?;
-            let fgp_bit_offset = input.1;
+            // TraceCtx::pos() is absolute within the OBU. Convert the
+            // Film Grain flag location to a payload-relative byte/bit
+            // position instead of assuming it is in the final byte.
+            //
+            // Some valid Sequence Header OBUs have trailing/alignment
+            // bytes after the parsed syntax. In those streams,
+            // last_mut() modifies the wrong byte.
+            let fgp_payload_bit_pos = ctx.pos(input) - obu_bit_offset;
+            let fgp_byte_offset = fgp_payload_bit_pos / 8;
+            let fgp_bit_offset = fgp_payload_bit_pos % 8;
+
             let (input, film_grain_params_present) =
                 trace_bool(input, ctx, "film_grain_params_present")?;
 
             if WRITE {
-                // Toggle the film grain params present flag
-                // based on whether we are adding or removing film grain.
-                // We use the bit offset captured BEFORE parsing the flag so
-                // it points at the flag itself rather than one past it.
-                obu_out
-                    .last_mut()
-                    .unwrap()
+                debug_assert!(fgp_byte_offset < obu_out.len());
+                obu_out[fgp_byte_offset]
                     .set_bit(7 - fgp_bit_offset, self.incoming_grain_header.is_some());
                 self.packet_out.extend_from_slice(&obu_out);
                 debug!(
