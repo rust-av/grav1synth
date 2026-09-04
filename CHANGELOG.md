@@ -1,5 +1,6 @@
 ## Unreleased
 
+- Support ffmpeg 9.0
 - Merge `apply` and `generate` into a single `apply` command. `--grain <FILE>` applies
   table-based grain; `--iso <NUM>` (with optional `--chroma`) applies photon-noise-based grain.
 - `apply` now checks for existing grain headers before writing. If grain is already present it
