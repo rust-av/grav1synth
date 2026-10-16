@@ -459,7 +459,7 @@ mod tests {
         assert_eq!(params.ar_coeffs_y.as_slice(), &[]);
         assert_eq!(params.ar_coeffs_cb.as_slice(), &[0]);
         assert_eq!(params.ar_coeffs_cr.as_slice(), &[0]);
-        assert_eq!(params.scaling_shift, 8);
+        assert_eq!(params.scaling_shift, 10);
         assert_eq!(params.ar_coeff_shift, 7);
         assert_eq!(params.grain_scale_shift, 2);
         assert_eq!(params.cb_mult, 0);

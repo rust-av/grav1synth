@@ -273,13 +273,13 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             ost.metadata_mut().replace_with(ist_metadata);
             ost.set_sample_aspect_ratio(ist_sar);
             // SAFETY: We need to set codec_tag to 0, copy disposition flags, set the stream's
-            // time_base, and copy r_frame_rate (critical for IVF and other containers that don't 
+            // time_base, and copy r_frame_rate (critical for IVF and other containers that don't
             // store framerate in their header). There's no high level API for these (yet).
             unsafe {
                 let ist_stream = ist.as_ptr();
                 let ost_stream = ost.as_mut_ptr();
                 let ost_params = ost.parameters_mut().as_mut_ptr();
-                
+
                 (*ost_params).codec_tag = 0;
                 (*ost_stream).r_frame_rate = (*ist_stream).r_frame_rate;
                 (*ost_stream).time_base = (*ist_stream).time_base;

@@ -57,8 +57,8 @@ pub const FORMAT_PRESETS: &[FormatPreset] = &[
         name: "16mm",
         description: "Based on 16mm film size",
         stocks: [
-            include_str!("../grain-files/16mm_FJ_8543_VD.txt"),  // default
-            include_str!("../grain-files/16mm_FJ_8553_ET.txt"),   // -1
+            include_str!("../grain-files/16mm_FJ_8543_VD.txt"), // default
+            include_str!("../grain-files/16mm_FJ_8553_ET.txt"), // -1
             include_str!("../grain-files/16mm_KD_5207_Vis3.txt"), // -2
             include_str!("../grain-files/16mm_KD_5213_Vis3.txt"), // -3
         ],
@@ -139,4 +139,3 @@ pub fn get_preset(name: &str) -> Option<&'static str> {
 
     None
 }
-
