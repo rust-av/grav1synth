@@ -158,7 +158,7 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         Ok(self
             .sequence_header
             .as_ref()
-            .map_or(false, |sh| sh.film_grain_params_present))
+            .is_some_and(|sh| sh.film_grain_params_present))
     }
 
     pub fn get_grain_headers(&mut self) -> Result<&[FilmGrainHeader]> {

@@ -1,14 +1,14 @@
-/// Built-in film grain presets embedded directly into the binary at compile time.
-///
-/// Presets are split into two groups:
-///
-/// **Standalone** presets (`Super8`, `MaxMid`) are used exactly as named.
-///
-/// **Format** presets (`16mm`, `Classic35`, `Modern35`) support an optional film stock
-/// modifier suffix (`-1`, `-2`, `-3`). Omitting the suffix selects the default stock
-/// (Fujifilm Eterna 250D). Example valid names: `16mm`, `16mm-1`, `Classic35-2`.
-///
-/// All lookups are case-insensitive.
+//! Built-in film grain presets embedded directly into the binary at compile time.
+//!
+//! Presets are split into two groups:
+//!
+//! **Standalone** presets (`Super8`, `MaxMid`) are used exactly as named.
+//!
+//! **Format** presets (`16mm`, `Classic35`, `Modern35`) support an optional film stock
+//! modifier suffix (`-1`, `-2`, `-3`). Omitting the suffix selects the default stock
+//! (Fujifilm Eterna 250D). Example valid names: `16mm`, `16mm-1`, `Classic35-2`.
+//!
+//! All lookups are case-insensitive.
 
 // ── Film stock modifier table ─────────────────────────────────────────────────
 
