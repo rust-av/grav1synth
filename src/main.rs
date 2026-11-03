@@ -206,6 +206,7 @@ pub fn main() -> Result<()> {
             iso,
             chroma,
             replace,
+            strict,
         } => {
             if input == output {
                 error!(
@@ -325,7 +326,7 @@ pub fn main() -> Result<()> {
             };
 
             let mut parser: BitstreamParser<true> =
-                BitstreamParser::with_writer(reader, writer, new_grain);
+                BitstreamParser::with_writer(reader, writer, new_grain, strict);
 
             parser.modify_grain_headers()?;
 
@@ -394,7 +395,7 @@ pub fn main() -> Result<()> {
             let reader = BitstreamReader::open(&input)?;
             let writer = format::output(&output)?;
             let mut parser: BitstreamParser<true> =
-                BitstreamParser::with_writer(reader, writer, None);
+                BitstreamParser::with_writer(reader, writer, None, false);
 
             parser.modify_grain_headers()?;
 
@@ -899,6 +900,10 @@ pub enum Commands {
         /// Without this flag the command skips files that already have grain.
         #[clap(long)]
         replace: bool,
+        /// Strictly use seed values from grain table files without modification.
+        /// When not set, seeds are adjusted for playback compatibility.
+        #[clap(long)]
+        strict: bool,
     },
     /// List all built-in film grain presets that can be used with `apply --preset`.
     Presets,

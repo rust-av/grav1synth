@@ -93,6 +93,7 @@ mod tests {
             big_ref_valid: Default::default(),
             big_order_hints: Default::default(),
             grain_headers: Vec::new(),
+            strict_mode: false,
         }
     }
 
