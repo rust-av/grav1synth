@@ -6,6 +6,7 @@
 - `apply` now checks for existing grain headers before writing. If grain is already present it
   prints a notice and skips, unless `--replace` is also provided. This makes it safe to use in
   automated workflows where existing grain should be preserved.
+- `apply` clips grain to 16–235 only in limited-range streams; full-range video was clamped to it
 
 ## Version 0.2.0
 
